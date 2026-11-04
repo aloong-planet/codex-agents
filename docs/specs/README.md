@@ -1,0 +1,13 @@
+# 功能规格
+
+`docs/specs/` 保存仍然有效的功能需求全景：问题、用户故事、失败模式、抽象实现决策、测试 seam 和明确不做。每个 spec 的 slug 与未来或现有 `docs/features/` 条目一一对应；功能尚未实现时用可验证的 `Pending:` 注记，不把计划中的能力写成已存在。
+
+spec 就地维护现行描述，不记录变更史，不引用临时票、分支或原型路径。架构取舍只引用 ADR 编号；实现完成后应与 feature、ADR 和 `CONTEXT.md` 一致。
+
+| 功能 | 状态 |
+|---|---|
+| [Daily AI news](daily-ai-news.md) | Configurable current-source selection, candidate/body validation, complete prose, durable summary reuse, explicit shortages, independent archive recovery and chronological cached delivery |
+| [微信工作流与运行面板](workflow-runs.md) | 主微信会话可直接查找、读取、修改和发送已授权文件，并保留可恢复的外发与待选运行；message/results 主流程已实现，完整组合验收与 TurnDriver 封装仍未收口 |
+| [工作流模块权限](workflow-module-permissions.md) | 设置页保存读写授权，文件工具在专用受限进程中执行且始终禁止文件执行 |
+| [Scheduled tasks](scheduled-tasks.md) | One-time reminders deployed with normal phone receipt confirmed; completion/history queries deployed, user query acceptance confirmed; one-time edit/pause/run-now/delete deployed, seven-step phone acceptance confirmed; recurrence deployed; six-step recipient-facing wording and interval lifecycle phone handoff accepted; calendar receipt, invalid-period and re-enable phone checks also accepted; researched text deployed with web/model-fixture verification and normal automatic GitHub Top 5 phone delivery accepted; research disable, edit, manual execution and deletion with retained history are user-confirmed on 2026-10-16; standalone query/clarification phone steps pending; daily-news cutover and resilience deployed as 20261016-news-0968ee7 with verified ownership and data preservation; HN post-delivery disclosure defect remains open; task-authority repair deployed as 20261017-task-authority-0e0e394 with current HN Top 7 settings preserved; 2026-10-17 history/current-Top-N repair is local; 2026-10-18 permanent-summary and configurable detail-retention follow-up passes local deterministic gates; actual-model verification awaits scoped authorization, deployment and repeat phone acceptance remain pending |
+| [Personal Weixin and Feishu channels](channel-switching.md) | Simultaneous owner-bound channels, isolated conversations and creation-channel notifications; real-device acceptance remains separate |

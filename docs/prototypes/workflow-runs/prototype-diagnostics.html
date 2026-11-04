@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<!-- 独立诊断 Tab：验证安全摘要与临时详细采集的呈现。零后端、全模拟、不持久化。
+     底部 data-demo-harness 是演示基建（模拟新调用、到期、空列表），不是产品控件。
+     真实页面由调用事件、服务端期限和缓存状态驱动。本页只覆盖现行中文深色界面。
+     15 分钟为待确认的演示期限，不是已落地的产品约束。 -->
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>诊断 · 界面原型</title>
+<style>
+:root { color-scheme:dark; font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+ --canvas:#17191e;--shell:#30333c;--card:#292c33;--well:#20242c;--ink:#f4f5f8;--muted:#b4b7c1;
+ --line:#454b57;--blue:#6cb5ff;--success:#59d78d;--warning:#ffb64d;--danger:#ff7777;
+ --hover:#303e50;--selected:#254462;--focus:#8fc7ff;--shade:#101217d9;--radius:18px; }
+*{box-sizing:border-box} [hidden]{display:none!important} body{margin:0;background:var(--canvas);color:var(--ink)}
+button,select{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 13px;cursor:pointer}
+button:hover:not(:disabled){background:var(--hover)} button:active:not(:disabled){background:var(--selected)}
+button:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--focus);outline-offset:-2px}
+button:disabled{opacity:.5;cursor:default} a{color:var(--blue)} h1,h2,h3,p{margin:0} h1{font-size:22px}h2{font-size:20px}h3{font-size:15px}
+small,.diagp-muted{color:var(--muted)} small{font-size:12px}.diagp-mono{font-family:ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.diagp-shell{max-width:1260px;height:calc(100dvh - 36px);margin:18px auto;background:var(--shell);border:1px solid var(--line);border-radius:28px;padding:22px;display:flex;flex-direction:column;gap:18px}
+.diagp-header,.diagp-between{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+.diagp-nav{display:flex;gap:4px;background:var(--well);border-radius:13px;padding:5px;overflow:auto;flex-shrink:0}
+.diagp-nav>*{white-space:nowrap;text-decoration:none;color:var(--muted);padding:9px 15px;border-radius:9px;font-size:13px}
+.diagp-nav [aria-current=page]{color:var(--blue);background:var(--selected);box-shadow:inset 0 0 0 1px var(--blue)}
+.diagp-body{min-height:0;overflow:auto;display:flex;flex-direction:column;gap:16px;padding-bottom:58px}
+.diagp-body>*{flex-shrink:0}
+.diagp-capture{display:flex;justify-content:space-between;align-items:center;gap:18px;border:1px solid var(--line);background:var(--well);padding:16px 18px;border-radius:var(--radius)}
+.diagp-capture p{margin-top:4px;color:var(--muted);font-size:13px}.diagp-primary{border-color:var(--blue);color:var(--blue)}
+.diagp-grid{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;min-height:410px}
+.diagp-list,.diagp-detail{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;min-width:0}
+.diagp-listhead{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}
+.diagp-listhead select{padding:5px;font-size:12px;max-width:140px}
+.diagp-turn{display:block;width:100%;text-align:left;margin-top:7px;padding:12px;min-height:83px;background:var(--well)}
+.diagp-turn strong{display:block;font-size:14px;margin:3px 0}.diagp-turn small{display:block}
+.diagp-turn[aria-pressed=true],.diagp-turn[aria-pressed=true]:hover{background:var(--selected);border-color:var(--blue)}
+.diagp-badge{font-size:12px;border:1px solid currentColor;border-radius:20px;padding:2px 9px;white-space:nowrap;color:var(--blue)}
+.diagp-good{color:var(--success)}.diagp-warn{color:var(--warning)}.diagp-bad{color:var(--danger)}
+.diagp-note{padding:11px 13px;border-left:3px solid var(--blue);background:var(--well);border-radius:9px;margin:14px 0;font-size:13px;color:var(--muted)}
+.diagp-call{margin-top:10px;background:var(--well);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.diagp-call summary{padding:13px;cursor:pointer;font-weight:600}.diagp-call summary span{float:right;font-size:12px;font-weight:400}
+.diagp-callbody{padding:0 14px 14px}.diagp-fields{display:grid;grid-template-columns:120px minmax(0,1fr);gap:9px 14px;margin:4px 0 14px;font-size:13px}.diagp-fields dt{color:var(--muted)}.diagp-fields dd{margin:0;overflow-wrap:anywhere}
+.diagp-raw{border-top:1px solid var(--line);padding-top:12px}.diagp-raw p{font-size:12px;color:var(--muted);margin-bottom:8px}
+.diagp-query{display:block;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+.diagp-empty{padding:38px 12px;text-align:center;color:var(--muted)}.diagp-empty strong{display:block;color:var(--ink);margin-bottom:8px}
+.diagp-toast{min-height:22px;color:var(--success);font-size:13px}
+dialog{max-width:500px;width:calc(100% - 36px);background:var(--shell);color:var(--ink);border:1px solid var(--line);border-radius:22px;padding:25px}dialog::backdrop{background:var(--shade)}dialog p{margin:15px 0;color:var(--muted)}dialog .diagp-between{justify-content:flex-end}
+.diagp-demo{position:fixed;bottom:12px;left:12px;right:12px;margin:auto;width:max-content;max-width:calc(100% - 24px);display:flex;align-items:center;flex-wrap:wrap;justify-content:center;gap:8px;padding:9px 15px;background:var(--canvas);border:1px dashed var(--muted);border-radius:30px;box-shadow:0 6px 22px var(--shade);font:12px ui-monospace,monospace}
+.diagp-demo button{font-size:11px;border-radius:20px;padding:5px 9px}
+@media(max-width:760px){.diagp-shell{margin:0;height:100dvh;border-radius:0;padding:16px;gap:12px}.diagp-grid{grid-template-columns:1fr}.diagp-capture{align-items:flex-start;flex-direction:column}.diagp-fields{grid-template-columns:86px minmax(0,1fr)}.diagp-list{max-height:285px;overflow:auto}.diagp-body{padding-bottom:100px}.diagp-nav>*{padding:8px 12px}.diagp-call summary span{float:none;display:block;margin-left:18px}}
+</style></head>
+<body><main class="diagp-shell">
+<header class="diagp-header"><div><h1>Codex · 微信</h1><small>本地控制台</small></div><span class="diagp-badge">界面原型 · 全部为模拟数据</span></header>
+<nav class="diagp-nav" aria-label="功能页面"><span>微信连接</span><span>聊天记录</span><a href="prototype-split-view.html" data-goto="workflow-runs/split-view" data-goto-href="prototype-split-view.html">工作流运行</a><span>Memory Curator</span><span>每日新闻</span><span aria-current="page">诊断</span><a href="../workflow-permissions/prototype-module-cards.html" data-goto="workflow-permissions/module-cards" data-goto-href="../workflow-permissions/prototype-module-cards.html">本地权限</a></nav>
+<section class="diagp-body" aria-label="诊断">
+<div class="diagp-between"><div><h2>诊断</h2><p class="diagp-muted">按回合查看工具调用，不依赖工作流是否创建。</p></div><small>账户 A · 当前会话</small></div>
+<section class="diagp-capture"><div><h3 id="capture-title">安全摘要已开启</h3><p id="capture-copy">原始查询默认不保留。排查时可临时采集，仅限本地查看。</p></div><button id="capture" class="diagp-primary">开启临时详细诊断</button></section>
+<div class="diagp-grid"><aside class="diagp-list" aria-label="回合列表"><div class="diagp-listhead"><h3>最近回合</h3><select id="filter" aria-label="筛选回合"><option value="all">全部状态</option><option value="attention">需要关注</option></select></div><div id="turns"></div></aside>
+<section class="diagp-detail" aria-label="调用详情" id="detail"></section></div>
+<p id="feedback" class="diagp-toast" role="status" aria-live="polite"></p>
+<small>默认摘要不含消息原文、绝对路径、文件正文或可操作引用。详细诊断不会回溯恢复历史输入。</small>
+</section></main>
+<dialog id="confirm"><h2>临时采集查询参数？</h2><p>只采集开启后的查询词与匹配表达式。原始查询可能包含个人信息，请勿在其中输入密钥。</p><p>仅内存保留；关闭、到期或服务重启即清除。详细值不写入普通日志、不加入导出，也不发送到微信。</p><p><small>演示期限为 15 分钟，最终期限与容量策略待确认。此原型不会采集真实数据。</small></p><div class="diagp-between"><button id="cancel">取消</button><button id="enable" class="diagp-primary">开启临时采集</button></div></dialog>
+<dialog id="export-preview"><h2>脱敏导出预览</h2><p>演示：仅展示安全摘要，不生成文件、不保存数据。</p><pre id="export-text" class="diagp-query"></pre><div class="diagp-between"><button id="close-export">关闭预览</button></div></dialog>
+<div class="diagp-demo" data-demo-harness><span>演示 · 模拟状态</span><button id="arrive">新调用到达</button><button id="expire">期限到达</button><button id="empty">空列表</button><button id="reset">重置</button></div>
+<script>
+const original=[
+ {id:'D-024',time:'14:32:08',title:'文件查询与发送',status:'完成',duration:'2.84 秒',run:'关联工作流 R-012 · 渠道已接受，不代表手机已收到',calls:[
+  {tool:'files.find',time:'28 ms',scope:'图片',query:'查询 A · 7 字符',options:'match=fuzzy · sort=modified_at desc · limit=1',result:'返回 1 项 · 文件 A',coverage:'扫描完整 · 返回未截断',error:null},
+  {tool:'weixin.send_files',time:'816 ms',scope:'图片',result:'提交 1 个文件 · 文件 A',coverage:'渠道已接受',error:null}]},
+ {id:'D-023',time:'14:29:51',title:'文件读取被拒绝',status:'权限拒绝',duration:'12 ms',run:'未创建工作流 · 内联工具调用',calls:[{tool:'files.read',time:'12 ms',scope:'目录 A',result:'未读取正文',coverage:'未执行读取',error:'没有读取此文件的权限。请在本地权限中调整后重新发起。',code:'permission_denied'}]},
+ {id:'D-022',time:'14:26:17',title:'文件内容查询',status:'扫描不完整',duration:'184 ms',run:'未创建工作流 · 内联工具调用',calls:[{tool:'files.grep',time:'184 ms',scope:'文档',query:'查询 B · 4 字符',options:'mode=literal · case=smart · limit=20',result:'返回 20 处匹配 · 跳过 3 项',coverage:'扫描不完整 · 返回已截断 · 二进制 2 项、过大 1 项',error:'结果仅覆盖已扫描范围，不能据此断言文件不存在。',code:'partial_scan'}]},
+ {id:'D-021',time:'14:20:33',title:'普通对话',status:'完成',duration:'1.26 秒',run:'未创建工作流',calls:[]}
+];
+let records=structuredClone(original), selected='D-024', capturing=false, expiry=0, raw=new Map(), cleared=new Set(), revealed=new Set(), empty=false;
+const $=id=>document.getElementById(id);
+function text(tag,value,cls){const el=document.createElement(tag);el.textContent=value;if(cls)el.className=cls;return el}
+function notify(value){$('feedback').textContent=value}
+function render(){
+ $('capture-title').textContent=capturing?'临时详细诊断采集中':'安全摘要已开启';
+ $('capture-copy').textContent=capturing?'剩余 '+Math.max(0,Math.ceil((expiry-Date.now())/60000))+' 分钟 · 仅新调用 · 关闭即清除详细值':'原始查询默认不保留。排查时可临时采集，仅限本地查看。';
+ $('capture').textContent=capturing?'关闭并清除详细值':'开启临时详细诊断';
+ const items=empty?[]:records.filter(r=>$('filter').value!=='attention'||r.status!=='完成');
+ if(!items.some(r=>r.id===selected))selected=items[0]?.id;
+ $('turns').replaceChildren();for(const r of items){const b=text('button','', 'diagp-turn');b.setAttribute('aria-pressed',String(r.id===selected));b.append(text('small',r.time+' · '+r.id),text('strong',r.title),text('small',r.status+' · '+r.calls.length+' 次工具调用 · '+r.duration));b.onclick=()=>{selected=r.id;revealed.clear();render()};$('turns').append(b)}
+ const detail=$('detail');detail.replaceChildren();const r=items.find(r=>r.id===selected);
+ if(!r){$('turns').append(text('p','没有符合条件的回合','diagp-empty'));detail.append(text('p','新回合产生后，安全诊断会显示在这里。','diagp-empty'));return}
+ const head=text('div','', 'diagp-between');head.append(text('h3',r.id+' · '+r.title),text('span',r.status,'diagp-badge '+(r.status==='完成'?'diagp-good':'diagp-warn')));detail.append(head,text('p',r.run,'diagp-note'));
+ const exportButton=text('button','导出本回合安全摘要');exportButton.onclick=()=>{
+  const report={diagnosticId:r.id,status:r.status,calls:r.calls.map(c=>({tool:c.tool,scope:c.scope,queryLabel:c.query,options:c.options,result:c.result,coverage:c.coverage,errorCode:c.code,duration:c.time}))};
+  $('export-text').textContent=JSON.stringify(report,null,2);$('export-preview').showModal();notify('已预览模拟安全摘要，不含临时详细值；原型不生成文件。');
+ };detail.append(exportButton);
+ if(!r.calls.length)detail.append(text('p','本回合没有工具调用；这不表示诊断丢失。','diagp-empty'));
+ r.calls.forEach((c,i)=>{const call=text('details','', 'diagp-call');call.open=i===0;const s=text('summary',(i+1)+'. '+c.tool);s.append(text('span',c.time+(c.error?' · 需要关注':' · 完成'),c.error?'diagp-warn':'diagp-good'));call.append(s);
+  const body=text('div','', 'diagp-callbody'), dl=text('dl','', 'diagp-fields');
+  for(const [label,value]of [['版本','v1'],['授权范围',c.scope],['查询摘要',c.query],['执行参数',c.options],['结果',c.result],['完整性',c.coverage],['安全错误码',c.code]])if(value){dl.append(text('dt',label),text('dd',value))}body.append(dl);
+  if(c.error)body.append(text('p',c.error,'diagp-note'));
+  if(c.query){const section=text('div','', 'diagp-raw'),key=r.id+':'+i;section.append(text('p','临时详细值 · 仅本地，不随安全摘要导出'));
+   if(raw.has(key)&&capturing){const toggle=text('button',revealed.has(key)?'隐藏原始查询':'查看原始查询');toggle.onclick=()=>{revealed.has(key)?revealed.delete(key):revealed.add(key);render()};section.append(toggle);if(revealed.has(key))section.append(text('code',raw.get(key),'diagp-query'))}
+   else section.append(text('small',cleared.has(key)?'已清除：详细采集已关闭或到期。':'未保留：此调用发生时未开启详细采集。'));
+   body.append(section)}call.append(body);detail.append(call)});
+ detail.append(text('p','调用耗时包含各自等待，不应直接相加为回合总耗时。安全标签仅在本次诊断上下文内关联。','diagp-note'));
+}
+function clearRaw(message){for(const key of raw.keys())cleared.add(key);raw.clear();revealed.clear();capturing=false;expiry=0;render();notify(message)}
+$('capture').onclick=()=>capturing?clearRaw('详细值已清除，安全摘要继续记录。'):$('confirm').showModal();
+$('cancel').onclick=()=>$('confirm').close();$('enable').onclick=()=>{capturing=true;expiry=Date.now()+15*60000;$('confirm').close();render();notify('模拟采集已开启。点击底部“新调用到达”查看新旧记录的区别。')};
+$('filter').onchange=render;
+$('close-export').onclick=()=>$('export-preview').close();
+$('arrive').onclick=()=>{empty=false;$('filter').value='all';const id='D-'+(25+records.length-original.length);records.unshift({id,time:new Date().toLocaleTimeString('zh-CN',{hour12:false}),title:'新到达的文件查询',status:'完成',duration:'1.42 秒',run:'未创建工作流 · 内联工具调用',calls:[{tool:'files.find',time:'31 ms',scope:'文档',query:'查询 C · 4 字符',options:'match=fuzzy · sort=relevance desc · limit=20',result:'返回 2 项 · 文件 B、文件 C',coverage:'扫描完整 · 返回未截断'}]});if(capturing)raw.set(id+':0','周末旅行');selected=id;render();notify('模拟新调用已到达。')};
+$('expire').onclick=()=>clearRaw('已模拟到期，详细值不可恢复。');$('empty').onclick=()=>{empty=true;render()};
+$('reset').onclick=()=>{records=structuredClone(original);selected='D-024';empty=false;capturing=false;raw.clear();cleared.clear();revealed.clear();$('filter').value='all';render();notify('已重置模拟数据。')};
+setInterval(()=>{if(capturing&&Date.now()>=expiry)clearRaw('详细采集已到期，详细值已清除。')},1000);
+document.addEventListener('click',e=>{const el=e.target.closest('[data-goto]');if(!el)return;e.preventDefault();if(window.parent!==window)parent.postMessage({type:'proto-nav',target:el.dataset.goto},'*');else location.href=el.dataset.gotoHref});render();
+const focusCurrentTab=()=>document.querySelector('[aria-current=page]').scrollIntoView({block:'nearest',inline:'center'});
+requestAnimationFrame(focusCurrentTab);window.addEventListener('resize',focusCurrentTab);
+</script></body></html>

@@ -1,0 +1,24 @@
+{
+  "name": "codex-weixin",
+  "version": "0.1.0+codex.20260822094337",
+  "description": "Local personal-Weixin direct-channel controls and MCP Apps panel",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "\u5fae\u4fe1\u76f4\u8fde\u52a9\u624b",
+    "shortDescription": "\u5728 Codex \u5185\u67e5\u770b\u5e76\u64cd\u4f5c\u672c\u673a\u5fae\u4fe1\u76f4\u8fde\u670d\u52a1\u3002",
+    "longDescription": "\u63d0\u4f9b\u817e\u8baf iLink \u771f\u5b9e\u626b\u7801\u72b6\u6001\u3001\u5165\u7ad9\u76ee\u6807\u786e\u8ba4\u548c\u663e\u5f0f\u6d4b\u8bd5\u53d1\u9001\u7684 MCP Apps \u5185\u5d4c\u9762\u677f\u3002",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "\u5fae\u4fe1\u76f4\u8fde\u72b6\u6001",
+      "\u771f\u5b9e\u4e8c\u7ef4\u7801\u9762\u677f",
+      "\u5165\u7ad9\u76ee\u6807\u786e\u8ba4",
+      "\u663e\u5f0f\u6d4b\u8bd5\u53d1\u9001"
+    ],
+    "defaultPrompt": "\u6253\u5f00\u5fae\u4fe1\u76f4\u8fde\u52a9\u624b\u9762\u677f\uff0c\u5e76\u8ba9\u6211\u4eb2\u81ea\u5b8c\u6210\u626b\u7801\u3001\u76ee\u6807\u786e\u8ba4\u548c\u6d4b\u8bd5\u53d1\u9001\u3002"
+  },
+  "mcpServers": "./.mcp.json"
+}

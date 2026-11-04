@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>个人微信直连 iLink Demo</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="brand-mark" aria-hidden="true">↑</div>
+        <div class="brand-copy">
+          <h1>个人微信直连 iLink</h1>
+          <p class="eyebrow">Codex · 微信助手</p>
+        </div>
+        <p class="header-meta">本地服务 · 腾讯 iLink</p>
+      </header>
+
+      <nav class="app-tabs" role="tablist" aria-label="功能页面">
+        <button id="connection-app-tab" type="button" role="tab" aria-selected="true" aria-controls="connection-app-tabpanel" tabindex="0">微信连接</button>
+        <button id="chat-app-tab" type="button" role="tab" aria-selected="false" aria-controls="chat-app-tabpanel" tabindex="-1">聊天记录</button>
+        <button id="workflows-app-tab" type="button" role="tab" aria-selected="false" aria-controls="workflows-app-tabpanel" tabindex="-1">工作流运行</button>
+        <button id="memory-app-tab" type="button" role="tab" aria-selected="false" aria-controls="memory-app-tabpanel" tabindex="-1">Memory Curator</button>
+        <button id="news-app-tab" type="button" role="tab" aria-selected="false" aria-controls="news-app-tabpanel" tabindex="-1">每日新闻<span id="news-alert-badge" class="tab-alert" aria-hidden="true" hidden>!</span></button>
+        <button id="permissions-app-tab" type="button" role="tab" aria-selected="false" aria-controls="permissions-app-tabpanel" tabindex="-1">本地权限</button>
+      </nav>
+
+      <div id="global-alert" class="global-alert" role="alert" hidden></div>
+
+      <div id="app-tab-content">
+        <section id="connection-app-tabpanel" role="tabpanel" aria-labelledby="connection-app-tab">
+          <section class="status-card" aria-live="polite">
+            <span id="status-dot" class="dot"></span>
+            <div>
+              <p class="label">当前状态</p>
+              <h2 id="phase">正在读取</h2>
+              <p id="notice">正在连接本地服务……</p>
+            </div>
+          </section>
+
+          <ol class="steps">
+        <li class="panel">
+          <div class="step-number">1</div>
+          <h2>连接微信</h2>
+          <p>点击后直接请求腾讯 iLink，并把确认后的凭据保存到 Demo 专属的本机私有状态文件。</p>
+          <button id="login-button" type="button">重新绑定并生成二维码</button>
+          <div id="qr-wrap" class="qr-wrap" hidden>
+            <img id="qr-image" alt="腾讯微信登录二维码" />
+            <p>请用手机微信扫码。手机确认页或数字码是否出现由微信决定；本网页不会伪造授权。</p>
+          </div>
+          <form id="pair-form" hidden>
+            <label for="pair-code">手机微信显示的配对码</label>
+            <div class="row">
+              <input id="pair-code" inputmode="numeric" autocomplete="one-time-code" maxlength="12" />
+              <button type="submit">提交配对码</button>
+            </div>
+          </form>
+        </li>
+
+        <li class="panel">
+          <div class="step-number">2</div>
+          <h2>建立出站会话</h2>
+          <p class="warning">扫码成功后，请从个人微信给 bot 发一条文本消息。腾讯 iLink 会随这条入站签发或刷新发送所需的 context token；Demo 收到后会自动绑定并回复问候，不需要再次手动确认。</p>
+          <div id="auto-binding-feedback" class="feedback" role="status" aria-live="polite">等待连接状态……</div>
+          <div id="session-panel">
+            <button id="discover-button" type="button" class="secondary">手动重新同步入站目标</button>
+            <label for="account">iLink 直连账户</label>
+            <select id="account"></select>
+            <label for="discovered-target">最近入站目标</label>
+            <select id="discovered-target">
+              <option value="">请先发送入站消息并重新查找</option>
+            </select>
+            <div id="target-health" class="metadata" aria-live="polite"></div>
+            <fieldset>
+              <legend>本地显示名称</legend>
+              <p class="fine-print">腾讯接口不提供微信昵称或微信号查询；这里的名称只是保存在本机的自定义别名。</p>
+              <label for="account-label">账户名称</label>
+              <input id="account-label" maxlength="80" autocomplete="off" placeholder="例如：我的个人微信" />
+              <label for="target-label">目标名称</label>
+              <input id="target-label" maxlength="80" autocomplete="off" placeholder="例如：Aloong 的会话" />
+              <button id="save-labels-button" type="button" class="secondary">保存本地名称</button>
+            </fieldset>
+            <details>
+              <summary>高级信息与原始 ID</summary>
+              <dl class="raw-ids">
+                <dt>账户原始 ID</dt><dd id="raw-account-id">—</dd>
+                <dt>目标原始 ID</dt><dd id="raw-target-id">—</dd>
+              </dl>
+            </details>
+            <label for="target">发送目标</label>
+            <input id="target" autocomplete="off" readonly placeholder="从上方已发现的入站目标选择" />
+            <p class="fine-print">优先显示本地别名；没有别名时显示缩短 ID。完整原始 ID 可在“高级信息”查看。只有一个目标时会自动选择；有多个时请使用上方下拉框。</p>
+            <p class="fine-print">自动绑定只消费本次扫码连接后该账户收到的第一条用户文本。问候最多尝试一次；渠道接受并不等于手机端已收到。</p>
+          </div>
+        </li>
+
+        <li class="panel">
+          <div class="step-number">3</div>
+          <h2>发送一条测试消息</h2>
+          <form id="send-form">
+            <label for="message">测试消息</label>
+            <textarea id="message" maxlength="12000">腾讯 iLink 直连测试消息</textarea>
+            <button id="send-button" type="submit" disabled>发送测试消息</button>
+            <p id="send-feedback" class="feedback" role="status" aria-live="polite"></p>
+          </form>
+          <p class="fine-print">按钮成功只表示渠道接受了发送请求；请以个人微信端实际收到为最终确认。失败不会自动重试。</p>
+          <p class="fine-print">context token 没有腾讯公开的固定有效期或主动刷新接口。若发送失败，请先从微信再发一条消息刷新上下文，然后由你主动重试。</p>
+        </li>
+
+          </ol>
+
+          <section class="panel experiment-panel" aria-labelledby="context-experiment-title">
+            <div class="step-number">⏱</div>
+            <h2 id="context-experiment-title">Context token 时效实验</h2>
+            <p id="context-experiment-status" class="experiment-status">尚未启动实验。</p>
+            <dl class="experiment-grid">
+              <div><dt>基准入站</dt><dd id="context-experiment-baseline">—</dd></div>
+              <div><dt>当前有效下界</dt><dd id="context-experiment-validity">—</dd></div>
+              <div><dt>下次真实探针</dt><dd id="context-experiment-next">—</dd></div>
+              <div><dt>探针计数</dt><dd id="context-experiment-count">0 / 0</dd></div>
+            </dl>
+            <p id="context-experiment-detail" class="metadata">不保存或展示 context token。</p>
+            <p class="fine-print">探针会作为真实可见消息发送。渠道接受不等于手机已显示；每小时发送次数也可能影响结果。实验会尝试启用空闲防睡眠，但合盖、断电或系统重启仍会降低时间精度。</p>
+          </section>
+        </section>
+
+        <section id="chat-app-tabpanel" class="panel workspace-panel" role="tabpanel" aria-labelledby="chat-app-tab" hidden>
+          <h2>独立 Codex 微信聊天服务</h2>
+          <p>微信只负责转发；每个已启用目标连接一个独立 Codex App Server 任务，可以调用 skill/MCP 和搜索网页。本地文件操作只能通过已授权的文件工具完成，不能执行 shell 或本地文件；该任务不读取当前 Codex 会话，也不经过 OpenClaw。</p>
+          <div id="codex-summary" class="metadata" aria-live="polite">正在读取独立服务状态……</div>
+          <section class="runtime-section" aria-labelledby="model-settings-title">
+            <h3 id="model-settings-title">回复模型</h3>
+            <form id="codex-model-form">
+              <div class="form-grid model-setting-grid">
+                <label class="model-mode-field">选择模式
+                  <select id="codex-model-mode">
+                    <option value="fast">自动快速</option>
+                    <option value="balanced">自动均衡</option>
+                    <option value="quality">自动最强</option>
+                    <option value="pinned">固定模型</option>
+                  </select>
+                </label>
+                <label id="codex-pinned-model-label" class="model-pinned-field" hidden>固定模型
+                  <select id="codex-pinned-model"></select>
+                </label>
+                <label class="model-effort-field">推理强度
+                  <select id="codex-model-effort"></select>
+                </label>
+              </div>
+              <p id="codex-model-summary" class="metadata">正在读取模型配置……</p>
+              <div class="row">
+                <button id="codex-model-save" type="submit">保存回复模型</button>
+                <button id="codex-model-refresh" type="button" class="secondary">刷新模型列表</button>
+              </div>
+              <p id="codex-model-feedback" class="feedback" role="status" aria-live="polite"></p>
+            </form>
+          </section>
+          <section class="runtime-section" aria-labelledby="runtime-title">
+            <h3 id="runtime-title">运行状态</h3>
+            <div id="codex-runs" class="runtime-runs" aria-live="polite">尚无运行记录。</div>
+          </section>
+          <div class="row">
+            <button id="codex-enable-button" type="button">为当前目标启用</button>
+            <button id="codex-disable-button" type="button" class="secondary">停用当前目标</button>
+          </div>
+          <p class="fine-print">请从这个微信目标发送一条新的文本消息。消息会串行交给专用 Codex 任务；命令、补丁及其他权限审批仍默认拒绝，发送失败不会自动重试。</p>
+          <div id="codex-transcript" class="transcript" aria-live="polite"></div>
+          <p id="codex-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </section>
+
+        <section id="workflows-app-tabpanel" class="panel workspace-panel workflow-workspace" role="tabpanel" aria-labelledby="workflows-app-tab" hidden>
+          <div class="workflow-heading">
+            <div>
+              <h2>工作流运行</h2>
+              <p>查看由微信、定时任务与系统触发的持久化运行。此页面只读，不会重放或确认外部副作用。</p>
+            </div>
+            <span class="workflow-readonly-badge">只读</span>
+          </div>
+          <dl class="workflow-summary" aria-label="工作流运行摘要">
+            <div><dt>进行中</dt><dd id="workflow-active-count">0</dd></div>
+            <div><dt>需要关注</dt><dd id="workflow-attention-count">0</dd></div>
+            <div><dt>今天完成</dt><dd id="workflow-completed-count">0</dd></div>
+          </dl>
+          <div class="workflow-filters" role="group" aria-label="筛选运行">
+            <button id="workflow-filter-all" type="button" class="secondary" aria-pressed="true">全部</button>
+            <button id="workflow-filter-attention" type="button" class="secondary" aria-pressed="false">需要关注</button>
+          </div>
+          <div class="workflow-split-view">
+            <aside class="workflow-run-column" aria-label="运行列表">
+              <div id="workflow-run-list" class="workflow-run-list" aria-live="polite">
+                <p class="workflow-empty">尚无工作流运行。</p>
+              </div>
+            </aside>
+            <section id="workflow-run-detail" class="workflow-run-detail" aria-live="polite">
+              <p class="workflow-empty">选择左侧运行以查看步骤与副作用状态。</p>
+            </section>
+          </div>
+          <p class="fine-print">“渠道接受”只表示外部接口接受请求，不代表手机已收到；结果未知的发送不会自动重试。</p>
+        </section>
+
+        <section id="permissions-app-tabpanel" class="panel workspace-panel" role="tabpanel" aria-labelledby="permissions-app-tab" hidden>
+          <h2>本地权限管理</h2>
+          <section class="workflow-module-permissions" aria-labelledby="workflow-module-permissions-title">
+            <h3 id="workflow-module-permissions-title">工作流模块权限</h3>
+            <p>模块只访问你在这里保存的目录。首次显示的勾选只是建议草稿，保存前不会授予任何权限。</p>
+            <p>读取结果可能进入该账户下当前已启用目标的独立 Codex 微信会话；收窄读取权限后，旧会话不会继续复用。</p>
+            <div id="workflow-module-permission-list" class="workflow-module-permission-list" aria-live="polite">
+              <p class="workflow-empty">正在读取模块权限……</p>
+            </div>
+            <p class="fine-print">写入包含读取，只读不能写入；关闭读取需同时关闭写入。文件执行能力始终禁止。新增目录需要由宿主登记为可信候选后才会出现在这里。</p>
+          </section>
+          <section class="legacy-codex-permissions" aria-labelledby="legacy-codex-permissions-title">
+            <h3 id="legacy-codex-permissions-title">Codex 会话本地权限</h3>
+          <div id="vault-summary" class="metadata" aria-live="polite">本地执行：正在读取权限……</div>
+          <section id="permission-onboarding" aria-labelledby="permission-title">
+            <h3 id="permission-title">选择本地权限模式</h3>
+            <form id="permission-form">
+              <div class="permission-modes">
+                <label class="permission-mode">
+                  <input type="radio" name="permission-mode" value="safe" />
+                  <span><strong>安全只读</strong><small>仅读取所选目录，不创建或修改文件。</small></span>
+                </label>
+                <label class="permission-mode recommended">
+                  <input type="radio" name="permission-mode" value="guarded_plus" />
+                  <span><strong>增强受控</strong><small>安全创建或修改前，等待本地面板确认。推荐</small></span>
+                </label>
+                <label class="permission-mode">
+                  <input type="radio" name="permission-mode" value="advanced_controlled" />
+                  <span><strong>高级受控</strong><small>自动执行安全创建或修改，仍永久阻止删除和高风险操作。</small></span>
+                </label>
+              </div>
+              <fieldset>
+                <legend>允许访问的目录</legend>
+                <div id="permission-roots" class="permission-roots"></div>
+              </fieldset>
+              <label class="check">
+                <input id="permission-confirmed" type="checkbox" />
+                <span>我确认网络仅用于只读检索，删除与高风险操作始终被阻止。</span>
+              </label>
+              <p id="permission-capability" class="warning">当前 Codex 版本不支持严格目录隔离；三档权限暂不能启用。</p>
+              <button id="permission-submit" type="submit" disabled>应用权限设置</button>
+              <p id="permission-feedback" class="feedback" role="status" aria-live="polite"></p>
+            </form>
+          </section>
+          <p class="fine-print">三档均不启用完整磁盘访问；网络仅用于实时搜索和只读检索。旧的单一写权限开关已停用。</p>
+          </section>
+          <section class="media-export-permissions" aria-labelledby="media-export-title">
+            <h3 id="media-export-title">微信图片外发目录</h3>
+            <p>仅允许当前微信消息明确要求时，按文件名查找并发送所选目录中的图片。此设置不会扩大 Codex 的普通文件读写权限。</p>
+            <form id="media-export-form">
+              <fieldset>
+                <legend>允许查找并外发图片的目录</legend>
+                <div id="media-export-roots" class="permission-roots"></div>
+              </fieldset>
+              <label class="check">
+                <input id="media-export-confirmed" type="checkbox" />
+                <span>我确认允许服务递归查找并向当前微信会话发送所选目录中的图片。</span>
+              </label>
+              <button id="media-export-submit" type="submit" disabled>保存图片外发目录</button>
+              <p id="media-export-feedback" class="feedback" role="status" aria-live="polite"></p>
+            </form>
+            <p class="fine-print">默认全部关闭。若显示“被 macOS 阻止”，请在“系统设置 → 隐私与安全”中允许承载该服务的终端或运行程序访问对应目录；无需开启完整磁盘访问。</p>
+          </section>
+        </section>
+
+        <section id="news-app-tabpanel" class="panel workspace-panel" role="tabpanel" aria-labelledby="news-app-tab" hidden>
+          <h2>每日 AI 新闻微信汇总</h2>
+          <p>默认每天 08:30（Asia/Shanghai），可在微信中修改执行规则。每次检索实际运行时向前 24 小时的全球 AI 新闻，最多 10 条合并成一条微信消息。优先 LLM、论文/评测、训练推理、Agent、多模态、安全和开源工具等技术进展，必要时补充权威媒体；不足 10 条时不会用近 7 天旧闻凑数。</p>
+          <p>研究完成后会先保存文章正文与摘要，再把阅读笔记按日期和执行批次写入 demo Vault 的 <code>news/YYYY-MM-DD/</code> 目录。归档失败不阻塞推送，稍后会单独重试归档；你可在归档成功后通过微信追问“第二条的依据是什么”。</p>
+          <p>HN 会按官方排名检查前 10 名并深读最多 5 篇；单篇正文或摘要失败会跳过并顺延，最终不足 5 篇时按实际成功数量归档和发送。缺少或失败的来源会在日报中明确注明；成功归档的 <code>Hacker News 热门 N 篇.md</code> 保留每篇的真实排名。</p>
+          <p>每次新执行都会检索候选；已经成功处理的文章会复用保存的正文与摘要，不会因日期变化、追踪参数、标题微调或再次进入 HN 热榜而重复处理。发送过的文章仍会按历史记录去重。</p>
+          <p class="warning">调度仅随当前服务进程运行；恢复时仅执行最近一个错过的时段。主动停用期间不补跑。已生成的缓存按原计划时间续发；微信会话过期时，请从原会话发消息刷新。</p>
+          <div id="news-summary" class="metadata" aria-live="polite">正在读取日报状态……</div>
+          <div class="row">
+            <button id="news-preview-button" type="button">生成今日预览</button>
+            <button id="news-send-button" type="button" class="secondary">发送当前预览</button>
+          </div>
+          <div class="row">
+            <button id="news-enable-button" type="button">为当前目标启用日报</button>
+            <button id="news-disable-button" type="button" class="secondary">停用日报</button>
+          </div>
+          <pre id="news-preview" class="news-preview">尚未生成预览。</pre>
+          <p class="fine-print">预览和微信正文只显示来源名，不贴具体链接；链接仅在私有账本中用于核查和去重。“生成预览”在隔离进程中执行实时检索，不加载本项目规则、个人技能或子代理，也不发送微信；只有检测到真实网页搜索事件才接受结果。“发送当前预览”是外部发送动作，只在你点击后执行。自动发送因凭据或会话失效且确认尚未接受时，会保留正文，条件恢复后按时间顺序续发。已接受、部分接受、明确拒绝和结果未知均不自动重发；手动预览发送失败也不自动重发。</p>
+          <p id="news-feedback" class="feedback" role="status" aria-live="polite"></p>
+        </section>
+
+      <section id="memory-app-tabpanel" class="panel memory-workspace workspace-panel" role="tabpanel" aria-labelledby="memory-app-tab" hidden>
+        <h2 id="memory-title">Memory Curator（记忆整理器）</h2>
+        <p>按微信直连账户维护长期记忆和个人事件，不按发送目标隔离。目标变化后继续使用同一账户的数据。</p>
+        <div id="memory-account-summary" class="memory-scope" aria-label="当前记忆作用域">
+          <div>
+            <span>当前账户</span>
+            <div class="memory-scope-value">
+              <strong id="memory-current-account">尚未选择</strong>
+              <span id="memory-account-status" class="memory-scope-status" data-state="unselected">未选择</span>
+            </div>
+          </div>
+          <div>
+            <span>当前目标</span>
+            <div class="memory-scope-value">
+              <strong id="memory-current-target">尚未选择</strong>
+              <span id="memory-target-status" class="memory-scope-status" data-state="unselected">未选择</span>
+            </div>
+          </div>
+        </div>
+        <div id="memory-summary" class="metadata" aria-live="polite">正在读取账户记忆状态……</div>
+        <div id="memory-embedding-summary" class="metadata" aria-live="polite">正在读取语义索引状态……</div>
+        <details>
+          <summary>最近整理诊断</summary>
+          <pre id="memory-diagnostics" class="news-preview" aria-live="polite">暂无尝试诊断。新产生的整理任务会在这里记录阶段、耗时、结果和安全错误码。</pre>
+        </details>
+        <div class="row">
+          <button id="memory-enable-button" type="button">为当前账户启用记忆</button>
+          <button id="memory-disable-button" type="button" class="secondary">停用当前账户记忆</button>
+          <button id="memory-reminder-target-button" type="button" class="secondary">将当前目标设置为计划提醒接收人</button>
+        </div>
+        <p id="memory-feedback" class="feedback" role="status" aria-live="polite"></p>
+        <div class="memory-tabs" role="tablist" aria-label="账户记忆视图">
+          <button id="memory-tab" type="button" role="tab" aria-selected="true" aria-controls="memory-tabpanel" tabindex="0">长期记忆</button>
+          <button id="events-tab" type="button" role="tab" aria-selected="false" aria-controls="events-tabpanel" tabindex="-1">Events</button>
+        </div>
+        <div id="memory-tabpanel" role="tabpanel" aria-labelledby="memory-tab">
+          <pre id="memory-content" class="news-preview">当前账户尚未启用长期记忆。</pre>
+        </div>
+        <div id="events-tabpanel" role="tabpanel" aria-labelledby="events-tab" hidden>
+          <div id="events-summary" class="metadata">默认显示过去 30 天和未来 7 天的事件。</div>
+          <pre id="events-content" class="news-preview">当前时间窗口内没有事件。</pre>
+        </div>
+        <p class="fine-print">Curator 在后台分别整理长期偏好与带日期的计划/已发生事件。面板仅供查看；停用不会删除 SQLite、MEMORY.md 或日期事件文件。</p>
+      </section>
+      </div>
+      <p id="error" class="error" role="alert"></p>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

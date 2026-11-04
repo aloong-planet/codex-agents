@@ -1,0 +1,21 @@
+%% title: Stop, configure, start
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+  direction LR
+  [*] --> running: initial service
+  running --> stopped: stop
+  stopped --> stopped: edit configuration
+  stopped --> starting: start valid configuration
+  stopped --> failed: start invalid configuration
+  starting --> running: ready
+  starting --> failed: fail
+  failed --> stopped: edit configuration
+  failed --> starting: retry valid configuration
+  failed --> failed: retry invalid configuration
+  note right of stopped
+    Select Weixin or Feishu
+    Keep personal data
+  end note
+  note right of failed
+    No automatic fallback
+  end note

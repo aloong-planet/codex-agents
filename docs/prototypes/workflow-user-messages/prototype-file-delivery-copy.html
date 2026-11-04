@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>文件发送用户文案</title>
+  <style>
+    :root { color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; background:#20242e; color:#f5f7fb; }
+    body { margin:0; padding:32px; }
+    main { max-width:760px; margin:auto; display:grid; gap:16px; }
+    h1 { margin:0 0 4px; font-size:24px; }
+    .lead { color:#aeb6c8; margin:0 0 12px; }
+    .card { background:#282d39; border:1px solid #3b4353; border-radius:16px; padding:18px; }
+    .state { color:#8ea2c9; font-size:13px; margin-bottom:8px; }
+    .message { font-size:17px; line-height:1.55; }
+    .note { color:#9fa9bc; font-size:13px; margin-top:8px; }
+  </style>
+</head>
+<body>
+<main>
+  <div><h1>文件发送用户文案</h1><p class="lead">只呈现用户能采取行动的信息；传输协议、内部错误码和供应商名称不进入微信回复。</p></div>
+  <section class="card"><div class="state">发送成功</div><div class="message">文件已发送，请查收。</div><div class="note">不宣称手机端已经收到。</div></section>
+  <section class="card"><div class="state">没有匹配文件</div><div class="message">没有找到匹配的文件。</div></section>
+  <section class="card"><div class="state">缺少读取权限</div><div class="message">没有读取这个文件的权限，请在“本地权限”中启用后重试。</div></section>
+  <section class="card"><div class="state">发送明确失败</div><div class="message">文件发送失败，请稍后重试。</div></section>
+  <section class="card"><div class="state">发送结果无法确认</div><div class="message">文件发送结果暂时无法确认，请检查微信；系统不会自动重发。</div></section>
+  <section class="card"><div class="state">查询过程异常</div><div class="message">暂时无法完成文件查找，请稍后重试。</div></section>
+</main>
+</body>
+</html>

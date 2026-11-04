@@ -1,0 +1,20 @@
+{
+  "name": "codex-weixin-local",
+  "interface": {
+    "displayName": "微信本地插件"
+  },
+  "plugins": [
+    {
+      "name": "codex-weixin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-weixin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,268 @@
+<!doctype html>
+<!-- Logic prototype page template (the canonical copy lives in the prototype skill; after copying, replace the {{...}} placeholders).
+     Diagram source: the *.mmd files in the same directory (canonical) → sync-mmd.mjs derives model.mmd.js → this page renders it.
+     Panel rules and implementation constraints are in STATE-MACHINE.md; do not change the CSS and script mechanics (measured: aria-disabled / no opacity / data-tip). -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Prototype — 定时任务管理与缓存续发</title>
+<style>
+  :root{
+    --bg:#f7f8f9; --card:#ffffff; --text:#37352f; --text-2:#787774;
+    --line:#e8eaed; --line-strong:#d9dce0; --accent:#8a67ab; --accent-soft:#f0ebf6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#18191b; --card:#1f2124; --text:#e6e6e5; --text-2:#9b9a97;
+      --line:#2a2c30; --line-strong:#34373c; --accent:#a084c7; --accent-soft:#2c2733; }
+  }
+  *{box-sizing:border-box;margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  body{background:var(--bg);color:var(--text);font-size:13px;padding:28px;max-width:860px;margin:0 auto}
+  h1{font-size:16px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .tag{font-size:10px;border:1px solid var(--line-strong);border-radius:4px;padding:1px 6px;color:var(--text-2)}
+  .q{color:var(--text-2);line-height:1.7;margin-bottom:18px}
+  h4{font-size:12px;color:var(--text-2);margin:18px 0 8px}
+  .dg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+  .dg pre{font-size:12px;white-space:pre-wrap}
+  .dg.pan{height:56vh;padding:0;overflow:hidden;position:relative;cursor:grab;touch-action:none;user-select:none;background:#fdfdfd}
+  .dg.pan.dragging{cursor:grabbing}
+  .dg.pan svg{display:block;transform-origin:0 0;will-change:transform;overflow:visible}
+  /* With htmlLabels:false, mermaid puts a rect.background under every edge label, and its stylesheet sets the fill to primaryColor (#ECECFF, pale purple);
+     the edgeLabelBackground variable does not reach it, and mermaid's styles have high specificity, so !important is needed to make it transparent (confirmed in Chrome) */
+  .dg svg .edgeLabel rect.background{fill:transparent !important}
+  /* Edge labels one size smaller than node text (nodes default to 16px), so the state nodes stand out as the main subject */
+  .dg svg .edgeLabel text,.dg svg .edgeLabel tspan{font-size:14px}
+  .rst{position:absolute;top:8px;right:8px;z-index:2;border:1px solid var(--line-strong);
+    background:var(--card);color:var(--text-2);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer}
+  .rst:hover{color:var(--accent);border-color:var(--accent)}
+  code{display:block;background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;font-size:12px;user-select:all;overflow-x:auto;white-space:pre}
+  .hint{font-size:12px;color:var(--text-2);margin-top:14px}
+
+  /* ── Driving panel ── */
+  .drive{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .st{display:flex;flex-direction:column;gap:9px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+  .st-row{display:flex;align-items:center;gap:10px;font-size:13px}
+  .st-row .k{width:96px;color:var(--text-2);font-family:ui-monospace,Menlo,monospace;font-size:12px;flex:none}
+  .badge{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;font-weight:600;
+    padding:2px 10px;border-radius:5px;border:1px solid transparent}
+  .badge.pending{background:#fff6b8;border-color:#e4c800;color:#5c5100}
+  .badge.accepted{background:#dbeafe;border-color:#93c5fd;color:#1e40af}
+  .badge.done{background:#dcfce7;border-color:#86efac;color:#166534}
+  .badge.failed,.badge.rejected{background:#fee2e2;border-color:#fca5a5;color:#991b1b}
+  .badge.expired{background:var(--line);border-color:var(--line-strong);color:var(--text-2)}
+  .badge.empty{background:transparent;border-color:var(--line-strong);color:var(--text-2);border-style:dashed}
+  .bar{width:170px;height:7px;border-radius:4px;background:var(--line);overflow:hidden;flex:none}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .18s}
+  .num{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums}
+  .val{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .val.nil{color:var(--text-2);opacity:.7}
+  .illegal{margin:12px 0;padding:8px 12px;border-radius:7px;font-size:12.5px;border:1px solid}
+  .illegal.ok{color:var(--text-2);border-color:var(--line);background:transparent}
+  .illegal.idle{color:var(--text-2);border-color:var(--line);background:transparent;opacity:.6}
+  .illegal .ev{font-family:ui-monospace,Menlo,monospace;color:var(--accent);font-weight:600}
+  .illegal.bad{color:#991b1b;border-color:#fca5a5;background:#fee2e2}
+  @media (prefers-color-scheme:dark){
+    .illegal.bad{color:#fca5a5;border-color:#7f1d1d;background:#2a1416}
+    .badge.pending{background:#3a3316;border-color:#7a6a1e;color:#f0dd8a}
+    .badge.accepted{background:#17263f;border-color:#2c4d80;color:#93c5fd}
+    .badge.done{background:#12301d;border-color:#2a6540;color:#86efac}
+    .badge.failed,.badge.rejected{background:#2a1416;border-color:#7f1d1d;color:#fca5a5}
+  }
+  .acts{display:flex;flex-direction:column;gap:10px}
+  .grp{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .grp-t{font-size:11px;color:var(--text-2);width:78px;flex:none;
+    font-family:ui-monospace,Menlo,monospace}
+  .acts button{font:inherit;font-size:12.5px;padding:5px 13px;border-radius:6px;cursor:pointer;
+    border:1px solid var(--line-strong);background:var(--bg);color:var(--text);transition:.12s}
+  .acts button:hover{border-color:var(--accent);color:var(--accent)}
+  .acts button:active{transform:translateY(1px)}
+  .acts button.ghost{border-style:dashed;color:var(--text-2);margin-left:4px}
+  .acts button.ghost:hover{border-style:solid;color:var(--accent)}
+  /* Greyed out = unreachable from the current state (derived from legal(state), not judged by the UI itself) */
+  /* Greying out does not use opacity: opacity would also fade the pseudo-element tooltip and make its text unreadable. Use specific faded colours instead. */
+  .acts button[aria-disabled="true"]{cursor:not-allowed;border-style:dotted;
+    color:var(--text-2);opacity:1;border-color:var(--line);background:transparent}
+  .acts button[aria-disabled="true"]:hover{border-color:var(--line-strong);color:var(--text-2)}
+  /* Instant tooltip: the native title has a delay of about 1 s, and the reason for greying out must be visible at once */
+  .acts button{position:relative}
+  .acts button[data-tip]:hover::after{
+    content:attr(data-tip);position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);
+    background:#1b1b1f;color:#fff;font-size:11.5px;line-height:1.45;padding:6px 10px;border-radius:6px;
+    white-space:nowrap;z-index:20;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.28)}
+  .acts button[data-tip]:hover::before{
+    content:"";position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);
+    border:5px solid transparent;border-top-color:#1b1b1f;z-index:20;pointer-events:none}
+  .stress{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:12px;color:var(--text-2);cursor:pointer}
+  .stress input{cursor:pointer}
+  code.inl{display:inline;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    padding:1px 5px;font-size:11.5px}
+  .drive .hint{margin-top:14px;line-height:1.6}
+  /* Highlight the current state's node on the diagram */
+  .dg svg g.node.cur rect,.dg svg g.node.cur polygon,.dg svg g.node.cur circle{
+    stroke:var(--accent) !important;stroke-width:2.5px !important}
+
+  .reply{white-space:pre-wrap;line-height:1.8;padding:14px;background:var(--accent-soft);border-radius:8px;margin:12px 0}
+  .summary{display:grid;grid-template-columns:100px 1fr;gap:8px;line-height:1.7;margin-bottom:14px}
+  .summary dt{color:var(--text-2)}
+  .summary dd{overflow-wrap:anywhere}
+  .records{overflow-x:auto;margin-top:12px}
+  table{width:100%;border-collapse:collapse;font-size:12px} th,td{text-align:left;padding:9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{white-space:nowrap;color:var(--text-2)} details{margin-top:14px} details pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;margin-top:8px}
+  .log{white-space:pre-wrap;line-height:1.8;max-height:220px;overflow:auto}
+  @media(max-width:640px){body{padding:16px}.grp-t{width:100%}.drive{padding:14px}}
+</style>
+</head>
+<body>
+<h1>用一句话管理定时任务 <span class="tag">逻辑原型 · 一次性完成规则已确认</span></h1>
+<p class="q">检查任务设置、启停状态、执行结果和推送状态是否清楚。全部是内存中的示例数据；按钮代替自然语言解析和时间推进，不连接模型、账号或微信。刷新页面会清空模拟记录。周期任务及修改、启停、手动执行、删除控件用于后续方案演示；当前实施仅包含一次性完成与历史查询规则。</p>
+<div class="drive">
+  <div class="acts"><div class="grp"><span class="grp-t">创建示例</span><button data-new="once">“明天下午三点提醒我浇水”</button><button data-new="agent">“每周五晚上九点整理 AI 工具周报”</button><button data-new="news">导入日报与两份示例缓存</button><button id="btn-reset" class="ghost">清空</button></div></div>
+  <h4>任务设置</h4>
+  <dl class="summary"><dt>任务</dt><dd id="name">—</dd><dt>状态</dt><dd><span id="v-status" class="badge empty">—</span></dd><dt>任务进度</dt><dd id="completion">—</dd><dt>默认任务列表</dt><dd id="active-list">—</dd><dt>历史查询</dt><dd id="history-list">—</dd><dt>执行计划</dt><dd id="schedule">—</dd><dt>任务内容</dt><dd id="instruction">—</dd><dt>结果去向</dt><dd id="destination">—</dd><dt>错过执行</dt><dd id="missed">—</dd><dt>账号 / 会话</dt><dd id="context">—</dd><dt>生成容量</dt><dd id="capacity">—</dd><dt>续发检查</dt><dd id="wake">—</dd></dl>
+  <h4>对话回执（模拟）</h4><div id="reply" class="reply">先创建一个示例任务。</div>
+  <div id="v-illegal" class="illegal idle">尚未派发事件</div>
+  <div class="acts"><div class="grp"><span class="grp-t">管理设置</span><button data-act="pause">暂停任务</button><button data-act="resume">恢复任务</button><button data-act="edit_time">修改时间</button><button data-act="edit_content">修改内容</button><button data-act="remove">删除任务</button></div><div class="grp"><span class="grp-t">模拟执行</span><button data-act="tick">到达计划时间</button><button data-act="missed">停机错过三次</button><button data-act="run_now">立即执行一次</button><button data-act="generated">生成完成</button><button data-act="failed">执行失败</button></div><div class="grp"><span class="grp-t">模拟推送</span><button data-act="send">提交最早缓存</button><button data-act="accepted">微信接受</button><button data-act="stale">会话失效</button><button data-act="auth">账号失效</button><button data-act="partial">部分接受</button><button data-act="rejected">明确拒绝</button><button data-act="unknown">结果未知</button></div><div class="grp"><span class="grp-t">模拟恢复</span><button data-act="refresh">原会话收到新消息</button><button data-act="rebind">重新绑定原账号</button><button data-act="restart">服务重启</button><button data-act="capacity_full">模拟缓存已满</button><button data-act="capacity_free">模拟容量释放</button></div></div>
+  <label class="stress"><input type="checkbox" id="stress"><span>强制派发不可用事件，检查是否被模型拦截</span></label>
+  <p class="hint">灰色按钮表示当前不可执行，悬停可查看原因。恢复事件与提交动作分开显示，便于逐步检查；正式服务会自动处理符合条件的续发。</p>
+  <h4>每次执行与推送结果</h4><div class="records"><table><thead><tr><th>序号 / 计划顺序</th><th>执行</th><th>推送</th><th>保存的内容</th></tr></thead><tbody id="runs"></tbody></table></div>
+  <h4>模拟提交记录</h4><div id="outbox" class="log">—</div>
+  <details><summary>查看完整示例记录</summary><pre id="raw">—</pre></details>
+</div>
+<h4>设计关注点</h4><p class="q">一次性提醒只有执行成功且推送完整被渠道接受才显示已完成，并从默认列表隐藏；这不等于手机已收到。待推送、失败与未知结果仍在默认列表，缓存和历史不删除。最新的停用会撤销此前手动执行的续发许可；停用后新发起的手动执行只允许发送自己的结果。迟到的失败不会盖掉已恢复的状态；重新绑定会清除旧会话，需要绑定后的新消息。缓存满时暂停生成，已有内容保留。该原型只演示单任务状态；跨任务排序、迁移、实际限额和时间计算须另行实现验证。</p>
+<div id="dgs"></div>
+<script src="../../vendor/mermaid.min.js"></script>
+<script src="./model.mmd.js"></script>
+<script src="./logic.js"></script>
+<script>
+  const host = document.getElementById('dgs');
+  const packs = Object.values(window.MERMAID_SOURCES || {}).flat();
+  (async () => {
+    if (!packs.length) { host.innerHTML = '<div class="hint">No diagram source: the directory has no .mmd, or sync-mmd.mjs has not been run.</div>'; return; }
+    let i = 0;
+    for (const d of packs) {
+      const h = document.createElement('h4'); h.textContent = d.title;
+      const box = document.createElement('div'); box.className = 'dg';
+      host.appendChild(h); host.appendChild(box);
+      if (!window.mermaid) {
+        const pre = document.createElement('pre'); pre.textContent = d.src; box.appendChild(pre);
+        continue; // vendor library missing: fall back to showing the diagram source text
+      }
+      try {
+        // The built-in dark theme is nearly greyscale and default is designed for light backgrounds — use base + themeVariables to take the project palette
+        const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'base',
+          themeVariables: dark ? {
+            primaryColor: '#2c2733', primaryTextColor: '#e6e6e5', primaryBorderColor: '#a084c7',
+            lineColor: '#9b9a97', textColor: '#e6e6e5', edgeLabelBackground: '#1f2124',
+            noteBkgColor: '#34373c', noteTextColor: '#e6e6e5', background: '#18191b',
+            secondaryColor: '#1f2124', tertiaryColor: '#232526'
+          } : {
+            primaryColor: '#f0ebf6', primaryTextColor: '#37352f', primaryBorderColor: '#8a67ab',
+            lineColor: '#787774', textColor: '#37352f', edgeLabelBackground: '#ffffff',
+            noteBkgColor: '#f7f8f9', noteTextColor: '#37352f', background: '#ffffff',
+            secondaryColor: '#ffffff', tertiaryColor: '#f7f8f9'
+          } });
+        const { svg } = await mermaid.render('mmd-' + i++, d.src);
+        box.innerHTML = svg;
+        enablePanZoom(box);
+      } catch (e) {
+        const pre = document.createElement('pre'); pre.textContent = d.src; box.appendChild(pre);
+      }
+    }
+  })();
+
+  // Canvas interaction: drag = pan; pinch or ⌘/Ctrl + wheel = smooth zoom (anchored at the pointer); a plain wheel scrolls the page; double-click or ⌂ = reset to fit
+  function enablePanZoom(box){
+    const svg = box.querySelector('svg');
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    const natW = svg.viewBox.baseVal.width, natH = svg.viewBox.baseVal.height;
+    svg.style.maxWidth = 'none'; svg.style.width = natW + 'px'; svg.style.height = natH + 'px';
+    box.classList.add('pan');
+    box.insertAdjacentHTML('beforeend', '<button class="rst" title="Reset view (same as double-clicking the canvas)">⌂</button>');
+    let s = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
+    const apply = () => { svg.style.transform = `translate(${tx}px,${ty}px) scale(${s})`; };
+    const fit = () => {
+      const r = box.getBoundingClientRect();
+      s = Math.min((r.width - 28) / natW, (r.height - 28) / natH, 1);
+      tx = (r.width - natW * s) / 2; ty = (r.height - natH * s) / 2; apply();
+    };
+    fit();
+    box.querySelector('.rst').addEventListener('click', (e) => { e.stopPropagation(); fit(); });
+    box.addEventListener('dblclick', fit);
+    box.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.rst')) return;
+      dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+      box.classList.add('dragging'); box.setPointerCapture(e.pointerId);
+    });
+    box.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      tx = e.clientX - sx; ty = e.clientY - sy; apply();
+    });
+    const end = () => { dragging = false; box.classList.remove('dragging'); };
+    box.addEventListener('pointerup', end); box.addEventListener('pointercancel', end);
+    box.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey && !e.metaKey) return; // a plain scroll is not hijacked; the page scrolls normally
+      e.preventDefault();
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16; else if (e.deltaMode === 2) dy *= 120; // normalise line/page modes to pixels
+      dy = Math.max(-60, Math.min(60, dy)); // cap a single step: one mouse notch ≈ ±12%
+      const r = box.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const ns = Math.min(5, Math.max(0.2, s * Math.exp(-dy * 0.002)));
+      tx = px - (px - tx) * (ns / s); ty = py - (py - ty) * (ns / s); s = ns; apply();
+    }, { passive: false });
+  }
+</script>
+
+<script>
+(function(){
+  const SM=window.StateMachine; let state=null; let lastEvent=null;
+  const labels={scheduled:'待执行',pending_delivery:'待推送',completed:'已完成（渠道已接受）',enabled:'已启用',paused:'已停用',deleted:'已删除',running:'执行中',succeeded:'执行完成',failed:'执行失败',skipped:'已跳过',
+    ready:'已缓存，待推送',sending:'提交中',context_required:'等待会话刷新',auth_required:'等待重新绑定',accepted:'微信已接受',partial:'部分接受，不重发',rejected:'明确拒绝，不重发',unknown:'结果未知，不重试',cancelled:'任务已删除，取消待发'};
+  const put=(id,value)=>document.getElementById(id).textContent=value;
+  function render(){
+    const completion=SM.completionView(state);
+    put('completion',completion?labels[completion.status]:'—');
+    put('active-list',completion?(completion.active?'显示：尚未完成或需要处理':'隐藏：可在已完成或全部任务中查看'):'—');
+    put('history-list',completion?(completion.history?'执行记录和正文保留，可按名称或编号查看':'尚无执行记录'):'—');
+    put('name',state?.name??'—'); put('schedule',state ? state.schedule+'（北京时间） · 设置版本 '+state.revision : '—');
+    put('instruction',state?.instruction??'—');put('destination',state?'创建任务的原微信会话':'—');
+    put('missed',state?(state.kind==='once'?'恢复后只执行这一次；已生成的缓存继续保留':'只补最近一次；已生成的缓存仍按时间顺序续发'):'—');
+    put('context',state?(state.usable?'账号可用':'账号需重新绑定')+' · 绑定 '+state.credential+' / '+(state.contextCredential===state.credential?'会话版本 '+state.context:'等待绑定后的新会话'):'—');
+    put('capacity',state?(state.capacityBlocked?'已满：暂停新生成，保留并允许处理已有缓存':'可接纳（只模拟准入开关，不计算真实配额）'):'—');
+    put('wake',state?(state.recoveryWake?'已安排：可提交最早获准缓存':'未安排：无可立即提交的缓存'):'—');
+    const badge=document.getElementById('v-status');badge.textContent=state?labels[state.status]:'—';
+    badge.className='badge '+(!state?'empty':state.status==='enabled'?'done':state.status==='paused'?'pending':'expired');
+    put('reply',state?.reply??'先创建一个示例任务。');
+    const receipt=document.getElementById('v-illegal');
+    receipt.textContent=state?.illegal?'事件被拦截：'+state.illegal:lastEvent?'已派发 '+lastEvent+' → '+labels[state.status]:'尚未派发事件';
+    receipt.className='illegal '+(state?.illegal?'bad':lastEvent?'ok':'idle');
+    const rows=document.getElementById('runs');rows.replaceChildren();
+    for(const r of state?.runs??[]){const tr=document.createElement('tr');
+      for(const value of ['#'+r.id+' / '+r.slot+(r.throughSlot?'–'+r.throughSlot:'')+(r.manual?'（手动）':''),labels[r.execution],r.delivery?labels[r.delivery]:'null',r.body??'null']){
+        const td=document.createElement('td');td.textContent=value;tr.append(td);
+      }rows.append(tr);
+    }
+    if(!state?.runs.length){const tr=document.createElement('tr');const td=document.createElement('td');td.colSpan=4;td.textContent=state?'尚无执行记录':'—';tr.append(td);rows.append(tr);}
+    put('outbox',!state?'—':state.outbox.length?state.outbox.map(x=>'#'+x.run+' · '+(x.outcome==='context_required'?'该次提交会话失效':x.outcome==='auth_required'?'该次提交账号失效':labels[x.outcome])+'\n'+x.body).join('\n\n'):'尚未提交任何内容。');
+    put('raw',state?JSON.stringify(state,null,2):'—');
+    const legal=SM.legal(state),stress=document.getElementById('stress').checked;
+    document.querySelectorAll('[data-act]').forEach(b=>{const info=legal[b.dataset.act];b.setAttribute('aria-disabled',String(!info.legal&&!stress));
+      if(info.legal)b.removeAttribute('data-tip');else b.dataset.tip=(stress?'将强制派发：':'不可执行：')+info.why;
+    });
+    highlight();
+  }
+  function highlight(){
+    const run=state?.runs.find(r=>r.delivery==='sending'||r.execution==='running')??state?.runs.at(-1);
+    const current=run?.delivery??run?.execution;
+    document.querySelectorAll('.dg svg g.node').forEach(n=>{const t=n.textContent.trim();n.classList.toggle('cur',!!state&&(t===labels[state.status]||t===labels[current]));});
+  }
+  document.querySelectorAll('[data-new]').forEach(b=>b.addEventListener('click',()=>{state=SM.initial(b.dataset.new);lastEvent=null;render();}));
+  document.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click',()=>{if(b.getAttribute('aria-disabled')==='true')return;lastEvent=b.dataset.act;state=SM.reduce(state,{type:lastEvent});render();}));
+  document.getElementById('btn-reset').addEventListener('click',()=>{state=null;lastEvent=null;render();});
+  document.getElementById('stress').addEventListener('change',render);
+  const observer=new MutationObserver(highlight);observer.observe(document.getElementById('dgs'),{childList:true,subtree:true});
+  render();
+})();
+</script>
+</body></html>

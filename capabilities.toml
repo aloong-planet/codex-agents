@@ -1,0 +1,34 @@
+client-framework = "none"
+working-language = "en"
+
+[i18n]
+enabled = false
+
+[enumeration-wording-gate]
+enabled = false
+
+[lint]
+enabled = true
+source = [
+  "apps/weixin-service/eslint.config.js",
+  "plugins/codex-weixin/eslint.config.js",
+]
+enforced-by = ["pnpm lint"]
+
+[e2e-suite]
+enabled = true
+source = [
+  "apps/weixin-service/playwright.config.ts",
+  "plugins/codex-weixin/vitest.e2e.config.ts",
+]
+enforced-by = [
+  "pnpm test:e2e",
+  "pnpm --filter @aloong-planet/codex-weixin-service test:e2e",
+]
+
+[theming]
+enabled = false
+
+
+[mutation-testing]
+enabled = false

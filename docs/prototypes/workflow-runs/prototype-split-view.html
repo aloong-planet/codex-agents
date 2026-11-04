@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工作流运行 · UI 原型</title>
+  <!--
+    原型问题：运行列表 + 详情双栏能否清楚呈现受约束 DAG、等待和外部结果。
+    演示基建：底部“演示状态”切换条，仅切换 mock 数据，不是产品设计的一部分，勿实现。
+    本页不含真实后端、真实微信发送或文件操作。
+  -->
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+      --canvas: #17191e;
+      --shell: #30333c;
+      --shell-deep: #292c34;
+      --card: #292c33;
+      --card-deep: #24272e;
+      --well: rgba(17, 20, 27, .48);
+      --ink: #f4f5f8;
+      --muted: #b4b7c1;
+      --faint: #858a96;
+      --line: rgba(255, 255, 255, .13);
+      --line-soft: rgba(255, 255, 255, .075);
+      --blue: #6cb5ff;
+      --magenta: #e96cb7;
+      --violet: #9b7cff;
+      --success: #59d78d;
+      --warning: #ffb64d;
+      --danger: #ff7777;
+      --focus: #8fc7ff;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      overflow: hidden;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 14% 0%, rgba(55, 112, 170, .18), transparent 30%),
+        radial-gradient(circle at 88% 100%, rgba(201, 83, 145, .11), transparent 34%),
+        var(--canvas);
+    }
+    button { font: inherit; }
+    button:focus-visible, [tabindex]:focus-visible { outline: 2px solid #20242c; box-shadow: 0 0 0 4px var(--focus); }
+    main {
+      width: min(1320px, calc(100% - 28px));
+      height: calc(100dvh - 28px);
+      margin: 14px auto;
+      padding: 18px 20px 0;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      gap: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.19);
+      border-radius: 30px;
+      background: linear-gradient(155deg, rgba(255,255,255,.035), transparent 32%), linear-gradient(180deg, #343740 0%, #2b2e36 100%);
+      box-shadow: 0 28px 90px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.08);
+    }
+    header { min-height: 54px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; }
+    .brand-mark { width: 40px; height: 40px; display: grid; place-items: center; border: 4px solid transparent; border-radius: 50%; background: linear-gradient(var(--shell),var(--shell)) padding-box, conic-gradient(from 210deg,var(--blue),#55d0ff,var(--violet),var(--magenta),#ff876a,var(--blue)) border-box; }
+    .brand-mark svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2.25; stroke-linecap: round; stroke-linejoin: round; }
+    .brand-copy h1 { margin: 0; font-size: 1.38rem; letter-spacing: -.035em; }
+    .brand-copy p, .header-meta { margin: 4px 0 0; color: var(--muted); font: 650 .75rem/1.3 var(--mono); }
+    .header-meta { margin: 0; }
+    .app-tabs { display: flex; gap: 4px; min-width: 0; padding: 5px; overflow-x: auto; border: 1px solid rgba(255,255,255,.04); border-radius: 17px; background: rgba(255,255,255,.07); }
+    .app-tabs button { flex: 1 0 126px; min-height: 38px; border: 1px solid transparent; border-radius: 12px; background: transparent; color: var(--muted); white-space: nowrap; }
+    .app-tabs button[aria-selected="true"] { border-color: rgba(108,181,255,.3); background: rgba(108,181,255,.1); color: #b9dcff; box-shadow: inset 0 0 0 1px rgba(0,0,0,.16); }
+    .app-tabs button:not([aria-selected="true"]):hover { color: var(--ink); background: rgba(255,255,255,.055); }
+    .workspace { min-height: 0; padding-bottom: 56px; overflow: auto; scrollbar-gutter: stable; }
+    .panel { min-height: 100%; padding: 18px; overflow: hidden; border: 1px solid rgba(108,181,255,.3); border-radius: 22px; background: linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.005)),#272e39; }
+    .section-head { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 14px; }
+    .section-head h2 { margin: 0; font-size: 1.25rem; letter-spacing: -.025em; }
+    .section-head p { margin: 4px 0 0; color: var(--muted); }
+    .summary { display: flex; gap: 8px; flex-wrap: wrap; }
+    .summary span { padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px; background: rgba(0,0,0,.13); color: var(--muted); font: 650 .74rem/1 var(--mono); }
+    .workflow-grid { display: grid; grid-template-columns: minmax(290px, .78fr) minmax(520px, 1.62fr); gap: 14px; height: calc(100% - 58px); min-height: 470px; }
+    .run-list, .detail { min-height: 0; border: 1px solid var(--line); border-radius: 18px; background: rgba(17,20,27,.36); }
+    .run-list { display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; }
+    .list-tools { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--line-soft); }
+    .list-tools strong { font-size: .9rem; }
+    .filters { display: flex; gap: 4px; padding: 3px; border-radius: 10px; background: rgba(255,255,255,.045); }
+    .filters button { min-height: 29px; padding: 0 9px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); font-size: .73rem; }
+    .filters button.active { border-color: rgba(255,255,255,.12); background: rgba(255,255,255,.08); color: var(--ink); }
+    .runs { margin: 0; padding: 8px; overflow: auto; list-style: none; }
+    .run { width: 100%; margin: 0 0 6px; padding: 12px; display: grid; gap: 7px; border: 1px solid transparent; border-radius: 13px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+    .run:hover { background: rgba(255,255,255,.04); }
+    .run.selected { border-color: rgba(108,181,255,.32); background: linear-gradient(100deg,rgba(108,181,255,.1),rgba(255,255,255,.025)); }
+    .run-top, .run-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .run-title { overflow: hidden; font-weight: 760; text-overflow: ellipsis; white-space: nowrap; }
+    .run-time, .run-source { color: var(--faint); font: 600 .7rem/1.25 var(--mono); }
+    .badge { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border: 1px solid currentColor; border-radius: 999px; font: 750 .68rem/1 var(--mono); }
+    .succeeded { color: var(--success); }
+    .waiting { color: var(--warning); }
+    .unknown { color: #d7a7ff; }
+    .failed { color: var(--danger); }
+    .running { color: var(--blue); }
+    .detail { padding: 16px; overflow: auto; }
+    .detail-head { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: start; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+    .detail-head h3 { margin: 0 0 6px; font-size: 1.08rem; }
+    .detail-head p { margin: 0; color: var(--muted); font-size: .82rem; }
+    .meta { display: flex; flex-wrap: wrap; gap: 7px 13px; margin-top: 10px; color: var(--faint); font: 600 .7rem/1.4 var(--mono); }
+    .notice { margin: 14px 0; padding: 11px 12px; border: 1px solid currentColor; border-left-width: 4px; border-radius: 12px; background: rgba(0,0,0,.16); line-height: 1.45; }
+    .notice strong { display: block; margin-bottom: 3px; color: var(--ink); }
+    .action { min-height: 34px; padding: 0 12px; border: 1px solid rgba(255,255,255,.18); border-radius: 10px; background: rgba(255,255,255,.075); color: var(--ink); cursor: pointer; }
+    .action:hover { background: rgba(255,255,255,.12); }
+    .action[hidden] { display: none; }
+    .dag { display: grid; gap: 8px; margin-top: 12px; }
+    .lane { display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 10px; align-items: stretch; }
+    .lane-label { padding-top: 12px; color: var(--faint); font: 650 .7rem/1.3 var(--mono); text-align: right; }
+    .nodes { display: grid; gap: 8px; }
+    .nodes.parallel { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    .node { position: relative; min-width: 0; padding: 10px 11px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.035); }
+    .node::before { content: ""; position: absolute; left: -7px; top: 50%; width: 7px; height: 1px; background: rgba(108,181,255,.46); }
+    .node-title { overflow: hidden; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
+    .node-sub { grid-column: 1 / -1; color: var(--faint); font: 600 .68rem/1.35 var(--mono); }
+    .node-time { color: #95cbff; font: 700 .72rem/1.2 var(--mono); white-space: nowrap; }
+    .effect { margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--line); }
+    .effect h4 { margin: 0 0 8px; font-size: .86rem; }
+    .effect-row { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; padding: 9px 10px; border-radius: 10px; background: rgba(0,0,0,.13); color: var(--muted); }
+    .effect-row + .effect-row { margin-top: 6px; }
+    .effect-row strong { color: var(--ink); }
+    .toast { position: fixed; right: 24px; bottom: 74px; max-width: 360px; padding: 11px 14px; border: 1px solid rgba(89,215,141,.38); border-radius: 12px; background: #263730; color: #b8f4d0; box-shadow: 0 18px 50px rgba(0,0,0,.42); opacity: 0; pointer-events: none; transition: opacity .16s ease; }
+    .toast.show { opacity: 1; }
+    [data-demo-harness] { position: fixed; left: 16px; right: 16px; bottom: 14px; z-index: 20; width: max-content; max-width: calc(100% - 32px); margin-inline: auto; padding: 7px; display: flex; align-items: center; gap: 6px; overflow-x: auto; border: 1px solid rgba(255,255,255,.22); border-radius: 999px; background: #11141a; box-shadow: 0 10px 35px rgba(0,0,0,.48); }
+    [data-demo-harness] span { padding-inline: 6px; color: #c8cad1; font: 650 .7rem/1 var(--mono); white-space: nowrap; }
+    [data-demo-harness] button { min-height: 30px; padding: 0 10px; border: 1px solid rgba(255,255,255,.15); border-radius: 999px; background: #292d36; color: #dfe1e7; white-space: nowrap; cursor: pointer; }
+    [data-demo-harness] button.active { border-color: #8fc7ff; background: #263a4e; color: #bce0ff; }
+    @media (max-width: 850px) {
+      main { width: calc(100% - 14px); height: calc(100dvh - 14px); margin: 7px auto; padding: 14px 12px 0; border-radius: 22px; }
+      .header-meta { display: none; }
+      .workflow-grid { grid-template-columns: 1fr; height: auto; }
+      .run-list { max-height: 310px; }
+      .detail { min-height: 520px; }
+      .section-head { align-items: start; flex-direction: column; }
+      .nodes.parallel { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></svg></div>
+      <div class="brand-copy"><h1>个人微信直连 iLink</h1><p>Codex · 微信助手</p></div>
+      <p class="header-meta">本地服务 · 腾讯 iLink</p>
+    </header>
+    <nav class="app-tabs" aria-label="功能页面">
+      <button>微信连接</button><button>聊天记录</button><button aria-selected="true">工作流运行</button><button>Memory Curator</button><button>每日新闻</button><button>本地权限</button>
+    </nav>
+    <div class="workspace">
+      <section class="panel">
+        <div class="section-head">
+          <div><h2>工作流运行</h2><p>查看微信与定时任务的真实执行状态、等待原因和外部结果。</p></div>
+          <div class="summary"><span>运行中 1</span><span>需处理 2</span><span>今日完成 12</span></div>
+        </div>
+        <div class="workflow-grid">
+          <aside class="run-list" aria-label="工作流运行列表">
+            <div class="list-tools"><strong>最近运行</strong><div class="filters"><button class="active" data-filter="all">全部</button><button data-filter="attention">需处理</button></div></div>
+            <ul class="runs" id="runs"></ul>
+          </aside>
+          <article class="detail" id="detail" aria-live="polite"></article>
+        </div>
+      </section>
+    </div>
+  </main>
+  <div class="toast" id="toast" role="status"></div>
+  <div data-demo-harness aria-label="演示状态切换">
+    <span>演示状态</span>
+    <button data-demo-id="success">已完成</button>
+    <button data-demo-id="permission">权限不足</button>
+    <button data-demo-id="unknown">结果未知</button>
+    <button data-demo-id="failed">失败</button>
+  </div>
+  <script>
+    const runs = [
+      { id:'success', title:'发送 Downloads 中最新的产品截图', source:'微信', time:'今天 15:42', status:'succeeded', statusText:'已完成', total:'3.8 秒', spec:'media-send v1', notice:'渠道已接受图片发送请求。手机端是否已收到仍以用户实际确认为准。', noticeTitle:'渠道已接受', action:'', lanes:[['识别',[['解析媒体发送意图','32 ms','已完成']]],['查找',[['扫描已授权图片','480 ms','已完成'],['生成短期媒体句柄','8 ms','已完成']]],['发送',[['上传并发送图片','2.9 秒','已接受']]]], effects:[['微信图片发送','accepted','渠道接受，不等同手机确认'],['权限范围','checked','Downloads · 只读']] },
+      { id:'permission', title:'更新“旅行计划”中的住宿信息', source:'微信', time:'今天 15:28', status:'failed', statusText:'权限不足', total:'86 ms', spec:'notes-update v1', notice:'笔记模块没有该 Vault 的写入权限。任务已在任何文件操作前终止；请在“本地权限”中调整后手动重试。', noticeTitle:'未执行写入', action:'打开本地权限', lanes:[['权限预检',[['检查笔记模块写入范围','18 ms','未授权']]],['写入',[['读取与更新笔记','—','未开始']]]], effects:[['Obsidian 更新','not_started','没有读取或修改文件'],['模块权限','rejected','写入范围未授权']] },
+      { id:'unknown', title:'发送每周项目归档摘要', source:'定时任务', time:'今天 09:00', status:'unknown', statusText:'结果未知', total:'18.4 秒', spec:'scheduled-summary v1', notice:'微信发送请求超时，无法确认渠道是否接受。系统不会自动重发，以免产生重复消息。', noticeTitle:'外部结果未知', action:'记录实际结果', lanes:[['准备',[['读取已生成摘要','91 ms','已完成']]],['发送',[['提交微信文本','15.0 秒','结果未知']]]], effects:[['微信文本发送','unknown','禁止自动重试'],['定时授权','checked','当前目标 · 最多 1 次发送']] },
+      { id:'failed', title:'更新“项目周报”中的本周进度', source:'微信', time:'昨天 21:17', status:'failed', statusText:'失败', total:'2.1 秒', spec:'notes-update v1', notice:'读取后文件被其他程序修改，修订值不一致。系统没有覆盖新内容。', noticeTitle:'笔记已发生变化', action:'重新读取并预览', lanes:[['定位',[['搜索项目周报','410 ms','已完成']]],['读取',[['读取正文与修订','88 ms','已完成']]],['更新',[['按修订值写入','24 ms','已拒绝']]]], effects:[['Obsidian 更新','rejected','revision conflict'],['文件覆盖','not_started','未发生']] },
+      { id:'running', title:'整理会议截图并发送最新一张', source:'微信', time:'今天 15:45', status:'running', statusText:'运行中', total:'2.2 秒', spec:'media-send v1', notice:'正在扫描已授权目录，尚未执行任何外部发送。', noticeTitle:'正在执行', action:'', lanes:[['识别',[['解析媒体发送意图','28 ms','已完成']]],['查找',[['扫描已授权图片','2.1 秒','运行中']]],['发送',[['上传并发送图片','—','尚未开始']]]], effects:[['微信图片发送','not_started','尚未调用渠道']] }
+    ];
+    const statusClass = s => s;
+    let selected = 'success';
+    let filter = 'all';
+    const esc = v => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    function renderList(){
+      const visible = filter === 'attention' ? runs.filter(r => ['unknown','failed'].includes(r.status)) : runs;
+      document.querySelector('#runs').innerHTML = visible.map(r => `<li><button class="run ${r.id===selected?'selected':''}" data-id="${r.id}"><span class="run-top"><span class="run-title">${esc(r.title)}</span><span class="badge ${statusClass(r.status)}">${r.statusText}</span></span><span class="run-bottom"><span class="run-source">${r.source} · ${r.spec}</span><span class="run-time">${r.time}</span></span></button></li>`).join('');
+      document.querySelectorAll('.run').forEach(button => button.onclick = () => { selected=button.dataset.id; render(); });
+    }
+    function renderDetail(){
+      const r = runs.find(x => x.id === selected) || runs[0];
+      const lanes = r.lanes.map(([label,nodes]) => `<div class="lane"><div class="lane-label">${label}</div><div class="nodes ${nodes.length>1?'parallel':''}">${nodes.map(n => `<div class="node"><span class="node-title">${esc(n[0])}</span><span class="node-time">${n[1]}</span><span class="node-sub">${n[2]}</span></div>`).join('')}</div></div>`).join('');
+      const effects = r.effects.map(e => `<div class="effect-row"><span><strong>${esc(e[0])}</strong><br>${esc(e[2])}</span><span class="badge ${e[1]==='accepted'||e[1]==='checked'?'succeeded':e[1]==='unknown'?'unknown':e[1]==='rejected'||e[1]==='blocked'?'failed':'waiting'}">${e[1]}</span></div>`).join('');
+      document.querySelector('#detail').innerHTML = `<div class="detail-head"><div><h3>${esc(r.title)}</h3><p>${r.source}触发的受约束工作流</p><div class="meta"><span>${r.spec}</span><span>总耗时 ${r.total}</span><span>运行 ID wf_••••${r.id.slice(-4)}</span></div></div><span class="badge ${statusClass(r.status)}">${r.statusText}</span></div><div class="notice ${statusClass(r.status)}"><strong>${r.noticeTitle}</strong>${r.notice}</div><button class="action" ${r.action?'':'hidden'}>${r.action}</button><div class="dag">${lanes}</div><section class="effect"><h4>副作用与授权</h4>${effects}</section>`;
+      const action = document.querySelector('.action:not([hidden])');
+      if(action) action.onclick=()=>showToast(`原型反馈：已打开“${action.textContent}”流程；没有执行真实操作。`);
+    }
+    function render(){ renderList(); renderDetail(); document.querySelectorAll('[data-demo-id]').forEach(b=>b.classList.toggle('active',b.dataset.demoId===selected)); }
+    function showToast(text){ const t=document.querySelector('#toast'); t.textContent=text; t.classList.add('show'); clearTimeout(showToast.timer); showToast.timer=setTimeout(()=>t.classList.remove('show'),2200); }
+    document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter; document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x===b)); if(filter==='attention'&&!['permission','unknown','failed'].includes(selected))selected='permission'; render();});
+    document.querySelectorAll('[data-demo-id]').forEach(b=>b.onclick=()=>{selected=b.dataset.demoId; filter='all'; document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('active',x.dataset.filter==='all')); render();});
+    render();
+  </script>
+</body>
+</html>

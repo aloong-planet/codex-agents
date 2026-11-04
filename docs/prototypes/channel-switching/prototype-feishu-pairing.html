@@ -1,0 +1,82 @@
+<!doctype html>
+<!-- prototype-feishu-pairing.md -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飞书首次配对 · 命令行</title>
+<script src="../manifest.js"></script><script src="../app-identity.js"></script>
+<style>
+body{margin:0}*{box-sizing:border-box}
+.fpw-terminal{--surface:#171b21;--ink:#edf0f4;--muted:#aeb8c5;--line:#35404e;background:var(--surface);color:var(--ink);font:15px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace;min-height:100vh;padding:32px max(24px,calc((100vw - 900px)/2)) 220px;overflow-wrap:anywhere}
+.fpw-title{font-size:14px;font-weight:400;color:var(--muted);margin:0 0 24px;border-bottom:1px solid var(--line);padding-bottom:12px}
+.fpw-log{white-space:pre-wrap;margin:0;font:inherit}.fpw-form{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-top:12px}
+.fpw-form[hidden]{display:none}
+.fpw-input{font:inherit;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--line);min-width:180px;max-width:100%;flex:1;padding:2px 4px}.fpw-hint{font-size:13px;color:var(--muted);margin-top:20px}
+</style>
+</head>
+<body>
+<main class="fpw-terminal">
+<h1 class="fpw-title">终端 — 飞书首次配对</h1>
+<pre id="fpw-log" class="fpw-log" aria-live="polite"></pre>
+<form id="fpw-form" class="fpw-form"><label id="fpw-prompt" for="fpw-input"></label><input id="fpw-input" class="fpw-input" autocomplete="off" spellcheck="false"></form>
+<p class="fpw-hint" id="fpw-hint"></p>
+</main>
+<div data-demo-harness>
+<span class="dh-tag">Demo ·</span>
+<div class="dh-group"><span class="dh-title">Scenario</span><div class="dh-opts">
+<button class="dh-opt" data-scenario="normal" aria-pressed="true">首次配对</button>
+<button class="dh-opt" data-scenario="existing" aria-pressed="false">已有飞书绑定</button>
+<button class="dh-opt" data-scenario="missing" aria-pressed="false">缺少原身份</button>
+</div></div>
+<div class="dh-group dh-actions"><span class="dh-title">Events</span><div class="dh-acts">
+<button class="dh-act" data-event="receive">收到配对私聊</button>
+<button class="dh-act" data-event="foreign">无关消息</button>
+</div></div>
+<div class="dh-group dh-actions"><span class="dh-title">Connection</span><div class="dh-acts">
+<button class="dh-act" data-event="expire">超时</button>
+<button class="dh-act" data-event="fail">连接失败</button>
+</div></div>
+<div class="dh-group dh-actions"><span class="dh-title">Saving</span><div class="dh-acts">
+<button class="dh-act" data-event="conflict">配置被改动</button>
+<button class="dh-act" data-event="writefail">保存失败</button>
+</div></div>
+<div class="dh-group dh-actions"><span class="dh-title">Actions</span><div class="dh-acts">
+<button class="dh-act" data-event="cancel">取消</button><button class="dh-act" data-event="reset">重新演示</button>
+</div></div>
+<p class="dh-note">仅演示：请勿输入真实密钥。事件按钮模拟网络、私聊和本机文件状态，正式向导没有这些按钮。输入后按 Enter；所有数据仅在内存。</p>
+</div>
+<script src="./pairing-demo-harness.js"></script>
+<script>
+const log=document.getElementById('fpw-log'),form=document.getElementById('fpw-form'),input=document.getElementById('fpw-input'),prompt=document.getElementById('fpw-prompt'),hint=document.getElementById('fpw-hint');
+let stage,scenario='normal',lines=[],saveFailure=false,conflict=false;
+function show(){log.textContent=lines.join('\n');form.hidden=!['app','secret','replace','confirm','save'].includes(stage);hint.textContent=form.hidden?'':'按 Enter 继续；输入 /cancel 可取消。';}
+function ask(next,label,value=''){stage=next;prompt.textContent=label;input.type=next==='secret'?'password':'text';input.value=value;show();input.focus();}
+function done(text){lines.push('',text);stage='end';show();}
+function reset(){saveFailure=false;conflict=false;lines=['$ pnpm feishu:pair','飞书首次配对','', '保存前不会修改配置。请先停止正式服务。'];
+ if(scenario==='missing'){done('未找到可复用的原身份。请指定原服务状态目录后重试。未生成新记忆或任务身份。');return;}
+ lines.push('已识别原微信身份：个人微信 / 本人私聊','将保留原有记忆、文件权限、任务和历史。');
+ if(scenario==='existing'){lines.push('已有飞书绑定：ou_previous / oc_previous');ask('replace','是否重新配对并在最后确认替换？[y/N]');}else ask('app','App ID：','cli_0123456789abcdef');}
+form.addEventListener('submit',e=>{e.preventDefault();const value=input.value.trim();if(value==='/cancel'){done('已取消。配对连接已关闭，原配置未修改。');return;}
+ if(stage==='replace'){if(value.toLowerCase()!=='y'){done('保留原绑定，退出。');return;}lines.push('重新配对；原绑定在保存成功前保持不变。');ask('app','App ID：','cli_0123456789abcdef');return;}
+ if(stage==='app'){if(!/^cli_[a-f0-9]{16}$/i.test(value)){hint.textContent='App ID 格式无效，请重新输入。';return;}lines.push('App ID：'+value);ask('secret','App Secret（隐藏输入）：');return;}
+ if(stage==='secret'){if(!value){hint.textContent='请输入应用密钥。';return;}input.value='';lines.push('App Secret：已输入（不显示）','', '配对连接已就绪。', '请在飞书后台选择长连接，并订阅“接收消息 v2.0”，发布应用。','然后私聊机器人，发送以下一次性口令：','', 'PAIR F7K9-M2Q8', '', '等待配对消息（有效期 5 分钟）……');stage='waiting';show();return;}
+ if(stage==='confirm'){if(value.toLowerCase()!=='y'){done('未确认本人身份。已关闭连接，原配置未修改；重新运行可取得新口令。');return;}lines.push('已确认此私聊属于本人。','', '保存预览：','  下次启动渠道：飞书','  本人：ou_demo_owner','  私聊：oc_demo_private','  原微信绑定、记忆、权限、任务身份：保留','  配置位置：原服务私有目录 / channel.json','  文件仅限本机当前用户读写。');ask('save','保存此配置？[y/N]');return;}
+ if(stage==='save'){if(value.toLowerCase()!=='y'){done('未保存。配对连接已关闭，原配置未修改。');return;}
+ if(conflict){done('保存已停止：配对期间原配置发生变化。请核对后重新运行；未覆盖他人的改动。');return;}
+ if(saveFailure){done('保存失败。原配置保持不变，请检查私有目录权限或磁盘空间后重试。');return;}
+ done('配置已保存。配对连接已关闭。\n正式服务尚未启动。\n使用同一私有状态目录启动服务，然后在飞书发送一条消息验证回复。\n切回微信：停服务，将配置中的 channel 改为 weixin，再启动。');}
+});
+document.querySelectorAll('[data-scenario]').forEach(b=>b.addEventListener('click',()=>{scenario=b.dataset.scenario;document.querySelectorAll('[data-scenario]').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));reset();}));
+document.querySelectorAll('[data-event]').forEach(b=>b.addEventListener('click',()=>{const event=b.dataset.event;
+ if(event==='reset'){reset();return;}if(stage==='end')return;
+ if(event==='cancel'){done('已取消。配对连接已关闭，原配置未修改。');return;}
+ if(event==='writefail'){saveFailure=true;return;}if(event==='conflict'){conflict=true;return;}
+ if(event==='fail'){done('连接失败或已断开。请检查应用凭据与网络后重新配对。原配置未修改。');return;}
+ if(event==='expire'){done('本次配对已超时，口令已失效。连接已关闭，原配置未修改；重新运行可取得新口令。');return;}
+ if(stage!=='waiting')return;
+ if(event==='foreign'){hint.textContent='仍在等待匹配本次口令的本人私聊；无关消息不进入助手。';return;}
+ lines.push('收到匹配口令的私聊：','  本人标识：ou_demo_owner','  私聊标识：oc_demo_private','  消息：PAIR F7K9-M2Q8');ask('confirm','这是你刚才发送的私聊吗？[y/N]');
+}));
+reset();
+</script>
+</body></html>

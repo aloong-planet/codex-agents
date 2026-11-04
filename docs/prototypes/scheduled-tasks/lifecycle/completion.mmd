@@ -1,0 +1,22 @@
+%% title: 一次性任务完成与列表归属
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+direction LR
+state "待执行" as scheduled
+state "执行中" as running
+state "待推送" as pending
+state "提交中" as sending
+state "已完成（渠道已接受）" as completed
+state "失败或结果不确定" as attention
+[*] --> scheduled: 创建
+scheduled --> running: 唯一计划到期
+running --> pending: 完整正文保存
+running --> attention: 失败 / 中断
+pending --> sending: 原会话条件满足
+sending --> pending: 确认零接受的前置失败
+sending --> completed: 全文被接受
+sending --> attention: 部分 / 拒绝 / 不确定
+completed --> [*]
+note right of completed: 默认列表隐藏；历史和正文保留；不自动重发
+note right of pending: 没有下次执行时间也仍未完成；恢复后续发缓存
+note right of attention: 默认列表保留明确原因；不会标成成功

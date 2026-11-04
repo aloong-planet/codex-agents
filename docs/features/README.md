@@ -1,0 +1,15 @@
+# 功能目录（Features）
+
+本目录描述**当前版本已具备功能的现行行为**，面向人的产品全景。
+
+- 不变量：出现在本目录 = 当前版本可用；行为变更就地改写；功能移除删除文件。
+- 未来计划见 roadmap；历史见 git/Release Notes；实现与决策见 `docs/adr/`。
+- 内容规则：只写用户可见行为，零实现细节；术语从 `CONTEXT.md`。
+
+| 功能 | 一句话 |
+|---|---|
+| [Personal Weixin and Feishu channels](channel-switching.md) | Use either or both private channels with shared personal memory, independent chats and creation-channel reminders. |
+| [Scheduled tasks](scheduled-tasks.md) | Manage reminders, public-web research and existing daily news with editable schedules, permanent execution summaries and exact ordered cached recovery. |
+| [Daily AI news](daily-ai-news.md) | Select supported current news, reject mismatched article bodies, reuse complete summaries, disclose shortages and recover eligible reports in order independently of archiving. |
+| [工作流模块权限](workflow-module-permissions.md) | 在本地设置页按模块和目录保存读写权限，文件执行始终禁止。 |
+| [微信工作流与运行面板](workflow-runs.md) | 用自然语言查找、读取、修改或发送已授权文件，并查看持久外发与待选结果。 |

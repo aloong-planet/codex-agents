@@ -1,0 +1,27 @@
+# Reminder reply resolution tasklist
+
+- [x] Reproduce `已经买了` as `memory_event_evidence_invalid`
+- [x] Document fixed semantic decision and trusted binding
+- [x] Review ambiguity, retry, and transaction boundaries
+- [x] Add failing high-seam regression test
+- [x] Add strict `resolve_reminder` output schema and prompt contract
+- [x] Implement trusted target resolution and outcome guard
+- [x] Map clarification to non-retryable public state
+- [x] Review implementation and tests
+- [x] Run targeted and full verification
+- [x] Sync design with implementation
+- [x] Add and exercise a one-shot latest-failure recovery path
+- [x] Reproduce a combined reply completing one plan while rescheduling another
+- [x] Amend and review the design with per-decision descriptive matching and a batch conflict guard
+- [x] Implement the multi-plan binding fix
+- [x] Add regression coverage for correct split targeting, date isolation, reminder scope, and fail-closed conflicts
+- [x] Run targeted and full verification, then repair the affected persisted records
+- [x] Reproduce `明晚` plan revision as `memory_event_date_mismatch`
+- [x] Review the duplicated date-vocabulary failure and define one parser boundary
+- [x] Add shorthand parsing and rerun the failed persisted job
+- [x] Reproduce `看过了` being skipped despite an accepted unresolved reminder
+- [x] Review the short-reply admission seam and reject phrase lists and time-only expiry
+- [x] Add failing reminder-aware short-reply and terminal-plan filtering tests
+- [x] Implement reminder-aware no-op admission and pending-plan filtering
+- [x] Review code and tests and run full verification
+- [x] Repair the affected persisted plan and verify reminder closure

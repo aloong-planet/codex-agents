@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- Goal: review daily-news content, archive and delivery messages before production changes.
+Structure is fixed by the existing plain-text Weixin channel, not a new client screen.
+Conversation shell follows the user's supplied Weixin screenshot; report headings follow
+apps/weixin-service/src/daily-ai-news-scheduler.ts. Fictional article data is for display only.
+The floating Demo state selector is scaffolding, not product UI; never implement it.
+No product icons are introduced. i18n/theming are disabled in capabilities.toml.
+No product settings, writes, requests, live service or real Weixin connection exist here.
+-->
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日报来源与归档状态</title>
+<script src="../manifest.js"></script><script src="../app-identity.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#e9e9e9;color:#191919;font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.news-demo-note{max-width:640px;margin:20px auto;padding:0 20px;color:#555;font-size:13px}
+.news-demo-shell{max-width:640px;margin:auto;background:#ededed;min-height:80vh;padding-bottom:220px}
+.news-demo-header{padding:18px;text-align:center;border-bottom:1px solid #d8d8d8;font-size:19px;font-weight:600}
+.news-demo-thread{display:grid;gap:22px;padding:24px 18px}
+.news-demo-user{justify-self:end;background:#95ec69;border-radius:9px;padding:12px 16px;max-width:86%}
+.news-demo-bot{justify-self:start;background:#fff;border-radius:9px;padding:18px;max-width:95%;white-space:pre-wrap;overflow-wrap:anywhere}
+.news-demo-time{color:#777;text-align:center;font-size:12px}
+[data-demo-harness]{position:fixed;bottom:16px;left:12px;right:12px;margin:auto;max-width:680px;background:#20242e;color:#f5f7fb;border-radius:14px;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;z-index:50;font-size:13px}
+[data-demo-harness] select{max-width:100%;background:#363d4c;color:#fff;border:1px solid #778197;border-radius:6px;padding:7px;font:inherit}
+[data-demo-harness] p{margin:0;flex-basis:100%;font-size:12px;color:#c3cbd8}
+</style></head><body>
+<p class="news-demo-note">演示数据，未连接微信。此页评审消息内容与状态区分，排版为微信会话的简化示意；归档状态仅在查询结果中显示，不额外发送一条失败通知。</p>
+<main class="news-demo-shell"><header class="news-demo-header">WeixinClawBot</header><div id="thread" class="news-demo-thread" aria-live="polite"></div></main>
+<div data-demo-harness><label for="scenario">Demo · 执行结果</label><select id="scenario">
+<option value="hn">HN 缺失，其他内容已推送</option><option value="archive">归档失败，日报已推送</option><option value="both">HN 缺失且归档失败</option><option value="wait">会话失效，正文等待续发</option><option value="empty">来源正常，没有新内容</option><option value="failed">来源全部失败</option><option value="unknown">推送结果无法确认</option>
+</select><p>状态由实际来源、存储与渠道结果决定；产品内没有这个选择器。下方查询回复与日报正文是不同消息。</p></div>
+<script>
+const article='AI 新闻\n\n1. 示例研究公布模型评估方法\n该研究比较了不同评估条件下的模型表现，并指出单一评分不足以代表实际任务能力。\n来源：示例研究团队';
+const hnArticle='Hacker News 热门\n\n1. 示例开源工具简化本地备份\n该工具支持增量备份与恢复校验，适合希望自行管理备份的用户。\n来源：示例项目';
+const missing='本次未包含 Hacker News：获取时连接中断，有限重试后仍未恢复。';
+const scenarios={
+ hn:{body:article+'\n\n'+missing,status:'内容：已生成，缺少 Hacker News\n归档：已完成\n推送：微信已接受'},
+ archive:{body:article+'\n\n'+hnArticle,status:'内容：已生成\n归档：未完成，将使用已保存内容重试；不影响推送\n推送：微信已接受'},
+ both:{body:article+'\n\n'+missing,status:'内容：已生成，缺少 Hacker News\n归档：未完成，将使用已保存内容重试；不影响推送\n推送：微信已接受'},
+ wait:{status:'内容：已生成并保存\n归档：未完成，将使用已保存内容重试\n推送：等待原会话刷新\n请从原微信会话发送一条新消息，恢复后按时间顺序续发已保存的日报。'},
+ empty:{status:'本次检索已完成，没有新的可推送内容。\n已成功处理的文章保留原摘要，不重复生成。'},
+ failed:{status:'本次未生成可推送的日报。\nAI 新闻和 Hacker News 均获取失败。\n已完成的文章成果仍保留；符合条件的研究将在本日重试。'},
+ unknown:{status:'内容：已生成并保存\n归档：已完成\n推送：结果暂时无法确认\n请检查微信是否已收到；系统不会自动重发本次日报。'}
+};
+function bubble(text,kind){const el=document.createElement('div');el.className='news-demo-'+kind;el.textContent=text;document.getElementById('thread').append(el)}
+function render(){const s=scenarios[document.getElementById('scenario').value];document.getElementById('thread').replaceChildren();bubble('2026-10-16 · 消息示意','time');if(s.body)bubble('2026-10-16 AI 新闻\n\n'+s.body,'bot');bubble('查看 AI 新闻日报本次执行结果','user');bubble(s.status,'bot')}
+document.getElementById('scenario').addEventListener('change',render);render();
+</script><script src="../demo-harness.js"></script></body></html>

@@ -1,0 +1,17 @@
+%% title: 任务设置与启停
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+direction LR
+state "已启用" as enabled
+state "已停用" as paused
+state "已删除" as deleted
+[*] --> enabled: 创建 / 导入
+enabled --> paused: 停用
+paused --> enabled: 启用
+enabled --> enabled: 修改 / 到期
+paused --> paused: 修改 / 手动执行 / 再停用
+enabled --> deleted: 删除
+paused --> deleted: 删除
+deleted --> [*]
+note right of deleted: 结算进行中的操作后删除，保留历史
+note left of paused: 新停用撤销旧手动许可；容量只限制新生成

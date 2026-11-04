@@ -1,0 +1,12 @@
+%% title: Proposed shared core with two live channels
+flowchart TB
+ W[Weixin] <--> R[Trusted channel router]
+ F[Feishu] <--> R
+ R <--> C[One conversation state authority]
+ C <--> H[Separate channel histories and queues]
+ C <--> M[Shared memory and permissions]
+ C <--> E[Shared workflow engine]
+ E --> D[Bound media and notification delivery]
+ S[One scheduler] --> D
+ D --> W
+ D --> F

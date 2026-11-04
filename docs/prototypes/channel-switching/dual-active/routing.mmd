@@ -1,0 +1,21 @@
+%% title: Notification destination and delivery state
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+ direction LR
+ [*] --> ready: new or migrated task
+ ready --> ready: chat / connection change / restart
+ ready --> sending: submit to online destination
+ sending --> sending: chat / connection change
+ sending --> accepted: accept
+ sending --> unknown: uncertain / restart
+ accepted --> [*]
+ unknown --> [*]
+ note right of ready
+ New task: creation channel
+ Legacy task: Feishu
+ Destination never follows the last chat
+ end note
+ note right of unknown
+ No automatic resend
+ No fallback to other channel
+ end note

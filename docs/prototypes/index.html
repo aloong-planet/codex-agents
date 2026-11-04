@@ -1,0 +1,114 @@
+<!doctype html>
+<!-- 原型画廊壳(由 prototype skill 的模板复制而来,不手改;要改壳改 skill 模板后重新复制)。
+     依赖同目录 manifest.js:window.PROTOTYPES = [{module,type,id,name,path,question,run?}] -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Prototypes</title>
+<style>
+  :root{
+    --bg:#f7f8f9; --card:#ffffff; --text:#37352f; --text-2:#787774;
+    --line:#e8eaed; --line-strong:#d9dce0;
+    --accent:#8a67ab; --accent-soft:#f0ebf6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#18191b; --card:#1f2124; --text:#e6e6e5; --text-2:#9b9a97;
+      --line:#2a2c30; --line-strong:#34373c; --accent:#a084c7; --accent-soft:#2c2733; }
+  }
+  *{box-sizing:border-box;margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  body{display:flex;height:100vh;overflow:hidden;background:var(--bg);color:var(--text);font-size:13px}
+
+  /* 侧栏 = Figma 式深色工具面板:固定配色不随系统主题,与被评判的原型内容(app 风格)强区分 */
+  .side{width:240px;flex:none;background:#2c2c2e;color:#e8e8e8;border-right:1px solid #1d1d1f;
+    display:flex;flex-direction:column;transition:margin .18s}
+  body.fold .side{margin-left:-240px}
+  .s-h{display:flex;align-items:center;justify-content:space-between;padding:14px 14px 10px}
+  .s-h b{font-size:13px;color:#fff;letter-spacing:.3px}
+  .fold-btn{cursor:pointer;color:#8e8e93;border:0;background:none;font-size:14px}
+  .fold-btn:hover{color:#fff}
+  .list{flex:1;overflow:auto;padding:0 8px 14px}
+  .grp{font-size:10px;color:#8e8e93;font-weight:600;padding:12px 8px 4px;text-transform:uppercase;letter-spacing:.6px}
+  .item{display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;cursor:pointer;color:#d1d1d6}
+  .item:hover{background:#3a3a3c}
+  .item.on{background:#0d99ff;color:#fff;font-weight:600}
+  .tag{font-size:10px;border:1px solid #48484a;border-radius:4px;padding:0 5px;color:#8e8e93;flex:none}
+  .item.on .tag{border-color:rgba(255,255,255,.55);color:#fff}
+
+  .unfold{position:fixed;top:12px;left:12px;z-index:9;display:none;
+    background:#1b1b1f;color:#fff;border:0;border-radius:999px;padding:8px 14px;cursor:pointer;
+    box-shadow:0 4px 16px rgba(0,0,0,.3)}
+  body.fold .unfold{display:block}
+
+  .stage{flex:1;min-width:0;display:flex}
+  iframe{flex:1;border:0;background:var(--bg)}
+  .empty{margin:auto;color:var(--text-2);text-align:center}
+</style>
+</head>
+<body>
+  <div class="side">
+    <div class="s-h"><b>Prototypes</b><button class="fold-btn" onclick="fold(true)" title="收起(S)">⟨⟨</button></div>
+    <div class="list" id="list"></div>
+  </div>
+  <button class="unfold" onclick="fold(false)" title="展开(S)">☰ Prototypes</button>
+  <div class="stage" id="stage"><div class="empty">从左侧选择一个原型</div></div>
+
+<script src="manifest.js"></script>
+<script>
+  const P = window.PROTOTYPES || [];
+  const list = document.getElementById('list');
+  const stage = document.getElementById('stage');
+
+  // 侧栏:按 module 分组
+  const groups = {};
+  P.forEach(p => (groups[p.module] ??= []).push(p));
+  for (const [mod, items] of Object.entries(groups)) {
+    const g = document.createElement('div'); g.className='grp'; g.textContent = mod; list.appendChild(g);
+    for (const p of items) {
+      const el = document.createElement('div');
+      el.className = 'item'; el.dataset.key = key(p);
+      el.innerHTML = `<span class="tag">${p.type === 'logic' ? 'Logic' : 'UI'}</span><span>${p.name}</span>`;
+      el.onclick = () => { location.hash = key(p); };
+      list.appendChild(el);
+    }
+  }
+
+  function key(p){ return `${p.module}/${p.id}`; }
+  function find(k){ return P.find(p => key(p) === k); }
+
+  function show(k){
+    const p = find(k);
+    document.querySelectorAll('.item').forEach(e => e.classList.toggle('on', e.dataset.key === k));
+    if (!p) { stage.innerHTML = '<div class="empty">从左侧选择一个原型</div>'; return; }
+    // 一切条目统一 iframe:UI 是自包含 HTML,Logic 也是自渲染页(问题/图/命令都在页内)
+    stage.innerHTML = `<iframe src="${p.path}"></iframe>`;
+  }
+
+  function fold(v){ document.body.classList.toggle('fold', v); try{localStorage.setItem('pg-fold', v?'1':'0')}catch(e){} }
+  try{ if(localStorage.getItem('pg-fold')==='1') document.body.classList.add('fold') }catch(e){}
+
+  addEventListener('hashchange', () => show(decodeURIComponent(location.hash.slice(1))));
+  addEventListener('keydown', (e) => {
+    const t = document.activeElement;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if ((e.key === 's' || e.key === 'S') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      fold(!document.body.classList.contains('fold')); e.preventDefault(); return;
+    }
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    const keys = P.map(key); if (!keys.length) return;
+    const i = keys.indexOf(decodeURIComponent(location.hash.slice(1)));
+    const n = e.key === 'ArrowDown' ? (i + 1 + keys.length) % keys.length : (i - 1 + keys.length) % keys.length;
+    location.hash = keys[n]; e.preventDefault();
+  });
+
+  // 接收 iframe 内原型的跳转请求(file:// 下子页与壳异源,不能直接改父 hash,走 postMessage)
+  addEventListener('message', (e) => {
+    const t = e.data && e.data.type === 'proto-nav' && e.data.target;
+    if (t && find(t)) location.hash = t;
+  });
+
+  const init = decodeURIComponent(location.hash.slice(1));
+  show(find(init) ? init : (P.length ? key(P[0]) : ''));
+  if (!location.hash && P.length) location.hash = key(P[0]);
+</script>
+</body>
+</html>

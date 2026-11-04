@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "codex-weixin": {
+      "command": "node",
+      "args": [
+        "dist/server.mjs"
+      ],
+      "cwd": ".",
+      "env": {
+        "WEIXIN_DEMO_BASE_URL": "http://127.0.0.1:4317"
+      }
+    }
+  }
+}

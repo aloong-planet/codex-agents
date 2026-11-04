@@ -1,0 +1,45 @@
+%% title: 单次执行与缓存推送
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+direction LR
+state "执行中" as running
+state "执行失败" as failed
+state "已跳过" as skipped
+state "已缓存，待推送" as ready
+state "提交中" as sending
+state "等待会话刷新" as context_required
+state "等待重新绑定" as auth_required
+state "微信已接受" as accepted
+state "结果未知，不重试" as unknown
+state "部分接受，不重发" as partial
+state "明确拒绝，不重发" as rejected
+state "任务已删除，取消待发" as cancelled
+[*] --> running: 到期 / 手动执行
+[*] --> skipped: 较早的错过计划
+skipped --> [*]
+running --> ready: 内容保存
+running --> failed: 执行失败
+running --> unknown: 中断
+ready --> sending: 提交最早获准缓存
+ready --> cancelled: 删除
+context_required --> cancelled: 删除
+auth_required --> cancelled: 删除
+cancelled --> [*]
+sending --> context_required: 会话失效且尚未恢复
+sending --> ready: 旧失败到达时已恢复
+sending --> auth_required: 账号失效
+ready --> context_required: 重绑清除旧会话
+ready --> auth_required: 当前凭据失效
+context_required --> ready: 当前绑定下会话刷新
+context_required --> auth_required: 当前凭据失效
+auth_required --> context_required: 重绑后尚无会话
+auth_required --> ready: 原账号恢复且会话刷新
+sending --> accepted: 接受
+sending --> partial: 部分接受
+sending --> rejected: 不可恢复拒绝
+sending --> unknown: 不确定 / 中断
+accepted --> [*]
+partial --> [*]
+rejected --> [*]
+unknown --> [*]
+failed --> [*]

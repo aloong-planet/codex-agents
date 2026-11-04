@@ -1,0 +1,31 @@
+{
+  "name": "@aloong-planet/codex-weixin-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "pnpm --dir ../../apps/weixin-service build && pnpm build && vitest run --config vitest.e2e.config.ts"
+  },
+  "packageManager": "pnpm@10.12.4",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22",
+    "esbuild": "^0.28.2",
+    "eslint": "9",
+    "playwright": "^1.55.0",
+    "typescript": "5.8",
+    "typescript-eslint": "8",
+    "vitest": "3"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "candidate": {
+    "rank": 1,
+    "title": "DeepSeek: DeepSeek v4.1 Flash 1017",
+    "source": "openrouter.ai",
+    "url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+    "submittedAt": "2026-10-17T08:37:46.000Z",
+    "score": 370,
+    "comments": 151,
+    "status": "summarized"
+  },
+  "item": {
+    "section": "hackernews",
+    "title": "ElevenLabs 模型限时五折优惠",
+    "summary": "所提供的正文仅包含 OpenRouter 上的 ElevenLabs 上线促销信息：所有 ElevenLabs 模型享五折优惠，活动截至 2026 年 10 月 19 日，并附有模型列表链接。正文未提供候选标题所指的 DeepSeek v4.1 Flash 1017 的相关信息，因此无法据此概述该模型的发布、能力或性能。",
+    "brief": "OpenRouter 页面称，所有 ElevenLabs 模型享五折优惠，截至2026年10月19日；正文未提供候选标题所指的 DeepSeek 模型信息。",
+    "source": "OpenRouter（Hacker News）",
+    "url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+    "publishedAt": "2026-10-17T08:37:46.000Z"
+  },
+  "body": {
+    "title": "DeepSeek: DeepSeek v4.1 Flash 1017",
+    "markdown": "All ElevenLabs models are 50% off until October 19, 2026. Explore the available ElevenLabs models on OpenRouter."
+  }
+}
