@@ -1,6 +1,6 @@
 # ADR-0023: Separate group authority from shared discussion
 
-- Status: Proposed
+- Status: Accepted (2026-11-05)
 
 ## Context
 
@@ -25,7 +25,7 @@ Group model sessions use isolated configuration, disable inherited host memory a
 
 - Positive: shared discussion does not grant invocation, private-memory or pending-operation authority.
 - Negative: identity resolution must be applied consistently to model sessions, memory curation, file tools, tasks, recovery and delivery; memory-key changes alone are insufficient.
-- Neutral: local configuration is trusted and restart-applied. Platform permission approval and real-device receipt remain separate from automatic fixture validation. This technical path remains Proposed until implementation and runtime isolation evidence close it.
+- Neutral: local configuration is trusted and restart-applied. Platform permission approval and real-device receipt remain separate from automatic fixture validation. The isolated App Server start/turn/resume and CLI research paths were exercised with synthetic protected files and public research on Codex 0.166.0-alpha.6. This validates the runtime boundary, not tenant permissions or phone receipt.
 
 ## Sources
 

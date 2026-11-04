@@ -1,7 +1,7 @@
 # Personal channels and Feishu groups
 
-> Pending: allowlisted Feishu groups, shared group context, independent group memory and group-scoped tasks are specified below but not yet implemented.
-> Status: startup supports one or both bound personal channels with shared owner memory, isolated conversations and creation-channel notifications.
+> Status: startup supports one or both bound personal channels and allowlisted Feishu groups. Private owner memory is shared; each group has separate shared context, memory and tasks.
+> Pending: deployment and real-group observations remain; follow the [group acceptance procedure](../../apps/weixin-service/README.md#real-group-acceptance).
 > Pending: real-channel observations remain for task lists, reminders, other media/pending choices, shared curated memory and restart recovery. Follow the [acceptance procedure](../../apps/weixin-service/README.md#real-channel-acceptance); fixture evidence and accepted subsets do not establish the remaining phone observations.
 > Related: [workflow behavior](workflow-runs.md), [module permissions](workflow-module-permissions.md), ADR-0004, ADR-0008, ADR-0009, ADR-0010.
 
@@ -81,7 +81,7 @@ As an authorized member, I can manage the group's tasks while keeping another me
 
 ## Functional Requirements
 
-### channel-switching::REQ-004 Preserve tasks and bind future notifications
+### channel-switching::REQ-004 Preserve personal tasks and bind future notifications
 
 - channel-switching::REQ-004/AC-01: Scheduled tasks and plan reminders survive switching.
 - channel-switching::REQ-004/AC-02: New scheduled tasks and plan reminders capture their creation channel and bound private destination; future notifications use that destination. Viewing or editing a task from the other channel does not silently change it.
@@ -120,7 +120,7 @@ An invalid startup configuration, startup connection failure or active channel f
 
 ### channel-switching::REQ-010 Automatically recover model disconnections
 
-- channel-switching::REQ-010/AC-01: An unexpected model-process/transport disconnection initiates reconnection without waiting for a new user message. Concurrent conversations share one reconnection operation; intentional shutdown does not restart it.
+- channel-switching::REQ-010/AC-01: An unexpected model-process/transport disconnection initiates reconnection without waiting for a new user message. Conversations using the same model runtime share one reconnection operation; intentional shutdown does not restart it.
 - channel-switching::REQ-010/AC-02: An interrupted, still-authorized request automatically continues in its original compatible thread when recovery is safe. It retains its inbound identity, frozen model, queue position, source destination and final-reply ownership; the user need not resend it. No old completed request is replayed.
 - channel-switching::REQ-010/AC-03: A request has at most three automatic recovery attempts within sixty seconds from its first disconnection. Exhaustion terminates that request with one truthful failure notice. A subsequent explicit user message remains eligible for ordinary recovery. Existing tool execution budgets, including the sixty-second file-query budget, accumulate across attempts and are not reset.
 - channel-switching::REQ-010/AC-04: Recovery waits for previously admitted local operations to settle and uses retained host results. Completed mutations and claimed terminal workflows are not executed again. Uncertain side effects, untracked native tool effects, failed cleanup, missing context or changed authorization stop automatic continuation rather than guessing or silently starting a new context.
@@ -214,6 +214,7 @@ An invalid startup configuration, startup connection failure or active channel f
 | Mention another bot, @all, a name lookalike, quote/reply, or genuine bot plus @all | channel-switching::REQ-011/AC-01 |
 | Send text/rich-text mentions with overlapping keys, empty request or malformed metadata | channel-switching::REQ-011/AC-02 and channel-switching::REQ-011/AC-03 |
 | Alice waits on a file choice; Bob selects/cancels or starts another request; Alice returns | channel-switching::US-007/AC-03 and channel-switching::US-007/AC-04 |
+| One group runtime fails on first startup or after persisted restart | Healthy private/other-group conversations continue; channel-switching::US-005/AC-02 and channel-switching::REQ-009/AC-01 |
 | Two groups interleave discussion and mentions; one model turn stalls | channel-switching::US-005/AC-02 and channel-switching::REQ-012/AC-01 |
 | Group asks for private/other-group memories or files containing internal state, including symlinks | channel-switching::US-006/AC-01 through channel-switching::US-006/AC-03 |
 | Grant or revoke business files, then resume a saved group thread | channel-switching::US-006/AC-03 and channel-switching::REQ-012/AC-02 |
@@ -227,7 +228,7 @@ An invalid startup configuration, startup connection failure or active channel f
 
 One process owns one mutable conversation-state authority, one memory system, one workflow engine and one scheduler. Startup validates an immutable enabled-channel set and admits each channel after its own connection starts. Old single-channel configuration remains readable. Channel connections and readiness are independent; replies retain source-specific presentation and delivery bindings.
 
-ADR-0023 defines the group authorization, context and protected-memory boundary. The existing private owner binding is not reused as a group member identity. Group observations have no executable authority.
+ADR-0023 defines the group authorization, context and protected-memory boundary. The existing private owner binding is not reused as a group member identity. Group observations have no executable authority. Group and member configuration limits are 98 groups and 200 members per group. Passive context is limited to the preceding 100 observations, 1,000 characters each and 16,000 characters total. A group runtime failure is contained to that group; it never falls back to personal configuration. Private daily-news reconciliation metadata is not part of group task results.
 
 ADR-0018 defines the shared-core channel boundary, ADR-0019 defines owner-shared memory with isolated conversations, and ADR-0020 defines captured notification preferences and frozen occurrence destinations. Their real-channel acceptance remains distinct from automated fixture validation.
 

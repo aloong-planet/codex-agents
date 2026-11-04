@@ -8,7 +8,7 @@
 
 | 功能 | 一句话 |
 |---|---|
-| [Personal Weixin and Feishu channels](channel-switching.md) | Use either or both private channels with shared personal memory, independent chats and creation-channel reminders. |
+| [Personal channels and Feishu groups](channel-switching.md) | Use personal chats and authorized groups with independent group memory, requester-owned choices and source-bound reminders. |
 | [Scheduled tasks](scheduled-tasks.md) | Manage reminders, public-web research and existing daily news with editable schedules, permanent execution summaries and exact ordered cached recovery. |
 | [Daily AI news](daily-ai-news.md) | Select supported current news, reject mismatched article bodies, reuse complete summaries, disclose shortages and recover eligible reports in order independently of archiving. |
 | [工作流模块权限](workflow-module-permissions.md) | 在本地设置页按模块和目录保存读写权限，文件执行始终禁止。 |

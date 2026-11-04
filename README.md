@@ -1,6 +1,6 @@
 # codex-weixin
 
-A local personal assistant using Codex App Server, with independently enabled Weixin iLink and Feishu private-chat channels. Use either or both with shared owner memory and separate chat contexts; changing the enabled channels requires a restart.
+A local personal assistant using Codex App Server, with independently enabled Weixin iLink and Feishu channels, including allowlisted Feishu group conversations. Private chats share owner memory while each group has its own shared context, memory and tasks. Group and member access is configured locally and takes effect on restart.
 
 ## 目录
 
@@ -18,4 +18,4 @@ pnpm test
 pnpm build
 ```
 
-The local service listens on `http://127.0.0.1:4317`. Startup requires explicit channel and owner configuration. A local Feishu pairing wizard can prepare it while preserving the existing owner; see [service setup](apps/weixin-service/README.md#channel-configuration). Credentials and personal state stay outside the repository. Feishu supports text, image/file messages, authorized local file operations, persistent selections and text notifications. See service setup for media limits and real-channel acceptance requirements.
+The local service listens on `http://127.0.0.1:4317`. Startup requires explicit channel and owner configuration. A local Feishu pairing wizard can prepare it while preserving the existing owner; see [service setup](apps/weixin-service/README.md#channel-configuration). Credentials and personal state stay outside the repository. Feishu supports text, image/file messages, authorized local file operations, persistent selections and text notifications. See [group setup](apps/weixin-service/README.md#feishu-group-configuration) for group/member allowlists and platform permissions, and service setup for media limits and real-channel acceptance requirements.

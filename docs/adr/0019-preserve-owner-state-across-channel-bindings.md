@@ -14,6 +14,8 @@ Existing memory is stored under a Weixin account key. Conversation histories als
 
 ## Decision
 
+This decision describes the bound personal conversations. [ADR-0023](0023-isolate-feishu-group-authority.md) defines the separate group authority, memory and task scope; group membership does not become a personal-owner binding.
+
 The startup composition supplies an immutable personal-owner configuration and selects the configured bound channel set. The simultaneous target retains one shared owner state authority; each admitted message is checked against its own channel binding. Each binding names the connection account, private conversation and sender. Admission requires all three to match and an explicit private-conversation classification. The model does not choose these bindings.
 
 Keep Weixin conversation account/target values unchanged. New Feishu conversation account and target keys are prefixed SHA-256 identifiers, isolated from the legacy Weixin target grammar. Platform adapters retain raw delivery destinations. Both channel identities refer to the explicit memory account key; memory content is not copied or relabeled. Memory evidence retains its source conversation.
