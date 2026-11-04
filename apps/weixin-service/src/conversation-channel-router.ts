@@ -3,10 +3,10 @@ import type {
   ConversationChannel, ConversationTurnFactory, DeliveryReference, InboundMessage,
   RejectedInboundMessage, ReplyProgress, ReplyPolicy,
 } from "./channel-contract.js";
-import type { PersonalOwnerIdentity } from "./personal-owner-identity.js";
+import type { ChannelConversationIdentity } from "./personal-owner-identity.js";
 
 type Route = {
-  owner: PersonalOwnerIdentity;
+  owner: ChannelConversationIdentity;
   channel: ConversationChannel;
   turns: ConversationTurnFactory;
 };

@@ -124,6 +124,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
   private readonly maxQueryWaitMs: number;
   private readonly afterMutationDurable: () => void;
   private readonly afterMutationPrepared: () => void;
+  private readonly groupProtectedRoots: string[];
 
   constructor(
     private readonly permissions: PermissionSource,
@@ -137,6 +138,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       afterMutationDurable?: () => void;
       afterMutationPrepared?: () => void;
       diagnostics?: import("./local-diagnostics.js").LocalDiagnostics | undefined;
+      groupProtectedRoots?: string[];
     },
   ) {
     if (!Array.isArray(options.moduleIds) || options.moduleIds.length < 1 ||
@@ -144,6 +146,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       throw new Error("local_file_tools_config_invalid");
     }
     this.moduleIds = [...new Set(options.moduleIds)];
+    this.groupProtectedRoots = (options.groupProtectedRoots ?? []).map(canonicalProtectedPath);
     this.diagnostics = options.diagnostics;
     this.spoolDirectory = options.spoolDirectory;
     this.operations = new LocalFileOperationStore(
@@ -208,6 +211,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
         accountId: trusted.accountId,
         moduleId,
         revision: state.revision,
+        deniedRoots: this.protectedRoots(trusted.target),
         scopes: moduleScopes.map((scope) => ({
           scopeRef: scope.scopeRef,
           scopeId: scope.scopeId,
@@ -341,7 +345,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
   }
 
   async snapshotForSend(trusted: TrustedWorkflowTurn, fileRefs: string[]): Promise<LocalFileSendSnapshot[]> {
-    return this.snapshotCandidates(trusted.accountId, this.describeForSend(trusted, fileRefs));
+    return this.snapshotCandidates(trusted.accountId, this.describeForSend(trusted, fileRefs), trusted.target);
   }
 
   describeForSend(trusted: TrustedWorkflowTurn, fileRefs: string[]): LocalFileSendCandidate[] {
@@ -393,16 +397,17 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     return snapshots[0]!;
   }
 
-  async snapshotCandidates(accountId: string, candidates: LocalFileSendCandidate[]): Promise<LocalFileSendSnapshot[]> {
+  async snapshotCandidates(accountId: string, candidates: LocalFileSendCandidate[], target?: string): Promise<LocalFileSendSnapshot[]> {
     if (!accountId || !Array.isArray(candidates) || candidates.length < 1 || candidates.length > 20) {
       throw new Error("local_file_reference_invalid");
     }
-    return this.serializeMutation(accountId, () => this.snapshotCandidatesWithinQuota(accountId, candidates));
+    return this.serializeMutation(accountId, () => this.snapshotCandidatesWithinQuota(accountId, candidates, target));
   }
 
   private async snapshotCandidatesWithinQuota(
     accountId: string,
     candidates: LocalFileSendCandidate[],
+    target?: string,
   ): Promise<LocalFileSendSnapshot[]> {
     const accountSpool = path.join(this.spoolDirectory, safeSegment(accountId));
     const requestedBytes = candidates.reduce((total, candidate) => total + candidate.sizeBytes, 0);
@@ -423,6 +428,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
             accountId,
             moduleId: candidate.moduleId,
             revision: state.revision,
+            deniedRoots: this.protectedRoots(target),
             scopes: readableScopes.map((scope) => ({ ...scope, scopeRef: refs.get(scope.scopeId)! })),
             spoolDirectory: path.join(this.spoolDirectory, safeSegment(accountId), candidate.moduleId, String(state.revision)),
           }, undefined, this.diagnostics);
@@ -450,6 +456,12 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     } finally {
       await Promise.allSettled([...sandboxes.values()].map(async ({ sandbox }) => sandbox.close()));
     }
+  }
+
+  private protectedRoots(target?: string): string[] {
+    if (!target?.startsWith("feishu.group.")) return [];
+    if (this.groupProtectedRoots.length === 0) throw new Error("local_file_group_boundary_unavailable");
+    return this.groupProtectedRoots;
   }
 
   private async serializeTraversal<T>(session: TurnSession, operation: () => Promise<T>): Promise<T> {
@@ -1063,6 +1075,14 @@ function directoryFileBytes(root: string): number {
     }
   }
   return total;
+}
+
+function canonicalProtectedPath(input: string): string {
+  if (!path.isAbsolute(input)) throw new Error("local_file_tools_config_invalid");
+  if (fs.existsSync(input)) return fs.realpathSync(input);
+  const parent = path.dirname(input);
+  if (parent === input) throw new Error("local_file_tools_config_invalid");
+  return path.join(canonicalProtectedPath(parent), path.basename(input));
 }
 
 function groupScopes(

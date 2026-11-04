@@ -5,6 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { DiagnosticFiles } from "../src/diagnostic-files.js";
 import { LocalDiagnostics } from "../src/local-diagnostics.js";
 import { readDiagnostics } from "../src/read-diagnostics.js";
+import { createIsolatedModelRuntime } from "../src/isolated-model-runtime.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
 
 const dirs: string[] = [];
@@ -93,4 +94,33 @@ it("retains the unavailable runtime cause in a completed OTel trace when the CLI
     expect(span).toMatchObject({ status: 2, attributes: { status: "failed", errorCode: "research_runtime_unavailable", exitCode: 0, webSearchCount: 0 } });
     expect(evidence.unfinished).toEqual([]);
   } finally { await diagnostics.close(); }
+});
+
+
+it("runs group research with an isolated home and mandatory named permission profile", async () => {
+  const { file, dir } = executable(`const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args.includes('-P')) { console.error("unexpected argument '-P' found"); process.exit(2); }
+fs.writeFileSync('INVOCATION', JSON.stringify({args, cwd:process.cwd(), home:process.env.CODEX_HOME, leaked:process.env.OWNER_PRIVATE_TOKEN}));
+console.log(JSON.stringify({type:'item.completed',item:{type:'web_search',action:{type:'search'}}}));
+console.log(JSON.stringify({type:'item.completed',item:{type:'web_search',action:{type:'open_page',url:'https://example.com/release'}}}));
+fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'Group research report.',sources:[{title:'Release',url:'https://example.com/release'}]}));`);
+  const recorded = path.join(dir, "invocation.json");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("'INVOCATION'", JSON.stringify(recorded)));
+  const destination = { accountId: "feishu.bot.test", target: "feishu.group.alpha" };
+  const run = createScheduledResearch({ executable: file, groupRuntime: (address) => {
+    expect(address).toEqual({ accountId: "feishu.bot.test", target: "feishu.group.alpha" });
+    return createIsolatedModelRuntime({ root: path.join(dir, "runtime"), scope: "alpha", authHome: path.join(dir, "no-auth"),
+      environment: { PATH: process.env.PATH, HOME: dir, OWNER_PRIVATE_TOKEN: "never-inherit" } });
+  } });
+  expect(await run({ ...input(), destination })).toBe("Group research report.\n\n来源：\n[1] Release：https://example.com/release");
+  const observed = JSON.parse(fs.readFileSync(recorded, "utf8"));
+  expect(observed.home).toBe(path.join(dir, "runtime", "alpha", "codex-home"));
+  expect(observed.cwd).toBe(fs.realpathSync(path.join(dir, "runtime", "alpha", "workspace")));
+  expect(observed).not.toHaveProperty("leaked");
+  expect(observed.args).toContain('default_permissions="group"');
+  expect(observed.args).not.toContain("--ignore-user-config");
+  expect(observed.args).not.toContain("--sandbox");
+  expect(JSON.parse(observed.args.at(-1))).not.toHaveProperty("destination");
+  await expect(createScheduledResearch({ executable: file })({ ...input(), destination })).rejects.toThrow("research_runtime_unavailable");
 });

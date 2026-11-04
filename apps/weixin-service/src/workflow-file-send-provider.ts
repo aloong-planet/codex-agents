@@ -17,7 +17,7 @@ type TargetResolver = {
 };
 
 type Snapshotter = {
-  snapshotCandidates(accountId: string, candidates: LocalFileSendCandidate[]): Promise<LocalFileSendSnapshot[]>;
+  snapshotCandidates(accountId: string, candidates: LocalFileSendCandidate[], target?: string): Promise<LocalFileSendSnapshot[]>;
 };
 
 const PUBLIC_CANDIDATE_SCHEMA = {
@@ -120,6 +120,7 @@ export class WorkflowFileSendProvider implements WorkflowCapabilityProvider {
         const snapshots = await this.snapshotter.snapshotCandidates(
           bound.target.accountId,
           missing.map((candidate) => candidate.source),
+          bound.target.target,
         );
         const committed = missing.map((candidate, index) => ({
           candidateRef: candidate.candidateRef,

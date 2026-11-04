@@ -94,6 +94,7 @@ export type DeliveryReference = {
 };
 
 export type InboundMessage = DeliveryReference & {
+  discussion?: Array<{ key: string; senderId: string; text: string; receivedAt: number }>;
   messageId: string;
   source: "text" | "voice" | "media";
   text: string;
@@ -145,3 +146,12 @@ export interface ConversationTurnFactory {
 
 /** Normalized content accepted by workflow preparation; live reply bindings are separate. */
 export type InboundContent = Omit<InboundMessage, "deliveryRef">;
+
+/** Pending operation authority is narrower than shared group discussion. */
+export function conversationRequester(event: Pick<InboundContent, "conversationType" | "senderId">): string | undefined {
+  if (event.conversationType !== "group") return undefined;
+  if (!event.senderId || !/^ou_[A-Za-z0-9]+$/.test(event.senderId) || event.senderId.length > 200) {
+    throw new Error("group_requester_missing");
+  }
+  return event.senderId;
+}

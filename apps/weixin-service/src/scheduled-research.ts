@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LocalDiagnostics } from "./local-diagnostics.js";
+import type { IsolatedModelRuntime } from "./isolated-model-runtime.js";
+import type { NotificationAddress } from "./notification-channel.js";
 import type { ScheduledTasksOptions } from "./scheduled-tasks.js";
 
 export const SCHEDULED_RESEARCH_DISABLED_FEATURES = ["plugins", "remote_plugin", "skill_search", "apps", "browser_use", "computer_use", "image_generation", "in_app_browser", "memories", "multi_agent", "multi_agent_v2", "goals", "hooks", "workspace_dependencies", "tool_suggest", "shell_tool", "unified_exec", "view_image", "code_mode", "in_app_local_automation"];
@@ -21,14 +23,17 @@ const instructions = [
   "只返回符合指定 schema 的 JSON。遇到无法执行的非网页研究要求，说明限制，不假称已执行任何操作。",
 ].join("\n");
 
-export function createScheduledResearch(options: { executable: string | (() => string); timeoutMs?: number; diagnostics?: LocalDiagnostics }): NonNullable<ScheduledTasksOptions["research"]> {
+export function createScheduledResearch(options: { executable: string | (() => string); timeoutMs?: number; diagnostics?: LocalDiagnostics; groupRuntime?: (destination: NotificationAddress) => IsolatedModelRuntime }): NonNullable<ScheduledTasksOptions["research"]> {
   const timeoutMs = options.timeoutMs ?? 300_000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("research_timeout_invalid");
-  return async ({ signal, ...request }) => {
+  return async ({ signal, destination, ...request }) => {
     const span = options.diagnostics?.startSpan("scheduled.research.process", { plannedAt: request.plannedAt, timezone: request.timezone });
     let directory: string | undefined, exitCode: number | null = null, webSearchCount = 0, sourceReadCount = 0;
     try {
       if (signal.aborted) throw new Error("research_cancelled");
+      const group = destination?.target.startsWith("feishu.group.");
+      const runtime = group && destination ? options.groupRuntime?.(destination) : undefined;
+      if (group && !runtime) throw new Error("research_runtime_unavailable");
       directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-scheduled-research-"));
       fs.chmodSync(directory, 0o700);
       const output = path.join(directory, "output.json"), schemaPath = path.join(directory, "schema.json");
@@ -38,10 +43,10 @@ export function createScheduledResearch(options: { executable: string | (() => s
         try { executable = typeof options.executable === "string" ? options.executable : options.executable(); }
         catch { reject(new Error("research_start_failed")); return; }
         const child = spawn(executable, ["--search", "--enable", "code_mode_host", ...SCHEDULED_RESEARCH_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
-          "-a", "never", "-c", "project_doc_max_bytes=0", "-c", `developer_instructions=${JSON.stringify(instructions)}`,
-          "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
+          "-a", "never", ...(runtime ? ["-c", `default_permissions=${JSON.stringify(runtime.permissionProfile)}`, ...runtime.configOverrides.flatMap((value) => ["-c", value])] : []), "-c", "project_doc_max_bytes=0", "-c", `developer_instructions=${JSON.stringify(instructions)}`,
+          "exec", ...(runtime ? [] : ["--ignore-user-config", "--sandbox", "read-only"]), "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
           "--json", "--output-schema", schemaPath, "-o", output, JSON.stringify({ ...request, researchedAt: new Date().toISOString() })],
-        { cwd: directory, env: process.env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
+        { cwd: runtime?.cwd ?? directory, env: runtime?.env ?? process.env, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
         let trace = "", stderr = "", pendingLine = "", startError = false, runtimeUnavailable = false;
         let stopped: string | undefined, killTimer: ReturnType<typeof setTimeout> | undefined;
         const kill = (signal: NodeJS.Signals) => {

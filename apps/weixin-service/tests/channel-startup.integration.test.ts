@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -9,6 +9,7 @@ import { expect, it } from "vitest";
 import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { AccountMemoryToolHost } from "../src/account-memory-tool-host.js";
 import type { PublicCodexServiceState } from "../src/conversation-service.js";
+import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
@@ -126,6 +127,42 @@ it("switches via stop/configure/start, retains permissions and histories, and ke
     const delivered = await running.until((state) => state.fixtureTextOutbox?.some((item) => item.message === "切换后提醒。") === true);
     expect(delivered.fixtureTextOutbox?.filter((item) => item.message === "切换后提醒。")).toHaveLength(1);
     console.log(JSON.stringify({ kind: "channel_restart_transcript", feishuOutbox: notification.fixtureTextOutbox, transcript: restored.codex.transcript.map(({ role, text, target }) => ({ role, text, target })), runs: restored.codex.runs.map(({ phase, target }) => ({ phase, target })) }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
+
+it("contains a group runtime startup failure while private and other group conversations remain usable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "group-startup-failure-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    const personal = config("weixin");
+    const configuration = { ...personal, channel: undefined, enabledChannels: ["weixin", "feishu"],
+      feishu: { ...personal.feishu, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_alice"] }] } };
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    const feishu = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")!;
+    const alpha = feishu.owner.conversationAddresses()[1]!;
+    const blocked = join(directory, "group-model-runtimes", alpha.target);
+    mkdirSync(blocked, { recursive: true });
+    writeFileSync(join(blocked, "workspace"), "synthetic runtime path conflict");
+    for (const attempt of [1, 2]) {
+      running = await start(directory);
+      await running.until((state) => state.channels?.feishu?.ready === true);
+      for (const chatId of ["oc_private", "oc_beta", "oc_alpha"]) {
+        const group = chatId !== "oc_private";
+        await running.post("/api/fixture/feishu/inbound", { event: { app_id: "cli_0123456789abcdef",
+          sender: { sender_type: "user", sender_id: { open_id: group ? "ou_alice" : "ou_owner" } },
+          message: { message_id: `om_failure_${attempt}_${chatId}`, create_time: String(Date.now()), chat_id: chatId,
+            chat_type: group ? "group" : "p2p", message_type: "text", content: JSON.stringify({ text: group ? "@_user_1 hello" : "hello" }),
+            ...(group ? { mentions: [{ key: "@_user_1", id: { open_id: "ou_fixturebot" }, name: "Agent" }] } : {}) } } });
+      }
+      const state = await running.until((value) => value.feishuFixtureTextOutbox?.length === 3);
+      expect(state.feishuFixtureTextOutbox).toEqual([
+        expect.objectContaining({ chatId: "oc_private", message: "这是 fixture Codex 回复。" }),
+        expect.objectContaining({ chatId: "oc_beta", message: "这是 fixture Codex 回复。" }),
+        expect.objectContaining({ chatId: "oc_alpha", message: "我暂时无法处理这条消息，请稍后再发一条新消息。" }),
+      ]);
+      expect(state.fixtureModelRequests).toHaveLength(2);
+      await running.close(); running = undefined;
+    }
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 60000);
 
@@ -543,3 +580,104 @@ it("delivers both scheduled reminders only to their creation channels and does n
       feishuOutbox: delivered.feishuFixtureTextOutbox, afterRestart: { weixin: restored.fixtureTextOutbox, feishu: restored.feishuFixtureTextOutbox } }));
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+it("shares only group discussion, binds choices to the requester and delivers group reminders after restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "channel-groups-main-"));
+  const business = mkdtempSync(join(tmpdir(), "channel-groups-business-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, sender: string, chat: string, text: string, mentioned = true, modelToolCalls?: unknown[]) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: chat, chat_type: "group", message_type: "text",
+        mentions: mentioned ? [{ key: "@_user_1", id: { open_id: "ou_fixturebot" }, name: "Agent" }] : [],
+        content: JSON.stringify({ text: mentioned ? `@_user_1 ${text}` : text }) } },
+    ...(modelToolCalls ? { modelToolCalls } : {}),
+  });
+  const tools = [
+    { namespace: "files", tool: "find", arguments: { query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+    { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+      candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } },
+  ];
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  try {
+    const configuration = config("weixin");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration, channel: undefined, enabledChannels: ["weixin", "feishu"],
+      feishu: { ...configuration.feishu, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice", "ou_bob"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_alice"] }] } }));
+    running = await start(directory, env);
+    await running.until((s) => s.channels?.feishu?.ready === true && s.codex.enabledTargets.length === 4);
+    await running.post("/api/fixture/workflow/inbound", { text: "PRIVATE_SENTINEL。我喜欢低糖乌龙茶。" });
+    const privateReply = await running.until((s) => s.weixinFixtureReplies?.length === 2);
+    const evidence = privateReply.codex.transcript.find((entry) => entry.role === "user" && entry.text.startsWith("PRIVATE_SENTINEL"))!;
+    const memory = new AccountMemoryStore(join(directory, "memory"));
+    const curator = new AccountMemoryToolHost(memory);
+    expect(await curator.commit({ accountId: "fixture-bot", jobId: "group-private-seed", batchId: "group-private-seed", mutationPolicy: { mode: "free_add" },
+      evidenceEntryIds: [evidence.id], evidenceTexts: { [evidence.id]: evidence.text }, evidenceOrigins: { [evidence.id]: { eventKey: evidence.id, target: evidence.target } } },
+    { batchId: "group-private-seed", basedOnRevision: memory.read("fixture-bot").revision,
+      decisions: [{ kind: "remember", category: "preferences", value: "PRIVATE_MEMORY_喜欢低糖乌龙茶。", evidenceEntryIds: [evidence.id], confidence: 1 }] })).toMatchObject({ status: "committed" });
+    await send("om_guest_history", "ou_guest", "oc_alpha", "GUEST_DISCUSSION_MARKER", false);
+    await send("om_guest_call", "ou_guest", "oc_alpha", "UNAUTHORIZED_INVOCATION");
+    await send("om_foreign_call", "ou_alice", "oc_other", "FOREIGN_GROUP_MARKER");
+    expect((await running.state()).fixtureModelRequests).toHaveLength(1);
+    await send("om_alice_context", "ou_alice", "oc_alpha", "ALPHA_QUESTION");
+    const alpha = await running.until((s) => s.feishuFixtureTextOutbox?.length === 1);
+    const alphaRequest = alpha.fixtureModelRequests!.at(-1)!;
+    expect(JSON.stringify(alphaRequest.input)).toContain("GUEST_DISCUSSION_MARKER");
+    expect(JSON.stringify(alphaRequest.input)).toContain("ou_guest");
+    expect(JSON.stringify(alphaRequest.input)).not.toContain("PRIVATE_MEMORY_");
+    expect(JSON.stringify(alphaRequest.input)).not.toContain("PRIVATE_SENTINEL");
+    await send("om_bob_context", "ou_bob", "oc_alpha", "BOB_CONTINUES");
+    const bob = await running.until((s) => s.feishuFixtureTextOutbox?.length === 2);
+    expect(bob.fixtureModelRequests!.at(-1)!.threadId).toBe(alphaRequest.threadId);
+    await send("om_beta_context", "ou_alice", "oc_beta", "BETA_QUESTION");
+    const beta = await running.until((s) => s.feishuFixtureTextOutbox?.length === 3);
+    const betaRequest = beta.fixtureModelRequests!.at(-1)!;
+    expect(betaRequest.threadId).not.toBe(alphaRequest.threadId);
+    expect(JSON.stringify(betaRequest.input)).not.toContain("GUEST_DISCUSSION_MARKER");
+    expect(JSON.stringify(betaRequest.input)).not.toContain("ALPHA_QUESTION");
+    await send("om_empty_mention", "ou_alice", "oc_alpha", "");
+    const empty = await running.until((s) => s.feishuFixtureTextOutbox?.length === 4);
+    expect(empty.codex.runs.at(-1)?.phase).toBe("completed");
+
+    await send("om_alice_files", "ou_alice", "oc_alpha", "把 Agent 笔记列出来让我选", true, tools);
+    const aliceWaiting = await running.until((s) => s.feishuFixtureTextOutbox?.at(-1)?.message.includes("Agent Beta.md") === true);
+    const aliceRun = aliceWaiting.workflows!.runs.find((run) => run.status === "needs_input")!;
+    expect(aliceRun.effects).toEqual([]);
+    await send("om_bob_wrong_choice", "ou_bob", "oc_alpha", "2");
+    const unrelated = await running.until((s) => s.feishuFixtureTextOutbox?.at(-1)?.message === "这是 fixture Codex 回复。");
+    expect(unrelated.workflows?.runs.find((run) => run.runRef === aliceRun.runRef)).toMatchObject({ status: "needs_input", effects: [] });
+    expect(unrelated.feishuFixtureMediaOutbox).toEqual([]);
+    await send("om_bob_files", "ou_bob", "oc_alpha", "把 Agent 笔记列出来让我选", true, tools);
+    const both = await running.until((s) => s.workflows?.runs.filter((run) => run.status === "needs_input").length === 2 && s.feishuFixtureTextOutbox?.at(-1)?.message.includes("Agent Beta.md") === true);
+    const bobRun = both.workflows!.runs.find((run) => run.status === "needs_input" && run.runRef !== aliceRun.runRef)!;
+    await running.close(); running = await start(directory, env);
+    await running.until((s) => s.channels?.feishu?.ready === true);
+    await send("om_guest_selection", "ou_guest", "oc_alpha", "1");
+    expect((await running.state()).feishuFixtureMediaOutbox).toEqual([]);
+    await send("om_alice_selection", "ou_alice", "oc_alpha", "2");
+    const sent = await running.until((s) => s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
+    expect(sent.workflows?.runs.find((run) => run.runRef === aliceRun.runRef)).toMatchObject({ status: "succeeded", effects: [{ state: "accepted" }] });
+    expect(sent.workflows?.runs.find((run) => run.runRef === bobRun.runRef)).toMatchObject({ status: "needs_input", effects: [] });
+    expect(sent.feishuFixtureMediaOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", kind: "file", fileName: "Agent Beta.md", bytesBase64: Buffer.from("# Agent Beta\n").toString("base64") })]);
+    await send("om_bob_cancel", "ou_bob", "oc_alpha", "取消");
+    const cancelled = await running.until((s) => s.feishuFixtureTextOutbox?.at(-1)?.message === "已取消之前的操作。");
+    expect(cancelled.workflows?.runs.find((run) => run.runRef === bobRun.runRef)).toMatchObject({ status: "cancelled", effects: [] });
+    const at = new Date(Date.now() + 4000).toISOString();
+    const command = "稍后提醒本群，原文：群独立提醒";
+    await send("om_group_schedule", "ou_bob", "oc_alpha", command, true, [{ namespace: "schedules", tool: "create", arguments: {
+      name: "群提醒", instruction: "群独立提醒", reminderText: "群独立提醒", reminderMode: "verbatim", at, sourceText: command,
+    } }]);
+    const delivered = await running.until((s) => s.feishuFixtureTextOutbox?.some((item) => item.message === "群独立提醒") === true);
+    expect(delivered.feishuFixtureTextOutbox?.filter((item) => item.message === "群独立提醒")).toEqual([expect.objectContaining({ chatId: "oc_alpha" })]);
+    expect(delivered.weixinFixtureReplies).toEqual([]);
+    expect(memory.read("fixture-bot").entries).toHaveLength(1);
+    await running.close(); running = await start(directory, env);
+    await running.until((s) => s.channels?.feishu?.ready === true);
+    await send("om_after_group_restart", "ou_bob", "oc_alpha", "RESTART_CONTEXT");
+    const restored = await running.until((s) => s.feishuFixtureTextOutbox?.length === 1);
+    expect(restored.fixtureModelRequests!.at(-1)!.threadId).toBe(alphaRequest.threadId);
+    expect(restored.feishuFixtureTextOutbox?.map((item) => item.message)).toEqual(["这是 fixture Codex 回复。"]);
+    expect(restored.feishuFixtureMediaOutbox).toEqual([]);
+    console.log(JSON.stringify({ kind: "feishu_group_acceptance", commands: ["guest discussion", "guest @", "Alice @", "Bob @", "empty @", "Alice files", "Bob 2", "Bob files", "restart", "Alice 2", "Bob cancel", command],
+      initialRequests: beta.fixtureModelRequests, restoredRequests: restored.fixtureModelRequests, transcript: restored.codex.transcript,
+      runs: restored.codex.runs, workflows: restored.workflows?.runs, mediaOutbox: sent.feishuFixtureMediaOutbox, textOutbox: delivered.feishuFixtureTextOutbox }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 60000);

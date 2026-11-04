@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import { PersonalOwnerIdentity, type PersonalChannel, type PersonalChannelBinding, type PersonalOwnerConfiguration } from "./personal-owner-identity.js";
 import { OwnerNotificationRoute, type NotificationAddress } from "./notification-channel.js";
+import { FeishuConversationIdentity } from "./feishu-conversation-identity.js";
 
 export type ChannelStartupEntry = {
-  owner: PersonalOwnerIdentity;
   binding: Readonly<PersonalChannelBinding>;
 } & (
-  | { channel: "weixin" }
-  | { channel: "feishu"; connection: Readonly<{ appId: string; appSecret: string }> }
+  | { channel: "weixin"; owner: PersonalOwnerIdentity }
+  | { channel: "feishu"; owner: FeishuConversationIdentity; connection: Readonly<{ appId: string; appSecret: string }> }
 );
 export type ChannelStartupConfiguration = ChannelStartupEntry & {
   enabledChannels: readonly PersonalChannel[];
@@ -64,7 +64,7 @@ export function parseChannelStartupConfiguration(value: unknown): ChannelStartup
       const appId = text(connection.appId);
       const appSecret = text(connection.appSecret);
       if (appId !== selected.binding.accountId) throw new Error("feishu_binding_invalid");
-      return Object.freeze({ ...selected, channel, connection: Object.freeze({ appId, appSecret }) });
+      return Object.freeze({ ...selected, channel, owner: new FeishuConversationIdentity(selected.owner, appId, connection.groups === undefined ? [] : connection.groups), connection: Object.freeze({ appId, appSecret }) });
     }));
     // This explicit, stable address names existing task storage, not the new recipient.
     const scopeInput = record(config.taskScope);
@@ -75,6 +75,9 @@ export function parseChannelStartupConfiguration(value: unknown): ChannelStartup
       selected: { channel: first.channel, ...first.owner.conversationAddress() },
       // A disabled binding can retain a preference, but has no active delivery port.
       destinations: bound.map(({ owner, binding }) => ({ channel: binding.channel, ...owner.conversationAddress() })),
+      groups: entries.filter((entry) => entry.channel === "feishu").flatMap(({ owner }) => owner.conversationAddresses()
+        .filter((address) => address.target !== owner.conversationAddress().target)
+        .map((address) => ({ memoryAccountId: owner.memoryScope(address.accountId, address.target), destination: { channel: "feishu" as const, ...address } }))),
     });
     return Object.freeze({ ...first, enabledChannels, entries, taskScope, notificationRoute });
   } catch {

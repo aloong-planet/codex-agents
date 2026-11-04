@@ -238,7 +238,7 @@ export class DurableEffectLedger implements EffectLedger {
       throw new Error("effect_cause_invalid");
     }
     if (!ACCOUNT_ID.test(intent.accountId)) throw new Error("effect_account_invalid");
-    if (!((intent.kind === "feishu_text" || intent.kind === "feishu_media") ? /^feishu\.[a-f0-9]{64}$/.test(intent.target) : TARGET_ID.test(intent.target))) throw new Error("effect_target_invalid");
+    if (!((intent.kind === "feishu_text" || intent.kind === "feishu_media") ? /^feishu\.(?:group\.)?[a-f0-9]{64}$/.test(intent.target) : TARGET_ID.test(intent.target))) throw new Error("effect_target_invalid");
     if (!EFFECT_KINDS.has(intent.kind)) throw new Error("effect_kind_invalid");
     if (intent.clientId !== undefined) this.assertIdentifier(intent.clientId, "effect_client_invalid");
     if (intent.ordinal !== undefined && (!Number.isSafeInteger(intent.ordinal) || intent.ordinal < 0)) {

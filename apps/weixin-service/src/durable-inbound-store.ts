@@ -18,7 +18,7 @@ export type DurableInboundContext = {
   contextUpdatedAt: number;
 };
 
-export type DurableAdmission = { senderId: string; conversationType: "private"; bindingHash: string };
+export type DurableAdmission = { senderId: string; conversationType: "private" | "group"; bindingHash: string; observation?: boolean };
 
 export type DurableInboundEnvelope = {
   admission?: DurableAdmission;
@@ -230,12 +230,12 @@ export class DurableInboundStore {
   }
 
   /** Commit an authenticated, normalized message before acknowledging its transport event. */
-  ingestMessage(message: InboundContent, bindingHash: string): { inserted: number; duplicates: number } {
+  ingestMessage(message: InboundContent, bindingHash: string, observation = false): { inserted: number; duplicates: number } {
     this.assertAccountId(message.accountId);
     this.assertQueueTarget(message.target);
     if (!EVENT_KEY.test(message.key) || !EVENT_KEY.test(bindingHash) ||
         typeof message.senderId !== "string" || !message.senderId || message.senderId.length > 200 ||
-        message.conversationType !== "private" || !["text", "media"].includes(message.source) ||
+        !["private", "group"].includes(message.conversationType ?? "") || (observation && message.conversationType !== "group") || !["text", "media"].includes(message.source) ||
         typeof message.messageId !== "string" || !message.messageId || message.messageId.length > 512 ||
         typeof message.text !== "string" || Array.from(message.text).length > MAX_TEXT_CHARS) throw new Error("inbound_message_invalid");
     this.validateMediaList(message.attachments);
@@ -247,7 +247,7 @@ export class DurableInboundStore {
     this.assertTimestamp(message.receivedAt);
     const observedAt = message.observedAt ?? this.now();
     this.assertTimestamp(observedAt);
-    const admission: DurableAdmission = { senderId: message.senderId, conversationType: "private", bindingHash };
+    const admission: DurableAdmission = { senderId: message.senderId, conversationType: message.conversationType!, bindingHash, ...(observation ? { observation: true } : {}) };
     const at = this.now();
     const result = this.database.prepare(`
       INSERT OR IGNORE INTO inbox(
@@ -260,6 +260,27 @@ export class DurableInboundStore {
       message.receivedAt, observedAt, at, at);
     const inserted = Number(result.changes);
     return { inserted, duplicates: 1 - inserted };
+  }
+
+  /** Bounded inert discussion, preceding the current event in durable arrival order. */
+  groupDiscussion(accountId: string, target: string, beforeKey: string): NonNullable<InboundContent["discussion"]> {
+    this.assertAccountId(accountId); this.assertQueueTarget(target);
+    if (!EVENT_KEY.test(beforeKey)) throw new Error("inbound_event_key_invalid");
+    const rows = this.database.prepare(`SELECT event_key, payload_json, received_at FROM inbox
+      WHERE account_id = ? AND target = ? AND rowid < (SELECT rowid FROM inbox WHERE event_key = ?)
+      AND state = 'completed' ORDER BY rowid DESC LIMIT 100`).all(accountId, target, beforeKey);
+    const result: NonNullable<InboundContent["discussion"]> = [];
+    let remaining = 16000;
+    for (const row of rows) {
+      const payload = JSON.parse(String(row.payload_json)) as { admission?: DurableAdmission; text: string };
+      if (payload.admission?.conversationType !== "group") continue;
+      const text = Array.from(payload.text).slice(0, Math.min(1000, remaining)).join("");
+      if (!text) continue;
+      result.unshift({ key: String(row.event_key), senderId: payload.admission.senderId, text, receivedAt: Number(row.received_at) });
+      remaining -= Array.from(text).length;
+      if (!remaining) break;
+    }
+    return result;
   }
 
   bootstrapCheckpoint(checkpoint: DurableInboundCheckpoint): boolean {
@@ -339,7 +360,7 @@ export class DurableInboundStore {
              attempts, lease_owner, lease_until
       FROM inbox
       WHERE account_id = ? AND target = ? AND state = 'queued'
-      ORDER BY received_at, event_key LIMIT 1
+      ORDER BY CASE WHEN target LIKE 'feishu.group.%' THEN rowid ELSE received_at END, event_key LIMIT 1
     `).get(accountId, target) as InboxRow | undefined;
     if (!row) return null;
     return this.decodeJob(row) as QueuedInboundEnvelope;
@@ -367,7 +388,7 @@ export class DurableInboundStore {
                attempts, lease_owner, lease_until
         FROM inbox
         WHERE account_id = ? AND target = ? AND state != 'completed'
-        ORDER BY received_at, event_key LIMIT 1
+        ORDER BY CASE WHEN target LIKE 'feishu.group.%' THEN rowid ELSE received_at END, event_key LIMIT 1
       `).get(accountId, target) as InboxRow | undefined;
       if (!row || row.state !== "queued") {
         this.database.exec("ROLLBACK");
@@ -435,8 +456,9 @@ export class DurableInboundStore {
             AND earlier.target = candidate.target
             AND earlier.state != 'completed'
             AND (
-              earlier.received_at < candidate.received_at OR
-              (earlier.received_at = candidate.received_at AND earlier.event_key < candidate.event_key)
+              (candidate.target LIKE 'feishu.group.%' AND earlier.rowid < candidate.rowid) OR
+              (candidate.target NOT LIKE 'feishu.group.%' AND (earlier.received_at < candidate.received_at OR
+              (earlier.received_at = candidate.received_at AND earlier.event_key < candidate.event_key)))
             )
         )
       ORDER BY candidate.target

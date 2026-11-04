@@ -6,6 +6,7 @@ import type { FeishuResourceTransport } from "./feishu-inbound-media.js";
 type Connection = { appId: string; appSecret: string };
 type Hooks = { ready(): void; unavailable(): void; error(): void };
 export type FeishuSdkSession = {
+  botOpenId?: () => Promise<string>;
   start(message: (event: unknown) => Promise<void>): Promise<void>;
   close(): void;
   sendText: FeishuTransport["sendText"];
@@ -33,6 +34,12 @@ export const createFeishuSdkSession: FeishuSdkSessionFactory = (connection, hook
     autoReconnect: true, handshakeTimeoutMs: 15_000,
     onReady: hooks.ready, onReconnected: hooks.ready, onReconnecting: hooks.unavailable, onError: hooks.error });
   return {
+    botOpenId: async () => {
+      const response = await client.request<{ code?: number; bot?: { open_id?: string }; data?: { bot?: { open_id?: string } } }>({ method: "GET", url: "/open-apis/bot/v3/info", timeout: 15_000 });
+      const id = response.bot?.open_id ?? response.data?.bot?.open_id;
+      if (response.code !== 0 || !id) throw new Error("feishu_bot_identity_unavailable");
+      return id;
+    },
     start: (message) => socket.start({ eventDispatcher: new lark.EventDispatcher({ logger }).register({ "im.message.receive_v1": message }) }),
     close: () => socket.close({ force: true }),
     getMessage: (messageId) => client.im.message.get({ path: { message_id: messageId } }),
@@ -99,6 +106,10 @@ export class FeishuSdkTransport implements FeishuTransport, FeishuMediaTransport
   async sendText(input: Parameters<FeishuTransport["sendText"]>[0]) {
     if (!this.session || this.closed) throw new Error("feishu_transport_unavailable");
     return this.session.sendText(input);
+  }
+  async botOpenId(): Promise<string> {
+    if (!this.session?.botOpenId || this.closed) throw new Error("feishu_bot_identity_unavailable");
+    return this.session.botOpenId();
   }
   async upload(input: Parameters<FeishuMediaTransport["upload"]>[0]) {
     if (!this.session || this.closed) throw new Error("feishu_transport_unavailable");

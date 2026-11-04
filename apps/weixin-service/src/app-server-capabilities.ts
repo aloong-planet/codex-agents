@@ -66,7 +66,7 @@ export function probeAppServerCapabilities(executable: string): AppServerCapabil
   try {
     const result = spawnSync(
       executable,
-      ["app-server", "generate-json-schema", "--out", directory],
+      ["app-server", "generate-json-schema", "--experimental", "--out", directory],
       { encoding: "utf8", timeout: 15_000 },
     );
     if (result.status !== 0) return {

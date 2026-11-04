@@ -52,6 +52,8 @@ export interface CodexAgent {
   close(): void | Promise<void>;
 }
 
+export type ConversationRuntime = { agent: CodexAgent; cwd: string; runtimeWorkspaceRoots: string[] };
+
 export interface VaultCapabilityControl {
   readonly name: string;
   isEnabled(): boolean;
@@ -185,6 +187,7 @@ export class ConversationService {
   }>();
   private readonly reservedKeys: Set<string>;
   private readonly modelSettings: AccountChatModelSettings;
+  private readonly groupRuntimes = new Map<string, ConversationRuntime>();
 
   constructor(
     private readonly channel: ConversationChannel,
@@ -204,6 +207,7 @@ export class ConversationService {
     private readonly workflowTools?: { contractHash?(): string },
     private readonly diagnostics?: LocalDiagnostics,
     private readonly owner?: ConversationOwner,
+    private readonly createGroupRuntime?: (accountId: string, target: string) => ConversationRuntime,
   ) {
     this.state = store.load();
     this.modelSettings = new AccountChatModelSettings(
@@ -244,11 +248,18 @@ export class ConversationService {
     if (this.started) return;
     await this.memory?.start();
     if (this.closing) return;
+    const memoryScopes = new Set<string>();
     for (const account of this.channel.getSnapshot().accounts) {
       if (!this.owner || this.owner.ownsAccount(account.accountId)) {
-        this.memory?.registerAccount?.(this.memoryAccount(account.accountId));
+        memoryScopes.add(this.memoryAccount(account.accountId));
       }
     }
+    for (const address of this.channel.getSnapshot().targets) {
+      if (!this.owner || this.owner.ownsAddress(address.accountId, address.target)) {
+        memoryScopes.add(this.memoryAccount(address.accountId, address.target));
+      }
+    }
+    for (const scope of memoryScopes) this.memory?.registerAccount?.(scope);
     const subscribe = this.channel.onInboundText;
     if (!subscribe) throw new Error("当前微信通道不支持文本入站监听");
     this.unsubscribe = subscribe.call(this.channel, (event) => this.onInbound(event));
@@ -258,7 +269,13 @@ export class ConversationService {
     ) ?? (() => {});
     this.started = true;
     if (this.state.enabledTargets.length > 0) {
-      await Promise.all(this.state.enabledTargets.filter((item) => !this.owner || this.owner.ownsAddress(item.accountId, item.target)).map((item) => this.ensureAgent(item.accountId, item.target)));
+      await Promise.all(this.state.enabledTargets.filter((item) => !this.owner || this.owner.ownsAddress(item.accountId, item.target)).map(async (item) => {
+        try { await this.ensureAgent(item.accountId, item.target); }
+        catch (error) {
+          if (!item.target.startsWith("feishu.group.")) throw error;
+          this.diagnostics?.checkpoint("group.runtime", { status: "unavailable", errorCode: "group_runtime_start_failed" });
+        }
+      }));
     }
     await this.refreshModelCatalog(false).catch(() => {});
   }
@@ -293,7 +310,7 @@ export class ConversationService {
       };
       this.store.save(this.state);
     }
-    this.memory?.confirmNotificationTarget?.(this.memoryAccount(accountId), target);
+    this.memory?.confirmNotificationTarget?.(this.memoryAccount(accountId, target), target);
     await this.ensureAgent(accountId, target);
   }
 
@@ -339,7 +356,7 @@ export class ConversationService {
     );
     if (!known) throw new Error("只能选择已发现的微信入站目标作为计划提醒接收人");
     if (!this.memory?.confirmNotificationTarget) throw new Error("账户计划提醒功能不可用");
-    this.memory.confirmNotificationTarget(this.memoryAccount(accountId), target);
+    this.memory.confirmNotificationTarget(this.memoryAccount(accountId, target), target);
     this.notice = "已将当前微信目标确认为该账户的计划提醒接收人。";
   }
 
@@ -424,7 +441,7 @@ export class ConversationService {
             (session) => session.accountId === item.accountId && session.target === item.target,
           );
           return session !== undefined && this.readyTargets.has(this.targetKey(item.accountId, item.target)) &&
-            this.agent.isThreadReady?.(session.threadId) !== false;
+            this.runtimeForConversation(item.accountId, item.target).agent.isThreadReady?.(session.threadId) !== false;
         },
       ),
       enabledTargets: this.state.enabledTargets.map((item) => ({ ...item })),
@@ -499,6 +516,7 @@ export class ConversationService {
     this.started = false;
     this.closing = settleCleanup([
       () => this.agent.close(),
+      () => Promise.allSettled([...new Set([...this.groupRuntimes.values()].map((runtime) => runtime.agent))].map((agent) => agent.close())),
       () => Promise.allSettled([this.starting, ...this.startingTargets.values(), ...this.queues.values()]),
       () => this.memory?.close(),
       () => {
@@ -513,6 +531,7 @@ export class ConversationService {
   private async ensureAgent(accountId: string, target: string): Promise<string> {
     if (this.closing) throw new Error("weixin_service_closed");
     const key = this.targetKey(accountId, target);
+    const runtime = this.runtimeForConversation(accountId, target);
     const session = this.state.targetSessions.find(
       (item) => item.accountId === accountId && item.target === target,
     );
@@ -525,7 +544,7 @@ export class ConversationService {
       ? session
       : undefined;
     if (this.readyTargets.has(key) && compatibleSession &&
-        this.agent.isThreadReady?.(compatibleSession.threadId) !== false) return compatibleSession.threadId;
+        runtime.agent.isThreadReady?.(compatibleSession.threadId) !== false) return compatibleSession.threadId;
     const starting = this.startingTargets.get(key);
     if (starting) return starting;
 
@@ -533,10 +552,10 @@ export class ConversationService {
     this.notice = "正在启动独立 Codex 服务。";
     const promise = (async () => {
       try {
-        const threadId = await this.agent.startOrResume(
+        const threadId = await runtime.agent.startOrResume(
           compatibleSession?.threadId,
-          this.cwd,
-          [...this.runtimeWorkspaceRoots, ...(this.mediaReadRoot ? [this.mediaReadRoot] : [])],
+          runtime.cwd,
+          runtime.runtimeWorkspaceRoots,
           ...(this.diagnostics ? [(event: import("./codex-conversation.js").CodexSessionEvent) => this.diagnostics?.checkpoint("runtime.stage", { stage: event.kind, status: event.phase })] as const : []),
         );
         if (this.closing) throw new Error("weixin_service_closed");
@@ -833,12 +852,12 @@ export class ConversationService {
       return;
     }
     try {
-      this.memory?.registerAccount?.(this.memoryAccount(event.accountId));
+      this.memory?.registerAccount?.(this.memoryAccount(event.accountId, event.target));
       const threadId = await this.ensureAgent(event.accountId, event.target);
       this.setRuntimePhase(event, runId, "thinking");
       this.status = "thinking";
       this.notice = "独立 Codex 服务正在处理最新微信消息。";
-      const policy = this.policyForTurn();
+      const policy = event.conversationType === "group" ? undefined : this.policyForTurn();
       const outboundRoots = this.state.permissions.onboardingCompleted
         ? this.state.permissions.roots.map((root) => root.canonicalPath)
         : [];
@@ -890,10 +909,10 @@ export class ConversationService {
       if (!this.turns) throw new Error("conversation_turn_factory_missing");
       const recoveryEpoch = this.state.accessContextEpoch ?? 0;
       const recoveryRevision = this.state.permissions.revision;
-      const result = await this.agent.runTurn(
+      const result = await this.runtimeForConversation(event.accountId, event.target).agent.runTurn(
         threadId,
         this.turns.prepare(threadId, event, {
-          accountMemory: this.memory?.recall(this.memoryAccount(event.accountId), event.text) ?? "",
+          accountMemory: this.memory?.recall(this.memoryAccount(event.accountId, event.target), event.text) ?? "",
           outboundRoots,
           isClosing: () => this.closing !== undefined,
           recoveryAllowed: () => recoveryEpoch === (this.state.accessContextEpoch ?? 0) &&
@@ -999,8 +1018,23 @@ export class ConversationService {
     this.store.save(this.state);
   }
 
-  private memoryAccount(accountId: string): string {
-    return this.owner?.memoryScope(accountId) ?? accountId;
+  private memoryAccount(accountId: string, target?: string): string {
+    return this.owner?.memoryScope(accountId, target) ?? accountId;
+  }
+
+  private runtimeForConversation(accountId: string, target: string): ConversationRuntime {
+    if (!target.startsWith("feishu.group.")) return {
+      agent: this.agent, cwd: this.cwd,
+      runtimeWorkspaceRoots: [...this.runtimeWorkspaceRoots, ...(this.mediaReadRoot ? [this.mediaReadRoot] : [])],
+    };
+    const key = this.targetKey(accountId, target);
+    let runtime = this.groupRuntimes.get(key);
+    if (!runtime) {
+      if (!this.createGroupRuntime) throw new Error("group_runtime_unavailable");
+      runtime = this.createGroupRuntime(accountId, target);
+      this.groupRuntimes.set(key, runtime);
+    }
+    return runtime;
   }
 
   private async captureMemoryTurn(
@@ -1009,7 +1043,7 @@ export class ConversationService {
     assistantEntry: CodexTranscriptEntry,
   ): Promise<void> {
     await this.memory?.captureTurn({
-      accountId: this.memoryAccount(event.accountId),
+      accountId: this.memoryAccount(event.accountId, event.target),
       target: event.target,
       userEntry: {
         source: { eventKey: event.key, target: event.target },

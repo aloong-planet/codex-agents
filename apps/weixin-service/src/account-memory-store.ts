@@ -166,7 +166,7 @@ export class AccountMemoryStore {
 
   confirmNotificationTarget(accountId: string, target: string, confirmedAt = this.now()): void {
     this.assertSafeScope(accountId);
-    if (!(/^[A-Za-z0-9._-]+@im\.wechat$/u.test(target) || /^feishu\.[a-f0-9]{64}$/u.test(target)) || !Number.isInteger(confirmedAt) || confirmedAt < 0) {
+    if (!(/^[A-Za-z0-9._-]+@im\.wechat$/u.test(target) || /^feishu\.(?:group\.)?[a-f0-9]{64}$/u.test(target)) || !Number.isInteger(confirmedAt) || confirmedAt < 0) {
       throw new Error("memory_notification_binding_invalid");
     }
     const database = this.open(accountId);

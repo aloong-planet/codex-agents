@@ -19,6 +19,7 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     this.handlers = handlers;
   }
   close(): void { this.handlers = undefined; }
+  async botOpenId(): Promise<string> { return "ou_fixturebot"; }
   async sendText(input: Parameters<FeishuTransport["sendText"]>[0]) {
     if (!this.handlers) throw new Error("fixture_feishu_not_started");
     this.outbox.push({ chatId: input.chatId, message: input.text, simulated: true, acceptedAt: Date.now() });

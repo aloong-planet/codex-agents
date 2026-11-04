@@ -26,20 +26,44 @@ export class WorkflowPendingPresentationStore implements PendingPresentationStor
         PRIMARY KEY (account_ref, target_ref)
       )
     `);
+    const columns = this.database.prepare("PRAGMA table_info(workflow_pending_presentation)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "requester_ref")) {
+      this.database.exec("BEGIN IMMEDIATE");
+      try {
+        this.database.exec(`
+          ALTER TABLE workflow_pending_presentation RENAME TO workflow_pending_presentation_legacy;
+          CREATE TABLE workflow_pending_presentation (
+            account_ref TEXT NOT NULL, target_ref TEXT NOT NULL, requester_ref TEXT NOT NULL,
+            run_id TEXT NOT NULL, signal_ref TEXT NOT NULL, candidate_revision INTEGER NOT NULL,
+            request_text_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, accepted_at INTEGER NOT NULL,
+            PRIMARY KEY (account_ref, target_ref, requester_ref)
+          );
+          INSERT INTO workflow_pending_presentation
+          SELECT account_ref, target_ref, '', run_id, signal_ref, candidate_revision,
+            request_text_hash, expires_at, accepted_at FROM workflow_pending_presentation_legacy;
+          DROP TABLE workflow_pending_presentation_legacy;
+        `);
+        this.database.exec("COMMIT");
+      } catch (error) {
+        if (this.database.isTransaction) this.database.exec("ROLLBACK");
+        throw error;
+      }
+    }
   }
 
-  get(accountRef: string, targetRef: string): PendingPresentation | undefined {
+  get(accountRef: string, targetRef: string, requesterRef?: string): PendingPresentation | undefined {
     validateBounded(accountRef, "workflow_presentation_account_invalid");
     validateBounded(targetRef, "workflow_presentation_target_invalid");
     const row = this.database.prepare(`
-      SELECT account_ref, target_ref, run_id, signal_ref, candidate_revision,
+      SELECT account_ref, target_ref, requester_ref, run_id, signal_ref, candidate_revision,
              request_text_hash, expires_at, accepted_at
       FROM workflow_pending_presentation
-      WHERE account_ref = ? AND target_ref = ?
-    `).get(accountRef, targetRef) as PresentationRow | undefined;
+      WHERE account_ref = ? AND target_ref = ? AND requester_ref = ?
+    `).get(accountRef, targetRef, requesterRef ?? "") as PresentationRow | undefined;
     return row ? {
       accountRef: row.account_ref,
       targetRef: row.target_ref,
+      ...(row.requester_ref ? { requesterRef: row.requester_ref } : {}),
       runId: row.run_id,
       signalRef: row.signal_ref,
       revision: row.candidate_revision,
@@ -53,10 +77,10 @@ export class WorkflowPendingPresentationStore implements PendingPresentationStor
     validatePresentation(presentation);
     this.database.prepare(`
       INSERT INTO workflow_pending_presentation(
-        account_ref, target_ref, run_id, signal_ref, candidate_revision,
+        account_ref, target_ref, requester_ref, run_id, signal_ref, candidate_revision,
         request_text_hash, expires_at, accepted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(account_ref, target_ref) DO UPDATE SET
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(account_ref, target_ref, requester_ref) DO UPDATE SET
         run_id = excluded.run_id,
         signal_ref = excluded.signal_ref,
         candidate_revision = excluded.candidate_revision,
@@ -67,6 +91,7 @@ export class WorkflowPendingPresentationStore implements PendingPresentationStor
     `).run(
       presentation.accountRef,
       presentation.targetRef,
+      presentation.requesterRef ?? "",
       presentation.runId,
       presentation.signalRef,
       presentation.revision,
@@ -84,6 +109,7 @@ export class WorkflowPendingPresentationStore implements PendingPresentationStor
 type PresentationRow = {
   account_ref: string;
   target_ref: string;
+  requester_ref: string;
   run_id: string;
   signal_ref: string;
   candidate_revision: number;
@@ -95,6 +121,7 @@ type PresentationRow = {
 function validatePresentation(presentation: PendingPresentation): void {
   validateBounded(presentation.accountRef, "workflow_presentation_account_invalid");
   validateBounded(presentation.targetRef, "workflow_presentation_target_invalid");
+  if (presentation.requesterRef !== undefined) validateBounded(presentation.requesterRef, "workflow_presentation_requester_invalid");
   validateBounded(presentation.runId, "workflow_presentation_run_invalid");
   validateBounded(presentation.signalRef, "workflow_presentation_signal_invalid");
   if (!Number.isSafeInteger(presentation.revision) || presentation.revision < 0 ||

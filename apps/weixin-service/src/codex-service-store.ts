@@ -93,7 +93,7 @@ export type PermissionState = {
 
 const THREAD_ID = /^[0-9a-f-]{36}$/i;
 const ACCOUNT_ID = /^[A-Za-z0-9._@-]{1,200}$/;
-const TARGET_ID = /^(?:[A-Za-z0-9._-]+@im\.wechat|feishu\.[0-9a-f]{64})$/;
+const TARGET_ID = /^(?:[A-Za-z0-9._-]+@im\.wechat|feishu\.(?:group\.)?[0-9a-f]{64})$/;
 const KEY = /^[0-9a-f]{64}$/;
 
 function record(value: unknown): Record<string, unknown> | null {

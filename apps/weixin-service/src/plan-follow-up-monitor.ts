@@ -78,7 +78,7 @@ export class PlanFollowUpMonitor {
     for (const accountId of accountIds) {
       if (this.closed) return;
       const route = this.options.notificationRoute;
-      if (route && accountId !== route.memoryAccountId) continue;
+      if (route && !route.ownsMemoryScope(accountId)) continue;
       this.options.store.recoverInterruptedReminderAttempts(accountId, this.options.now?.() ?? Date.now());
       if (route?.capturesCreationDestination) {
         this.options.store.migratePlanNotificationDestinations(accountId, () => {
@@ -97,6 +97,10 @@ export class PlanFollowUpMonitor {
         const delivery = route?.capturesCreationDestination ? plan.notificationDestination
           : legacyDelivery;
         if (!delivery || (route && !route.isSelected(delivery))) continue;
+        if (route) {
+          const allowed = route.captureMemory(accountId, delivery.target);
+          if (!allowed || allowed.accountId !== delivery.accountId || (allowed.channel ?? "weixin") !== (delivery.channel ?? "weixin")) continue;
+        }
         const key = JSON.stringify([delivery.channel ?? "weixin", delivery.accountId, delivery.target]);
         const group = groups.get(key) ?? { delivery, target: route?.capturesCreationDestination ? delivery.target : target!, plans: [] };
         group.plans.push(plan); groups.set(key, group);

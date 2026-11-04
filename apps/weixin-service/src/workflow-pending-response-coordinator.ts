@@ -8,7 +8,7 @@ import type {
 } from "./workflow-engine.js";
 
 export interface PendingResponseEnginePort {
-  listPendingSignals(accountRef: string, targetRef: string): WorkflowPendingSignal[];
+  listPendingSignals(accountRef: string, targetRef: string, requesterRef?: string): WorkflowPendingSignal[];
   signal(signal: WorkflowSignal): Promise<WorkflowSignalReceipt>;
   cancelPending?(input: {
     cancellationId: string;
@@ -16,6 +16,7 @@ export interface PendingResponseEnginePort {
     expectedRevision: number;
     accountRef: string;
     targetRef: string;
+    requesterRef?: string;
   }): Promise<WorkflowSignalReceipt>;
   get(runId: string): WorkflowRunView | undefined;
 }
@@ -25,6 +26,7 @@ export type PendingResponseInput = {
     eventKey: string;
     accountRef: string;
     targetRef: string;
+    requesterRef?: string;
     occurredAt: number;
   };
   userText: string;
@@ -62,6 +64,7 @@ export type PendingResponseCoordinatorOptions = {
 export type PendingPresentation = {
   accountRef: string;
   targetRef: string;
+  requesterRef?: string;
   runId: string;
   signalRef: string;
   revision: number;
@@ -71,7 +74,7 @@ export type PendingPresentation = {
 };
 
 export interface PendingPresentationStore {
-  get(accountRef: string, targetRef: string): PendingPresentation | undefined;
+  get(accountRef: string, targetRef: string, requesterRef?: string): PendingPresentation | undefined;
   put(presentation: PendingPresentation): void;
 }
 
@@ -97,6 +100,7 @@ export class PendingResponseCoordinator {
     const allPending = this.options.engine.listPendingSignals(
       input.trustedTurn.accountRef,
       input.trustedTurn.targetRef,
+      input.trustedTurn.requesterRef,
     );
     const pending = allPending.filter((request) => request.expiresAt > (this.options.now?.() ?? Date.now()));
     const text = input.userText.trim();
@@ -124,7 +128,7 @@ export class PendingResponseCoordinator {
         if (initialRequestIndex < 0) return { owner: "workflow", kind: "clarify", reason: "stale" };
         const initialRequest = pending[initialRequestIndex]!;
         const current = this.options.engine
-          .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef)
+          .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef, input.trustedTurn.requesterRef)
           .filter((request) => request.expiresAt > (this.options.now?.() ?? Date.now()));
         const request = current.find((candidate) => samePendingRequest(candidate, initialRequest));
         if (!request) return { owner: "workflow", kind: "clarify", reason: "stale" };
@@ -135,6 +139,7 @@ export class PendingResponseCoordinator {
           expectedRevision: request.revision,
           accountRef: input.trustedTurn.accountRef,
           targetRef: input.trustedTurn.targetRef,
+          ...(input.trustedTurn.requesterRef ? { requesterRef: input.trustedTurn.requesterRef } : {}),
         });
         return { owner: "workflow", kind: "cancelled", run: this.options.engine.get(receipt.runId) };
       }
@@ -152,7 +157,7 @@ export class PendingResponseCoordinator {
       const initialRequest = pending[initialRequestIndex]!;
       const currentNow = this.options.now?.() ?? Date.now();
       const current = this.options.engine
-        .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef)
+        .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef, input.trustedTurn.requesterRef)
         .filter((request) => request.expiresAt > currentNow);
       const rebound = rebindSelections(current, initialRequest, choiceIndexes, currentNow);
       if (rebound.kind === "refresh") return { owner: "workflow", ...rebound };
@@ -183,7 +188,7 @@ export class PendingResponseCoordinator {
     }
     const currentNow = this.options.now?.() ?? Date.now();
     const current = this.options.engine
-      .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef)
+      .listPendingSignals(input.trustedTurn.accountRef, input.trustedTurn.targetRef, input.trustedTurn.requesterRef)
       .filter((request) => request.expiresAt > currentNow);
     const rebound = rebindSelections(current, initialRequest, [initialChoiceIndex], currentNow);
     if (rebound.kind === "refresh") return { owner: "workflow", ...rebound };
@@ -197,9 +202,11 @@ export class PendingResponseCoordinator {
     const presentation = this.options.presentations?.get(
       input.trustedTurn.accountRef,
       input.trustedTurn.targetRef,
+      input.trustedTurn.requesterRef,
     );
     if (!presentation || presentation.accountRef !== input.trustedTurn.accountRef ||
         presentation.targetRef !== input.trustedTurn.targetRef ||
+        presentation.requesterRef !== input.trustedTurn.requesterRef ||
         presentation.expiresAt <= (this.options.now?.() ?? Date.now())) return undefined;
     const matches = pending.filter((request) => request.runId === presentation.runId &&
       request.signalRef === presentation.signalRef && request.revision === presentation.revision);
@@ -219,6 +226,7 @@ export class PendingResponseCoordinator {
       expectedRevision: request.revision,
       accountRef: input.trustedTurn.accountRef,
       targetRef: input.trustedTurn.targetRef,
+      ...(input.trustedTurn.requesterRef ? { requesterRef: input.trustedTurn.requesterRef } : {}),
       selection: request.selectionMode === "multiple" ? [selection] : selection,
     });
     return { owner: "workflow", kind: "resumed", run: this.options.engine.get(receipt.runId) };
@@ -240,6 +248,7 @@ export class PendingResponseCoordinator {
       expectedRevision: request.revision,
       accountRef: input.trustedTurn.accountRef,
       targetRef: input.trustedTurn.targetRef,
+      ...(input.trustedTurn.requesterRef ? { requesterRef: input.trustedTurn.requesterRef } : {}),
       selection,
     });
     return { owner: "workflow", kind: "resumed", run: this.options.engine.get(receipt.runId) };
