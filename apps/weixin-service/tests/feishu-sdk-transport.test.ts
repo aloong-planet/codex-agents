@@ -11,6 +11,7 @@ function session() {
   const factory: FeishuSdkSessionFactory = (_connection, callbacks) => {
     hooks = callbacks;
     return { async start(message) { receiver = message; }, close() { closed = true; },
+      async botOpenId() { return "ou_sdkbot"; },
       async upload(input) { outbox.push(input); return "uploaded_key"; },
       async sendResource(input) { outbox.push(input); return { code: 0, data: { message_id: "om_resource" } }; },
       async getMessage(messageId) { outbox.push(messageId); return { code: 0, data: { items: [] } }; },
@@ -38,6 +39,44 @@ it("waits for actual readiness, forwards events and uses the bound raw send payl
     expect(await transport.sendText({ chatId: "oc_private", text: "hello", uuid: "fixed" })).toEqual({ code: 0, data: { message_id: "om_result" } });
     expect(sdk.outbox).toEqual([{ chatId: "oc_private", text: "hello", uuid: "fixed" }]);
   } finally { transport.close(); }
+});
+
+it("forwards bot identity only through an open SDK session", async () => {
+  const sdk = session();
+  const transport = new FeishuSdkTransport({ appId: "cli_test", appSecret: "dummy" }, sdk.factory);
+  await expect(transport.botOpenId()).rejects.toThrow("feishu_bot_identity_unavailable");
+  try {
+    const startup = transport.start({ async message() {}, ready() {}, unavailable() {} });
+    sdk.hooks().ready(); await startup;
+    expect(await transport.botOpenId()).toBe("ou_sdkbot");
+  } finally { transport.close(); }
+  await expect(transport.botOpenId()).rejects.toThrow("feishu_bot_identity_unavailable");
+});
+
+it("resolves bot identity through the real pinned SDK and rejects unusable responses", async () => {
+  const lark = await import("@larksuiteoapi/node-sdk");
+  const { createFeishuSdkSession } = await import("../src/feishu-sdk-transport.js");
+  // Independent external shape: openclaw/openclaw extensions/feishu/src/probe.ts (2026-11-05).
+  // Feishu returns bot at the top level; the SDK-compatible nested response is also accepted.
+  let response: unknown = { code: 0, msg: "ok", bot: { app_name: "Fixture Agent", open_id: "ou_topbot" } };
+  const token = vi.spyOn(lark.defaultHttpInstance, "post").mockResolvedValue(
+    { code: 0, tenant_access_token: "fixture-bot-access", expire: 7200 } as unknown as Awaited<ReturnType<typeof lark.defaultHttpInstance.post>>);
+  const request = vi.spyOn(lark.defaultHttpInstance, "request").mockImplementation(async () =>
+    response as Awaited<ReturnType<typeof lark.defaultHttpInstance.request>>);
+  const sdk = createFeishuSdkSession({ appId: "cli_bot_projection", appSecret: "fixture-secret" }, { ready() {}, unavailable() {}, error() {} });
+  try {
+    expect(await sdk.botOpenId!()).toBe("ou_topbot");
+    response = { code: 0, data: { bot: { open_id: "ou_nestedbot" } } };
+    expect(await sdk.botOpenId!()).toBe("ou_nestedbot");
+    response = { code: 99991663, msg: "permission denied", bot: { open_id: "ou_rejected" } };
+    await expect(sdk.botOpenId!()).rejects.toThrow("feishu_bot_identity_unavailable");
+    response = { code: 0, bot: { app_name: "No identity" } };
+    await expect(sdk.botOpenId!()).rejects.toThrow("feishu_bot_identity_unavailable");
+    expect(request.mock.calls).toHaveLength(4);
+    for (const [options] of request.mock.calls) expect(options).toMatchObject({
+      method: "GET", url: "https://open.feishu.cn/open-apis/bot/v3/info", timeout: 15000,
+    });
+  } finally { sdk.close(); request.mockRestore(); token.mockRestore(); }
 });
 
 it("forwards parent lookup and resource download through the same open SDK session", async () => {

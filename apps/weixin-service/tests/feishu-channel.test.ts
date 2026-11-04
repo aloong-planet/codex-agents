@@ -150,6 +150,38 @@ it("continues other conversations while preserving order in a busy group", async
   } finally { release(); await h.close(); }
 });
 
+it("drains a group backlog in arrival order with only preceding deduplicated discussion", async () => {
+  const h = harness(undefined, [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice"] }]);
+  const received: InboundMessage[] = [];
+  h.channel.onInboundText(async (message) => { received.push(message); });
+  const queued = (id: string, text: string, createTime: string, addressed: boolean) => ({
+    ...event(), sender: { sender_type: "user", sender_id: { open_id: addressed ? "ou_alice" : "ou_guest" } },
+    message: { ...event().message, message_id: id, create_time: createTime, chat_type: "group", chat_id: "oc_alpha",
+      content: JSON.stringify({ text: addressed ? `@_user_1 ${text}` : text }),
+      mentions: addressed ? [{ key: "@_user_1", id: { open_id: "ou_bot" }, name: "Agent" }] : [] },
+  });
+  try {
+    await h.channel.start();
+    await h.transport.handlers!.message(queued("om_first", "first request", "1800000005000", true));
+    await h.transport.handlers!.message(queued("om_observation1", "first discussion", "1800000004000", false));
+    await h.transport.handlers!.message(queued("om_second", "second request", "1800000003000", true));
+    await h.transport.handlers!.message(queued("om_observation2", "second discussion", "1800000002000", false));
+    await h.transport.handlers!.message(queued("om_observation1", "first discussion", "1800000004000", false));
+    await h.transport.handlers!.message(queued("om_third", "third request", "1800000001000", true));
+    expect(received).toEqual([]);
+    h.channel.activateInboundDispatch();
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+    expect(received.map((message) => message.messageId)).toEqual(["om_first", "om_second", "om_third"]);
+    expect(received.map((message) => message.discussion?.map(({ senderId, text }) => ({ senderId, text })))).toEqual([
+      [],
+      [{ senderId: "ou_alice", text: "first request" }, { senderId: "ou_guest", text: "first discussion" }],
+      [{ senderId: "ou_alice", text: "first request" }, { senderId: "ou_guest", text: "first discussion" },
+        { senderId: "ou_alice", text: "second request" }, { senderId: "ou_guest", text: "second discussion" }],
+    ]);
+    expect(h.errors).toEqual([]);
+  } finally { await h.close(); }
+});
+
 it("discards revoked queued group work on restart without blocking currently authorized members", async () => {
   const h = harness(undefined, [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice"] }]);
   const addressed = (id: string, senderId: string) => ({ ...event(), sender: { sender_type: "user", sender_id: { open_id: senderId } },
