@@ -91,7 +91,7 @@ describe("WorkflowToolGateway", () => {
       arguments: { disposition: "selected", fileRefs: ["fileref_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"] },
     }, trusted);
 
-    expect(supersedePendingSignals).toHaveBeenCalledWith("account-1", "target-1");
+    expect(supersedePendingSignals).toHaveBeenCalledWith("account-1", "target-1", undefined);
     expect(supersedePendingSignals.mock.invocationCallOrder[0])
       .toBeLessThan(submit.mock.invocationCallOrder[0]!);
   });

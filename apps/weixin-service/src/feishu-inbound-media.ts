@@ -31,6 +31,14 @@ export class FeishuInboundMedia {
     fs.chmodSync(root, 0o700);
   }
 
+  forChat(chatId: string): FeishuInboundMedia {
+    return chatId === this.chatId ? this : new FeishuInboundMedia(this.readableRoot(chatId), chatId, this.transport);
+  }
+
+  readableRoot(chatId: string): string {
+    return chatId === this.chatId ? this.root : path.join(this.root, createHash("sha256").update(chatId).digest("hex"));
+  }
+
   async normalize(message: Message): Promise<Content> {
     let parent: Message | undefined;
     if (message.parentId) {
@@ -77,8 +85,8 @@ export class FeishuInboundMedia {
               parts.push(`${node.text} (${node.href})`);
               break;
             case "at":
-              if (typeof node.user_id !== "string" || typeof node.user_name !== "string") throw new Error("feishu_message_invalid");
-              parts.push(node.user_name ? `@${node.user_name}` : node.user_id);
+              if (typeof node.user_id !== "string" || (node.user_name !== undefined && typeof node.user_name !== "string")) throw new Error("feishu_message_invalid");
+              parts.push(node.user_name ? `@${node.user_name}` : node.user_id.startsWith("@") ? node.user_id : `@${node.user_id}`);
               break;
             case "img":
               if (!identifier(node.image_key)) throw new Error("feishu_resource_invalid");

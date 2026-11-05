@@ -24,7 +24,7 @@ export type WorkflowToolRegistration = {
 };
 
 export interface WorkflowToolEnginePort {
-  supersedePendingSignals(accountRef: string, targetRef: string): string[];
+  supersedePendingSignals(accountRef: string, targetRef: string, requesterRef?: string): string[];
   submit(trigger: WorkflowTrigger): Promise<WorkflowSubmission>;
   get(runId: string): unknown;
 }
@@ -85,7 +85,7 @@ export class WorkflowToolGateway implements WorkflowToolGatewayPort {
     if (registration.workflowIds && !registration.workflowIds.includes(requestedWorkflowId)) {
       throw new Error("workflow_tool_template_unavailable");
     }
-    this.engine.supersedePendingSignals(trusted.accountId, trusted.target);
+    this.engine.supersedePendingSignals(trusted.accountId, trusted.target, trusted.requesterRef);
     const submission = await this.engine.submit({
       triggerId: trusted.eventKey,
       source: "weixin",
@@ -93,6 +93,7 @@ export class WorkflowToolGateway implements WorkflowToolGatewayPort {
       requestedWorkflowId,
       accountRef: trusted.accountId,
       targetRef: trusted.target,
+      ...(trusted.requesterRef ? { requesterRef: trusted.requesterRef } : {}),
       inputRefs: structuredClone(inputRefs),
     });
     // Durable acceptance is independent of the disposable presentation. Nothing

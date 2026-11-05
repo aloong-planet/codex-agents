@@ -1,4 +1,4 @@
-import type { InboundContent as InboundTextEvent } from "./channel-contract.js";
+import { conversationRequester, type InboundContent as InboundTextEvent } from "./channel-contract.js";
 import { settleCleanup } from "./async-cleanup.js";
 import type { WorkflowPendingSignal, WorkflowRunView } from "./workflow-engine.js";
 import type {
@@ -34,7 +34,7 @@ type MediaTurnEvidenceStore = {
 };
 
 type PendingWorkflowView = {
-  listPendingSignals(accountRef: string, targetRef: string): WorkflowPendingSignal[];
+  listPendingSignals(accountRef: string, targetRef: string, requesterRef?: string): WorkflowPendingSignal[];
 };
 
 type OriginalTextResolver = {
@@ -64,7 +64,7 @@ export function createWorkflowToolReplyProjector(
 ): WorkflowToolReplyProjector {
   return (runValue: unknown, trusted: TrustedWorkflowTurn) => {
     const run = runValue as WorkflowRunView | undefined;
-    const pending = engine.listPendingSignals(trusted.accountId, trusted.target)
+    const pending = engine.listPendingSignals(trusted.accountId, trusted.target, trusted.requesterRef)
       .filter((request) => request.expiresAt > now());
     const rendered = renderWorkflowRun(run, pending);
     if (!rendered.handled) throw new Error("workflow_tool_reply_unavailable");
@@ -89,6 +89,7 @@ export function createWorkflowToolReplyProjector(
       onAccepted: () => presentations.put({
         accountRef: trusted.accountId,
         targetRef: trusted.target,
+        ...(trusted.requesterRef ? { requesterRef: trusted.requesterRef } : {}),
         runId: run.runId,
         signalRef: request.signalRef,
         revision: request.revision,
@@ -208,12 +209,13 @@ export class WorkflowToolProductionControl {
   async bind(threadId: string, event: InboundTextEvent): Promise<WorkflowToolTurnBinding> {
     if (this.activeBindings.has(threadId)) throw new Error("workflow_tool_turn_already_bound");
     const hasAttachments = (event.attachments?.length ?? 0) + (event.quote?.attachments.length ?? 0) > 0;
-    const originalText = this.fileArtifacts.captureQuery(event.key, event.text, { allowEmpty: hasAttachments });
+    const originalText = this.fileArtifacts.captureQuery(event.key, event.text, { allowEmpty: hasAttachments || event.conversationType === "group" });
     this.activeBindings.add(threadId);
     const trusted: TrustedWorkflowTurn = {
       eventKey: event.key,
       accountId: event.accountId,
       target: event.target,
+      ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
       occurredAt: event.receivedAt,
       originalTextRef: originalText.handle,
       attachmentRefs: [],

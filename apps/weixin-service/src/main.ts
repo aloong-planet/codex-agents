@@ -1,3 +1,4 @@
+import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "./isolated-model-runtime.js";
 import { MediaDeliveryRouter } from "./media-delivery-router.js";
 import { ConversationChannelRouter } from "./conversation-channel-router.js";
 import { PersonalOwnerDirectory } from "./personal-owner-identity.js";
@@ -149,10 +150,11 @@ const diagnosticNumber = (name: string, fallback: number): number => {
   const value = Number(process.env[name]);
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 };
+const diagnosticDirectory = process.env.WEIXIN_OTEL_DIRECTORY ?? (fixtureMode
+  ? path.join(path.dirname(privateStatePath), "otel")
+  : path.join(os.homedir(), "Library", "Logs", "codex-weixin", "otel"));
 const diagnostics = process.env.WEIXIN_OTEL_ENABLED === "0" ? undefined : new LocalDiagnostics(new DiagnosticFiles(
-  process.env.WEIXIN_OTEL_DIRECTORY ?? (fixtureMode
-    ? path.join(path.dirname(privateStatePath), "otel")
-    : path.join(os.homedir(), "Library", "Logs", "codex-weixin", "otel")),
+  diagnosticDirectory,
   {
     retentionMs: diagnosticNumber("WEIXIN_OTEL_RETENTION_DAYS", 7) * 86_400_000,
     maxFileBytes: diagnosticNumber("WEIXIN_OTEL_MAX_FILE_MIB", 20) * 1024 ** 2,
@@ -180,10 +182,12 @@ const fixtureFeishu = fixtureMode && feishuConfiguration !== undefined ? new Fix
 const channelPort: WeixinChannel | undefined = directChannel
   ? bindWeixinOwner(directChannel, weixinConfiguration!.owner) : fixturePort;
 const feishuTransport = feishuConfiguration ? fixtureFeishu ?? new FeishuSdkTransport(feishuConfiguration.connection) : undefined;
+const feishuInboundMedia = feishuConfiguration ? new FeishuInboundMedia(
+  path.join(path.dirname(privateStatePath), "media", "inbound", "feishu", feishuConfiguration.owner.contextHash()),
+  feishuConfiguration.binding.target, feishuTransport!) : undefined;
 const feishuChannel = feishuConfiguration
   ? new FeishuChannel(feishuConfiguration, feishuTransport!,
-      durableInboundStore, durableEffectLedger, (code) => process.stderr.write(`${code}\n`), Date.now,
-      new FeishuInboundMedia(path.join(path.dirname(privateStatePath), "media", "inbound", "feishu", feishuConfiguration!.owner.contextHash()), feishuConfiguration!.binding.target, feishuTransport!))
+      durableInboundStore, durableEffectLedger, (code) => process.stderr.write(`${code}\n`), Date.now, feishuInboundMedia)
   : undefined;
 const activeChannels = [
   ...(channelPort ? [{ name: "weixin" as const, port: channelPort, owner: weixinConfiguration?.owner }] : []),
@@ -194,8 +198,10 @@ const notificationRoute = channelConfiguration?.notificationRoute;
 let channelReady = false;
 
 
+const fixtureBusinessRoot = fixtureMode && process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY
+  ? fs.realpathSync(process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY) : path.dirname(privateStatePath);
 const vaultRoot = fixtureMode
-  ? path.join(path.dirname(privateStatePath), "demo-vault")
+  ? path.join(fixtureBusinessRoot, "demo-vault")
   : "/Users/loong_zhou/Documents/demo/demo";
 if (fixtureMode && !fs.existsSync(vaultRoot)) {
   fs.mkdirSync(path.join(vaultRoot, ".obsidian"), { recursive: true });
@@ -232,7 +238,7 @@ const writeGuard = new NativeWriteGuard(
   new TurnSnapshotStore(path.dirname(privateStatePath), runtimeWorkspaceRoots),
 );
 const mediaExportHome = fixtureMode
-  ? path.join(path.dirname(privateStatePath), "fixture-media-home")
+  ? path.join(fixtureBusinessRoot, "fixture-media-home")
   : os.homedir();
 if (fixtureMode && !fs.existsSync(mediaExportHome)) {
   for (const directory of ["Downloads", "Pictures", "Documents"]) {
@@ -291,13 +297,17 @@ const weixinMediaDelivery = directChannel ? ((): MediaDeliveryPort => {
     reconcile: (operationId) => delivery.reconcile(operationId),
   };
 })() : undefined;
-const feishuMediaDelivery = feishuTransport && feishuConfiguration ? new FeishuMediaDelivery(
-  feishuConfiguration, feishuTransport, durableEffectLedger,
-  [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
-    path.join(mediaReadRoot, "feishu", feishuConfiguration!.owner.contextHash())],
-  () => startedChannels.has("feishu") && feishuChannel!.state({ ...feishuConfiguration.owner.conversationAddress(), channel: "feishu" }).enabled,
-) : undefined;
+const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().map((destination) => ({
+  destination,
+  delivery: new FeishuMediaDelivery(feishuConfiguration, feishuTransport, durableEffectLedger,
+    [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
+      feishuInboundMedia!.readableRoot(feishuConfiguration.owner.deliveryTarget(destination.accountId, destination.target)!)],
+    () => startedChannels.has("feishu") && feishuChannel!.state({ ...destination, channel: "feishu" }).enabled, destination),
+})) : [];
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
+  groupProtectedRoots: [path.dirname(privateStatePath), diagnosticDirectory, process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
+    path.join(os.homedir(), ".agents"), path.join(os.homedir(), ".openclaw"),
+    process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json")],
   ...(fixtureMode && process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT
     ? { budget: { maxScannedFiles: Number(process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT) } } : {}),
   diagnostics,
@@ -388,7 +398,7 @@ const fixtureWeixinDelivery = fixturePort ? new WeixinMediaDelivery({
       }) : undefined;
 const selectedMediaDelivery: MediaDeliveryPort = channelConfiguration ? new MediaDeliveryRouter([
   ...(weixinConfiguration && (weixinMediaDelivery ?? fixtureWeixinDelivery) ? [{ destination: weixinConfiguration.owner.conversationAddress(), delivery: (weixinMediaDelivery ?? fixtureWeixinDelivery)! }] : []),
-  ...(feishuConfiguration && feishuMediaDelivery ? [{ destination: feishuConfiguration.owner.conversationAddress(), delivery: feishuMediaDelivery }] : []),
+  ...feishuMediaRoutes,
 ]) : fixtureWeixinDelivery!;
 const workflowEngine = new WorkflowEngine(
   workflowDatabasePath,
@@ -519,8 +529,9 @@ const weixinNotifications = channelPort ? new WeixinNotificationChannel(channelP
   () => process.stderr.write("定时推送未被确认接受，请检查本地任务状态；不会自动改发其他渠道。\n")) : undefined;
 const notificationChannel = channelConfiguration ? new NotificationChannelRouter([
   ...(weixinConfiguration && weixinNotifications ? [{ destination: { channel: "weixin" as const, ...weixinConfiguration.owner.conversationAddress() }, channel: weixinNotifications }] : []),
-  ...(feishuConfiguration && feishuChannel ? [{ destination: { channel: "feishu" as const, ...feishuConfiguration.owner.conversationAddress() }, channel: feishuChannel }] : []),
+  ...(feishuConfiguration && feishuChannel ? feishuConfiguration.owner.conversationAddresses().map((address) => ({ destination: { channel: "feishu" as const, ...address }, channel: feishuChannel })) : []),
 ]) : weixinNotifications!;
+const groupRuntimeRoot = path.join(path.dirname(privateStatePath), "group-model-runtimes");
 const scheduledTasks = new ScheduledTasks({
   historyRetention: {
     ...(process.env.SCHEDULED_HISTORY_DETAIL_DAYS !== undefined ? { maxAgeMs: Number(process.env.SCHEDULED_HISTORY_DETAIL_DAYS) * 86_400_000 } : {}),
@@ -529,7 +540,15 @@ const scheduledTasks = new ScheduledTasks({
   dailyNews: { researcher: newsResearcher, archive: newsArchive, ...(localNotifier ? { notifyLocal: (title: string, body: string) => localNotifier.notify(title, body) } : {}) },
   dailyNewsActive: () => dailyNewsActive,
   ...(diagnostics ? { diagnostics } : {}),
-  research: createScheduledResearch({ executable: () => resolveCodexExecutable(process.env), ...(diagnostics ? { diagnostics } : {}) }),
+  research: createScheduledResearch({ executable: () => resolveCodexExecutable(process.env), ...(diagnostics ? { diagnostics } : {}),
+    groupRuntime: (destination) => {
+      if (!appServerCapabilities.namedPermissionsSupported || !feishuConfiguration?.owner.ownsAddress(destination.accountId, destination.target)) {
+        throw new Error("research_runtime_unavailable");
+      }
+      return createIsolatedModelRuntime({ root: groupRuntimeRoot, scope: `research-${destination.target}`,
+        ...(fixtureMode ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
+    },
+  }),
   databasePath: path.join(path.dirname(privateStatePath), "scheduled-tasks.sqlite"),
   readOriginalText: (ref) => workflowFileArtifacts.resolveQuery(ref) ?? undefined,
   ...(notificationRoute ? { notificationRoute } : {}),
@@ -602,6 +621,40 @@ const codexAgent: CodexAgent = new CodexConversation(
     onConnectionFailure: (error) => diagnostics?.checkpoint("app_server.connection", { status: "closed", errorCode: error.message }),
   },
 );
+const isolatedConversation = (scope: string, options: ConstructorParameters<typeof CodexConversation>[5], readableRoots: string[] = [], main = false) => {
+  if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
+  const runtime = createIsolatedModelRuntime({ root: groupRuntimeRoot, scope, readableRoots,
+    ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
+  const agent = new CodexConversation(
+    () => fixtureMode && !fixtureLiveMainModel && main
+      ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall() }, undefined, (request) => {
+          fixtureModelRequests.push(request); if (fixtureModelRequests.length > 20) fixtureModelRequests.shift();
+        })
+      : spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
+    600_000, main ? workflowToolHost : undefined, undefined, 300_000,
+    { ...options, permissionProfile: runtime.permissionProfile });
+  return { agent, cwd: runtime.cwd, runtimeWorkspaceRoots: [] };
+};
+const createGroupRuntime = (accountId: string, target: string) => {
+  const chatId = feishuConfiguration?.owner.deliveryTarget(accountId, target);
+  if (!chatId || !target.startsWith("feishu.group.")) throw new Error("group_runtime_identity_unbound");
+  const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
+  fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
+  return isolatedConversation(target, { structuredOutputSupported: appServerCapabilities.structuredOutputSupported,
+    automaticRecovery: true, serviceName: "feishu_group", webSearch: "live" }, [mediaRoot], true);
+};
+let groupPendingResponseAgent: CodexConversation | undefined;
+let groupPendingResponseRouter: PendingResponseRouter | undefined;
+if (feishuConfiguration?.owner.hasGroups) {
+  if (fixtureMode && !fixtureLiveWorkflowAgents) groupPendingResponseRouter = new FixturePendingResponseRouter();
+  else {
+    try {
+      const runtime = isolatedConversation("pending-router", { serviceName: "feishu_group_pending", webSearch: "disabled", runtimeProfile: PENDING_RESPONSE_RUNTIME_PROFILE });
+      groupPendingResponseAgent = runtime.agent;
+      groupPendingResponseRouter = new CodexPendingResponseRouter(runtime.agent, runtime.cwd);
+    } catch { process.stderr.write("group_pending_runtime_unavailable\n"); }
+  }
+}
 const accountMemoryRoot = path.join(path.dirname(privateStatePath), "memory");
 const accountMemoryStore = new AccountMemoryStore(accountMemoryRoot);
 const accountMemorySearch = fixtureMode
@@ -612,7 +665,7 @@ const accountMemorySearch = fixtureMode
 const accountMemoryTools = new AccountMemoryToolHost(accountMemoryStore, accountMemorySearch, scheduledTasks, notificationRoute);
 const accountMemoryCuratorCwd = path.join(path.dirname(privateStatePath), "memory-curator-runtime");
 fs.mkdirSync(accountMemoryCuratorCwd, { recursive: true, mode: 0o700 });
-const accountMemoryCurator: AccountMemoryCurator = fixtureMode
+const personalMemoryCurator: AccountMemoryCurator = fixtureMode
   ? { curate: async () => ({ status: "noop" }), close: () => {} }
   : new CodexAccountMemoryCurator(
       new CodexConversation(
@@ -630,6 +683,26 @@ const accountMemoryCurator: AccountMemoryCurator = fixtureMode
       accountMemoryTools,
       accountMemoryCuratorCwd,
     );
+let groupMemoryCurator: AccountMemoryCurator | undefined;
+if (feishuConfiguration?.owner.hasGroups) {
+  if (fixtureMode) groupMemoryCurator = { curate: async () => ({ status: "noop" }), close: () => {} };
+  else {
+    try {
+      const runtime = isolatedConversation("memory-curator", { serviceName: "feishu_group_memory", webSearch: "disabled", runtimeProfile: MEMORY_CURATOR_RUNTIME_PROFILE });
+      groupMemoryCurator = new CodexAccountMemoryCurator(runtime.agent, accountMemoryTools, runtime.cwd);
+    } catch { process.stderr.write("group_memory_runtime_unavailable\n"); }
+  }
+}
+const accountMemoryCurator: AccountMemoryCurator = {
+  curate: (input) => {
+    if (!input.accountId.startsWith("feishu.group.")) return personalMemoryCurator.curate(input);
+    if (!groupMemoryCurator || !notificationRoute?.ownsMemoryScope(input.accountId)) throw new Error("group_memory_unbound");
+    return groupMemoryCurator.curate(input);
+  },
+  cancelAccount: (accountId) => accountId.startsWith("feishu.group.")
+    ? groupMemoryCurator?.cancelAccount?.(accountId) : personalMemoryCurator.cancelAccount?.(accountId),
+  close: () => settleCleanup([() => personalMemoryCurator.close(), () => groupMemoryCurator?.close()]),
+};
 const planMonitor = new PlanFollowUpMonitor({
     store: accountMemoryStore,
     ...(notificationRoute ? { notificationRoute } : {}),
@@ -662,13 +735,17 @@ const conversationRouter = channelConfiguration ? new ConversationChannelRouter(
       return new ChannelTurnAdapter(threadId, message, { ...options, channelLabel: "飞书", outboundDelivery: true, workflowTools: workflowToolControl });
     } } } satisfies ConstructorParameters<typeof ConversationChannelRouter>[0][number]] : []),
 ]) : undefined;
+const privateWorkflowAdapter = new ConversationWorkflowTriggerAdapter({ engine: workflowEngine, pendingPresentations: workflowPendingPresentations,
+  ...(pendingResponseRouter ? { pendingResponseRouter } : {}) });
+const groupWorkflowAdapter = new ConversationWorkflowTriggerAdapter({ engine: workflowEngine, pendingPresentations: workflowPendingPresentations,
+  ...(groupPendingResponseRouter ? { pendingResponseRouter: groupPendingResponseRouter } : {}) });
 const codexService = conversationRouter ? new ConversationService(
   conversationRouter, codexAgent, codexServiceStore, process.cwd(), Date.now, writeGuard, runtimeWorkspaceRoots,
   appServerCapabilities.restrictedReadSupported, mediaReadRoot, conversationRouter,
   fixtureMode ? undefined : new MacCodexDesktopNavigator(), accountMemory,
-  new ConversationWorkflowTriggerAdapter({ engine: workflowEngine, pendingPresentations: workflowPendingPresentations,
-    ...(pendingResponseRouter ? { pendingResponseRouter } : {}) }),
-  undefined, workflowToolControl, diagnostics, new PersonalOwnerDirectory(channelConfiguration!.entries.map((entry) => entry.owner)),
+  { tryHandle: (event) => (event.conversationType === "group" ? groupWorkflowAdapter : privateWorkflowAdapter).tryHandle(event),
+    tryHandlePending: (event) => (event.conversationType === "group" ? groupWorkflowAdapter : privateWorkflowAdapter).tryHandlePending(event) },
+  undefined, workflowToolControl, diagnostics, new PersonalOwnerDirectory(channelConfiguration!.entries.map((entry) => entry.owner)), createGroupRuntime,
 ) : new WeixinCodexService(
   channelPort!,
   codexAgent,
@@ -686,7 +763,7 @@ const codexService = conversationRouter ? new ConversationService(
   undefined,
   workflowToolControl,
   diagnostics,
-  channelConfiguration?.owner,
+  weixinConfiguration?.owner,
 );
 const workflowModulePermissionSettings = new WorkflowModulePermissionSettings(
   workflowModulePermissions,
@@ -807,8 +884,13 @@ const startup = (async () => {
     try {
       await channel.start();
       if (owner && !stopping) {
-        const address = owner.conversationAddress();
-        await codexService.enable(address.accountId, address.target);
+        for (const address of owner.conversationAddresses()) {
+          try { await codexService.enable(address.accountId, address.target); }
+          catch (error) {
+            if (!address.target.startsWith("feishu.group.")) throw error;
+            process.stderr.write("group_runtime_start_failed\n");
+          }
+        }
       }
       if (!stopping) {
         startedChannels.add(name);
@@ -837,6 +919,7 @@ function shutdown(): Promise<void> {
   try { await settleCleanup([
     () => workflowRetirementNotifier?.close(),
     () => pendingResponseAgent?.close(),
+    () => groupPendingResponseAgent?.close(),
     () => service ? service.close() : codexService.close(),
     () => feishuChannel?.close(),
     () => startup,

@@ -14,6 +14,7 @@ export type TrustedWorkflowTurn = {
   eventKey: string;
   accountId: string;
   target: string;
+  requesterRef?: string;
   occurredAt: number;
   originalTextRef: string;
   attachmentRefs: string[];

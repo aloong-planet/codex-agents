@@ -25,6 +25,8 @@ export type CodexConversationOptions = {
   automaticRecovery?: boolean;
   onRecovery?: (event: { status: string; attempt?: number; errorCode?: string }) => void;
   runtimeProfile?: CodexRuntimeProfile;
+  /** Enforced at start, resume, recovery and every turn; callers cannot widen it. */
+  permissionProfile?: string;
 };
 export type CodexTurnModel = { model: string; effort: CodexReasoningEffort; outputSchema?: Record<string, unknown> };
 export type CodexUserInput =
@@ -52,7 +54,7 @@ export type FrozenTurnPolicy = FrozenTurnPolicyBase & ({
     networkAccess: false;
   };
 } | {
-  permissions: ":read-only";
+  permissions: string;
 });
 
 export type SafeToolLabel =
@@ -176,8 +178,8 @@ export class CodexConversation {
     const startParams = {
       cwd,
       runtimeWorkspaceRoots,
-      approvalPolicy: "untrusted",
-      sandbox: "read-only",
+      approvalPolicy: this.options.permissionProfile ? "never" : "untrusted",
+      ...(this.options.permissionProfile ? { permissions: this.options.permissionProfile, selectedCapabilityRoots: [] } : { sandbox: "read-only" }),
       serviceName: this.options.serviceName ?? "weixin_direct_demo",
       config: { web_search: this.options.webSearch ?? "live" },
       ...(this.options.runtimeProfile ? {
@@ -195,6 +197,7 @@ export class CodexConversation {
           result = await this.request("thread/resume", {
             threadId: savedThreadId,
             runtimeWorkspaceRoots,
+            ...(this.options.permissionProfile ? { cwd, permissions: this.options.permissionProfile, approvalPolicy: "never", config: startParams.config } : {}),
           });
           resumed = true;
         } catch (error) {
@@ -388,6 +391,7 @@ export class CodexConversation {
               }
               const resumed = asRecord(await this.client.request("thread/resume", {
                 threadId, runtimeWorkspaceRoots: this.sessionRoots.get(threadId) ?? [],
+                ...(this.options.permissionProfile ? { permissions: this.options.permissionProfile, approvalPolicy: "never", config: { web_search: this.options.webSearch ?? "live" } } : {}),
               }, budget.remaining()));
               if (asRecord(resumed?.thread)?.id !== threadId) throw new Error("model_recovery_context_mismatch");
               if (budget.remaining() <= 0) throw new Error("model_recovery_exhausted");
@@ -485,7 +489,9 @@ export class CodexConversation {
           model: turnModel.model, effort: turnModel.effort,
           ...(turnModel.outputSchema ? { outputSchema: structuredClone(turnModel.outputSchema) } : {}),
         } : {}),
-        ...(policy ? {
+        ...(this.options.permissionProfile ? {
+          approvalPolicy: "never", permissions: this.options.permissionProfile,
+        } : policy ? {
           approvalPolicy: policy.approvalPolicy,
           ...("permissions" in policy
             ? { permissions: policy.permissions }

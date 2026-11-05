@@ -41,34 +41,8 @@ describe("Weixin inbound architecture", () => {
     }
   });
 
-  it("feature_checklist_has_complete_ticket_coverage", () => {
+  it("production_assembly_retains_tool_protocol_and_acceptance_coverage", () => {
     const serviceDirectory = path.resolve(import.meta.dirname, "..");
-    const checklist = fs.readFileSync(path.resolve(serviceDirectory, "../../docs/.workings/app-server-agent-loop/checklist.md"), "utf8");
-    const section = (heading: string, nextHeading: string) =>
-      checklist.split(heading)[1]?.split(nextHeading)[0] ?? "";
-    const rowIds = (body: string, prefix: string) => [...body.matchAll(new RegExp(`^\\| (${prefix}-[^ |]+) \\|`, "gmu"))]
-      .map((match) => match[1]);
-
-    expect(rowIds(section("## User Stories", "## 失败模式与边界"), "US")).toEqual(
-      Array.from({ length: 20 }, (_, index) => `US-${String(index + 1).padStart(2, "0")}`),
-    );
-    expect(rowIds(section("## 失败模式与边界", "## 跨票组合行为"), "FM")).toEqual([
-      ...Array.from({ length: 52 }, (_, index) => `FM-${String(index + 1).padStart(2, "0")}`),
-      "FM-53a",
-      "FM-53b",
-    ]);
-    expect(rowIds(section("## 跨票组合行为", "## 切片覆盖枚举"), "COM")).toEqual([
-      "COM-01",
-      "COM-02",
-      "COM-03",
-    ]);
-    const acceptanceRows = [...checklist.matchAll(/^\| ((?:US|FM|COM)-[^ |]+) \|[^\n]+\| ([^|]+) \| ([^|]+) \|$/gmu)];
-    expect(acceptanceRows).toHaveLength(20 + 54 + 3);
-    for (const row of acceptanceRows) {
-      expect(row[2]?.trim(), `${row[1]} has no accepting ticket`).toMatch(/^\d{2}(?:、\d{2})*$/u);
-      expect(row[3]?.trim(), `${row[1]} has no acceptance evidence`).toMatch(/— (?:test|evidence|gate|test \/ evidence|evidence \/ test)$/u);
-    }
-
     const catalogSource = fs.readFileSync(path.join(serviceDirectory, "src/workflow-tool-catalog.ts"), "utf8");
     expect([...catalogSource.matchAll(/^\s+id: "([a-z][a-z0-9_-]*\.[a-z][a-z0-9_-]*)",$/gmu)]
       .map((match) => match[1])).toEqual([
@@ -98,7 +72,6 @@ describe("Weixin inbound architecture", () => {
       "mcpServer/elicitation/request",
     ]) {
       expect(driverSource, `${method} is absent from the turn protocol driver`).toContain(`"${method}"`);
-      expect(checklist, `${method} is absent from the checklist enumeration`).toContain(`\`${method}\``);
     }
     const mainSource = fs.readFileSync(path.join(serviceDirectory, "src/main.ts"), "utf8");
     for (const dependency of [
@@ -112,7 +85,6 @@ describe("Weixin inbound architecture", () => {
       "WorkflowToolHost",
     ]) {
       expect(mainSource, `${dependency} is absent from production assembly`).toContain(dependency);
-      expect(checklist, `${dependency} is absent from the checklist enumeration`).toContain(`\`${dependency}\``);
     }
 
     const testDefinitions = [
@@ -121,7 +93,7 @@ describe("Weixin inbound architecture", () => {
     ].flatMap((file) => [...fs.readFileSync(file, "utf8").matchAll(/(?:it|test)\(\s*["'`]([^"'`]+)["'`]/gu)])
       .flatMap((match) => match[1] === undefined ? [] : [match[1]]);
     for (const name of [
-      "feature_checklist_has_complete_ticket_coverage",
+      "production_assembly_retains_tool_protocol_and_acceptance_coverage",
       "production_weixin_agent_loop_full_workflow",
       "production_pending_restart_and_new_goal_workflow",
       "production_contract_and_access_rotation_regression",

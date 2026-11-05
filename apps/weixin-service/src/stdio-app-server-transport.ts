@@ -123,9 +123,13 @@ export function buildStdioAppServerArgs(disabledFeatures: readonly string[] = []
 export function spawnStdioAppServer(
   codexExecutable: string,
   disabledFeatures: readonly string[] = [],
+  runtime?: { cwd: string; env: NodeJS.ProcessEnv; configOverrides?: string[] },
 ): StdioAppServerTransport {
-  const child = spawn(codexExecutable, buildStdioAppServerArgs(disabledFeatures), {
+  const args = buildStdioAppServerArgs(disabledFeatures);
+  if (runtime?.configOverrides) args.push(...runtime.configOverrides.flatMap((value) => ["-c", value]));
+  const child = spawn(codexExecutable, args, {
     stdio: ["pipe", "pipe", "pipe"],
+    ...(runtime ? { cwd: runtime.cwd, env: runtime.env } : {}),
   });
   return new StdioAppServerTransport(child);
 }

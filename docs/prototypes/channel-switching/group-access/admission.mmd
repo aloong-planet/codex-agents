@@ -1,0 +1,38 @@
+%% title: Group request admission and ownership
+%%{init: {
+  'theme': 'base',
+  'htmlLabels': false,
+  'state': { 'htmlLabels': false },
+  'flowchart': { 'htmlLabels': false },
+  'themeVariables': {
+    'primaryColor': '#ECECFF',
+    'primaryBorderColor': '#D5D5FF',
+    'primaryTextColor': '#000000',
+    'lineColor': '#757575',
+    'textColor': '#212121',
+    'edgeLabelBackground': 'transparent',
+    'noteBkgColor': '#FFF6B8',
+    'noteBorderColor': '#E4C800',
+    'noteTextColor': '#5C5100',
+    'tertiaryColor': '#f5f5f5',
+    'background': '#FFFFFF'
+  }
+}}%%
+stateDiagram-v2
+  direction LR
+  [*] --> observing
+  observing --> observing: ambient context
+  observing --> processing: authorized mention
+  processing --> waiting: needs a choice
+  processing --> observing: reply or task
+  waiting --> observing: requester chooses
+  waiting --> processing: another authorized request
+  observing --> disabled: remove group
+  processing --> disabled: remove group
+  waiting --> disabled: remove group
+  disabled --> [*]
+  note right of waiting
+    Choices belong to their requester.
+    Group tasks are shared by authorized members.
+    Private memory never enters a group scope.
+  end note

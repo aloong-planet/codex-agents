@@ -24,6 +24,7 @@ export type FileSandboxAccessSnapshot = {
     write: boolean;
   }>;
   spoolDirectory: string;
+  deniedRoots?: string[];
 };
 
 export type FileSandboxFindOperation = {
@@ -492,6 +493,10 @@ function validateAccessSnapshot(input: FileSandboxAccessSnapshot): FileSandboxAc
     throw new Error("file_sandbox_access_invalid");
   }
   const seen = new Set<string>();
+  if (input.deniedRoots !== undefined && (!Array.isArray(input.deniedRoots) || input.deniedRoots.length > 100 ||
+      input.deniedRoots.some((root) => typeof root !== "string" || !path.isAbsolute(root)))) {
+    throw new Error("file_sandbox_access_invalid");
+  }
   const scopes = input.scopes.map((scope) => {
     if (!scope || typeof scope.scopeRef !== "string" || !scope.scopeRef || seen.has(scope.scopeRef) ||
         typeof scope.scopeId !== "string" || !scope.scopeId || typeof scope.label !== "string" || !scope.label ||

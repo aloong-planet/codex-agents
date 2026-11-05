@@ -10,6 +10,23 @@ import type {
 } from "../src/codex-app-server-client.js";
 import type { DynamicToolHost } from "../src/dynamic-tool-host.js";
 
+it("enforces an isolated permission profile at thread start, resume and every turn", async () => {
+  for (const saved of [undefined, "thread-new"]) {
+    const transport = new ConversationTransport(saved);
+    const conversation = new CodexConversation(() => transport, 1000, undefined, undefined, 1000, { permissionProfile: "group", webSearch: "disabled" });
+    try {
+      const thread = await conversation.startOrResume(saved, "/group/alpha", []);
+      await conversation.reply(thread, "讨论", { revision: 0, approvalPolicy: "untrusted", permissions: ":read-only" });
+      const start = transport.sent.find((message) => message.method === (saved ? "thread/resume" : "thread/start"));
+      expect(start?.params).toMatchObject({ cwd: "/group/alpha", runtimeWorkspaceRoots: [], approvalPolicy: "never", permissions: "group", config: { web_search: "disabled" } });
+      expect(start?.params).not.toHaveProperty("sandbox");
+      const turn = transport.sent.find((message) => message.method === "turn/start");
+      expect(turn?.params).toMatchObject({ approvalPolicy: "never", permissions: "group" });
+      expect(turn?.params).not.toHaveProperty("sandboxPolicy");
+    } finally { await conversation.close(); }
+  }
+});
+
 class ConversationTransport implements AppServerTransport {
   readonly sent: AppServerMessage[] = [];
   private listener: (message: AppServerMessage) => void = () => {};

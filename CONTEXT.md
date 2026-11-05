@@ -1,8 +1,69 @@
 # Codex 微信助理上下文
 
-本上下文描述微信触发的个人助理能力、通用工作流及本地模块授权之间的边界。
+This context describes personal Weixin/Feishu conversations, authorized Feishu groups, shared workflow capabilities and local module permissions.
+
+## Contents
+
+- Group requester
+- 模块（Module）
+- 能力（Capability）
+- 工作流模板（Workflow Template）
+- 运行（Run）
+- 输入门（Input Gate）
+- 待处理请求（Pending Request）
+- 待处理响应（Pending Response）
+- 待选上下文投影（Pending Context Projection）
+- 信号（Signal）
+- 回合路由器（Turn Router）
+- 映射能力步骤（Map Capability Step）
+- 工作流响应桥（Workflow Response Bridge）
+- 候选重绑定（Candidate Rebinding）
+- 微信 Trigger Adapter
+- 主微信 Codex 回合（Main Weixin Codex Turn）
+- 工作流工具请求（Workflow Tool Request）
+- 领域工作流工具（Domain Workflow Tool）
+- 内联查询（Inline Query）
+- 文件搜索观察（File Search Observation）
+- 文件查询迭代（File Query Iteration）
+- 内联修改（Inline Mutation）
+- 终止型工作流（Terminal Workflow）
+- 文件操作日志（File Operation Journal）
+- 不可变发送快照（Immutable Send Snapshot）
+- 访问上下文代际（Access Context Epoch）
+- 工作流工具目录（Workflow Tool Catalog）
+- 工作流网关（Workflow Gateway）
+- Owner
+- Effect
+- 模块权限（Module Permission）
+- 资源范围（Resource Scope）
+- 渠道上下文（Channel Context）
+- 微信文件发送（Weixin File Send）
+- 微信单文件提交（Weixin File Submission）
+- 图片来源（Image Source）
+- 近期图片（Recent Image）
+- 最新单项选择（Latest-one Selection）
+- Scheduled Task
+- Research Task
+- Daily News Ownership
+- News Article Result
+- Current HN Selection
+- Execution Summary
+- Known Execution Count
+- News Archive
+- Reminder Text
+- Scheduled Occurrence
+- Cadence Revision
+- Skipped Range
+- Cached Output
+- Scheduled Delivery Attempt
+- Completed Scheduled Task
+- Reminder Intent Ownership
 
 ## Language（术语）
+
+**Group requester**:
+The member whose authorized mention initiated a group request. This person is distinct from the group sharing discussion and tasks, and from the reply Owner.
+_Avoid_: group owner, personal owner
 
 **模块（Module）**：
 一组可安装或启用的个人助理能力，并声明自己能够操作的资源类型。
@@ -33,11 +94,11 @@ _Avoid_：上一条对话、模型记住的候选
 _Avoid_：裸 Signal、任意工具参数
 
 **待选上下文投影（Pending Context Projection）**：
-当前账户与目标可见的待处理请求脱敏视图，只包含短引用、候选序号和安全标签。
+The redacted Pending Requests visible to the current conversation and, in a group, the current requester. It is distinct from shared discussion history.
 _Avoid_：运行快照、内部路径、完整 Signal 参数
 
 **信号（Signal）**：
-可信宿主提交给 Engine 的内部结构化补充输入，必须匹配原账户、目标、候选 revision、schema、候选集合与有效期。
+A trusted host response bound to a Pending Request and its original conversation, with the original requester additionally bound for group requests. It is not authority supplied by model arguments.
 _Avoid_：模型工具、用户消息、任意下一条聊天
 
 **回合路由器（Turn Router）**：
@@ -222,8 +283,8 @@ _Avoid_: message-wide suppression, final reply Owner
 - 一个工作流模板只引用已登记的能力；一次运行使用模板编译出的冻结计划。
 - Input Gate 属于 Engine 控制流，不属于 Capability Provider；合法 Signal 恢复原冻结运行。
 - Engine 是 Pending Request 与 Signal 的唯一状态源；Turn Router 只消费脱敏投影，Workflow Response Bridge 必须在提交前重新读取并校验实时状态。
-- 同一账户与目标最多只有一个待处理请求；新的 Input Gate 或完整新目标会将旧请求标记为 superseded，歧义或普通消息不会擅自结束旧请求。
-- 只有当前账户与目标最近一次被微信接受的待选提示仍有效时，裸序号才可以走确定性快路径；自然语言选择与确定性序号必须经过同一个 Workflow Response Bridge。
+- Private Pending Requests belong to their conversation; group Pending Requests additionally belong to their requester. Shared group discussion and shared group task management do not transfer that ownership (ADR-0023).
+- A pending presentation belongs to the same conversation and requester as its Pending Request; sharing a group transcript does not make another member its recipient (ADR-0023).
 - 输入门由模板显式声明单选或多选；多选只接受同一实时待处理请求中的非空候选集合，“都要”在可信宿主边界展开为该 revision 的完整候选引用集合。
 - 映射能力步骤为每个选中项建立独立 effect；微信图片与文件批量发送按候选顺序串行执行，单项明确失败不阻断后续项。
 - 模块权限约束本地资源 effect；渠道上下文约束微信 effect。

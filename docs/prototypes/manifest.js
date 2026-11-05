@@ -50,3 +50,5 @@ window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"single-activ
 window.PROTOTYPES.push({module:"channel-switching",type:"ui",id:"feishu-pairing",name:"飞书命令行首次配对",path:"channel-switching/prototype-feishu-pairing.html"});
 
 window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"dual-active",name:"双渠道同时在线与通知归属（待确认）",path:"channel-switching/dual-active/index.html"});
+
+window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"group-access",name:"Feishu group admission and ownership",path:"channel-switching/group-access/index.html"});

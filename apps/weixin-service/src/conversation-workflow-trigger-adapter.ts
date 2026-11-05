@@ -1,4 +1,4 @@
-import type { InboundContent as InboundTextEvent } from "./channel-contract.js";
+import { conversationRequester, type InboundContent as InboundTextEvent } from "./channel-contract.js";
 import type { InboundWorkflowControl } from "./conversation-service.js";
 import { renderWorkflowRun } from "./workflow-reply-renderer.js";
 export { renderWorkflowRun } from "./workflow-reply-renderer.js";
@@ -35,8 +35,8 @@ import {
 } from "./workflow-shadow-store.js";
 
 export interface WorkflowSignalEnginePort {
-  listPendingSignals(accountRef: string, targetRef: string): WorkflowPendingSignal[];
-  supersedePendingSignals?(accountRef: string, targetRef: string): string[];
+  listPendingSignals(accountRef: string, targetRef: string, requesterRef?: string): WorkflowPendingSignal[];
+  supersedePendingSignals?(accountRef: string, targetRef: string, requesterRef?: string): string[];
   signal(signal: WorkflowSignal): Promise<WorkflowSignalReceipt>;
   cancelPending?(input: WorkflowPendingCancellation): Promise<WorkflowSignalReceipt>;
   get(runId: string): WorkflowRunView | undefined;
@@ -88,6 +88,7 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
           eventKey: event.key,
           accountRef: event.accountId,
           targetRef: event.target,
+          ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
           occurredAt: event.receivedAt,
         },
         userText: event.text,
@@ -116,6 +117,7 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
           eventKey: event.key,
           accountRef: event.accountId,
           targetRef: event.target,
+          ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
           occurredAt: event.receivedAt,
         },
         userText: event.text,
@@ -178,6 +180,7 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
           occurredAt: event.receivedAt,
           accountRef: event.accountId,
           targetRef: event.target,
+          ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
         },
       });
       if (routed.owner === "shadow") {
@@ -199,7 +202,7 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
       const run = this.options.engine.get(routed.submission.runId);
       const now = this.options.now?.() ?? Date.now();
       const pending = this.options.engine
-        .listPendingSignals(event.accountId, event.target)
+        .listPendingSignals(event.accountId, event.target, conversationRequester(event))
         .filter((request) => request.expiresAt > now);
       return withPlannerDiagnostics(this.renderRunForEvent(event, run, pending), plannerDiagnostics);
     } catch (error) {
@@ -215,18 +218,18 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
   }
 
   private supersedeCurrentPending(event: InboundTextEvent): void {
-    const pending = this.options.engine.listPendingSignals(event.accountId, event.target)
+    const pending = this.options.engine.listPendingSignals(event.accountId, event.target, conversationRequester(event))
       .filter((request) => request.expiresAt > (this.options.now?.() ?? Date.now()));
     if (pending.length === 0) return;
     if (!this.options.engine.supersedePendingSignals) {
       throw new Error("workflow_pending_supersede_unavailable");
     }
-    this.options.engine.supersedePendingSignals(event.accountId, event.target);
+    this.options.engine.supersedePendingSignals(event.accountId, event.target, conversationRequester(event));
   }
 
   private currentPending(event: InboundTextEvent): WorkflowPendingSignal[] {
     const now = this.options.now?.() ?? Date.now();
-    return this.options.engine.listPendingSignals(event.accountId, event.target)
+    return this.options.engine.listPendingSignals(event.accountId, event.target, conversationRequester(event))
       .filter((request) => request.expiresAt > now);
   }
 
@@ -252,6 +255,7 @@ export class ConversationWorkflowTriggerAdapter implements InboundWorkflowContro
       onAccepted: () => this.options.pendingPresentations!.put({
         accountRef: event.accountId,
         targetRef: event.target,
+        ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
         runId: request.runId,
         signalRef: request.signalRef,
         revision: request.revision,

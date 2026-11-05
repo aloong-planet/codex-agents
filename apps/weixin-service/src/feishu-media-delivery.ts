@@ -18,10 +18,12 @@ const rejected = (): SendTextResult => ({ ok: false, reason: "rejected", accepte
 export class FeishuMediaDelivery implements MediaDeliveryPort {
   constructor(private readonly config: Pick<ChannelStartupConfiguration, "owner" | "binding">, private readonly transport: FeishuMediaTransport,
     private readonly ledger: DurableEffectLedger, private readonly snapshotRoots: readonly string[],
-    private readonly ready: () => boolean) {
+    private readonly ready: () => boolean,
+    private readonly destination = config.owner.conversationAddress()) {
     if (config.binding.channel !== "feishu" || !config.owner.admit({ ...config.binding, conversationType: "private" })) {
       throw new Error("feishu_media_binding_invalid");
     }
+    if (!config.owner.deliveryTarget(destination.accountId, destination.target)) throw new Error("feishu_media_binding_invalid");
   }
 
   sendImage(input: MediaDeliveryInput & { caption?: string }): Promise<SendTextResult> { return this.send("image", input); }
@@ -35,11 +37,11 @@ export class FeishuMediaDelivery implements MediaDeliveryPort {
   }
 
   private operation(id: string): string {
-    return `feishu-media:${hash(JSON.stringify([this.config.owner.conversationAddress(), id]))}`;
+    return `feishu-media:${hash(JSON.stringify([this.destination, id]))}`;
   }
 
   private async send(kind: "image" | "file", input: MediaDeliveryInput & { caption?: string; fileName?: string }): Promise<SendTextResult> {
-    if (!this.config.owner.ownsAddress(input.accountId, input.target) || !this.ready()) {
+    if (input.accountId !== this.destination.accountId || input.target !== this.destination.target || !this.ready()) {
       return { ok: false, reason: "unavailable", acceptedSegments: 0 };
     }
     const fileName = input.fileName ?? path.basename(input.filePath);
@@ -53,7 +55,7 @@ export class FeishuMediaDelivery implements MediaDeliveryPort {
     const clientId = hash(JSON.stringify([kind, hash(bytes), fileName, input.caption ?? ""])).slice(0, 32);
     const previous = this.ledger.listByOperation(operationId).find((row) => row.attemptId === attemptId);
     let record;
-    try { record = this.ledger.prepare({ attemptId, operationId, ...this.config.owner.conversationAddress(), kind: "feishu_media", clientId }); }
+    try { record = this.ledger.prepare({ attemptId, operationId, ...this.destination, kind: "feishu_media", clientId }); }
     catch { return rejected(); }
     if (previous) {
       if (record.state === "accepted") return { ok: true, acceptedSegments: 1, totalSegments: 1 };
@@ -71,7 +73,7 @@ export class FeishuMediaDelivery implements MediaDeliveryPort {
         : { image_key: key };
       const encoded = JSON.stringify(content);
       if (Buffer.byteLength(encoded) > 29 * 1024) { this.ledger.settle(attemptId, "rejected"); return rejected(); }
-      const result = await this.transport.sendResource({ chatId: this.config.binding.target,
+      const result = await this.transport.sendResource({ chatId: this.config.owner.deliveryTarget(this.destination.accountId, this.destination.target)!,
         msgType: kind === "image" && input.caption ? "post" : kind, content: encoded,
         uuid: hash(JSON.stringify([operationId, clientId])).slice(0, 32) });
       if (result.code === 0 && result.data?.message_id) {

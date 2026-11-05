@@ -23,7 +23,15 @@ export interface ConversationOwner {
   ownsAddress(accountId: string, target: string): boolean;
   accepts(identity: PersonalInboundIdentity): boolean;
   contextHash(accountId: string, target: string): string;
-  memoryScope(accountId: string): string;
+  memoryScope(accountId: string, target?: string): string;
+}
+
+export interface ChannelConversationIdentity extends ConversationOwner {
+  readonly memoryAccountId: string;
+  conversationAddress(): { accountId: string; target: string };
+  conversationAddresses(): Array<{ accountId: string; target: string }>;
+  admit(identity: PersonalInboundIdentity): { accountId: string; target: string } | undefined;
+  deliveryTarget(accountId: string, target: string): string | undefined;
 }
 
 /** Startup-only host binding. The legacy memory key is independent of transport IDs. */
@@ -64,6 +72,10 @@ export class PersonalOwnerIdentity {
   }
 
   conversationAddress(): { accountId: string; target: string } { return { ...this.address }; }
+  conversationAddresses() { return [this.conversationAddress()]; }
+  deliveryTarget(accountId: string, target: string): string | undefined {
+    return this.ownsAddress(accountId, target) ? this.binding.target : undefined;
+  }
 
   /** Called by a transport after decoding the authenticated platform event. */
   admit(identity: PersonalInboundIdentity): { accountId: string; target: string } | undefined {
@@ -83,17 +95,17 @@ export class PersonalOwnerIdentity {
       identity.senderId === this.binding.senderId && identity.conversationType === "private";
   }
 
-  memoryScope(accountId: string): string {
-    if (accountId !== this.address.accountId) throw new Error("owner_account_unbound");
+  memoryScope(accountId: string, target?: string): string {
+    if (accountId !== this.address.accountId || (target !== undefined && target !== this.address.target)) throw new Error("owner_account_unbound");
     return this.memoryAccountId;
   }
 }
 
 /** One owner, multiple independently bound conversations; no duplicate mutable core. */
 export class PersonalOwnerDirectory implements ConversationOwner {
-  private readonly identities: readonly PersonalOwnerIdentity[];
+  private readonly identities: readonly ChannelConversationIdentity[];
 
-  constructor(identities: readonly PersonalOwnerIdentity[]) {
+  constructor(identities: readonly ChannelConversationIdentity[]) {
     if (identities.length === 0 || new Set(identities.map((identity) => identity.memoryAccountId)).size !== 1 ||
         new Set(identities.map((identity) => identity.conversationAddress().accountId)).size !== identities.length) {
       throw new Error("owner_directory_invalid");
@@ -107,11 +119,11 @@ export class PersonalOwnerDirectory implements ConversationOwner {
   contextHash(accountId: string, target: string): string {
     const identity = this.identities.find((owner) => owner.ownsAddress(accountId, target));
     if (!identity) throw new Error("owner_identity_unbound");
-    return identity.contextHash();
+    return identity.contextHash(accountId, target);
   }
-  memoryScope(accountId: string): string {
+  memoryScope(accountId: string, target?: string): string {
     const identity = this.identities.find((owner) => owner.ownsAccount(accountId));
     if (!identity) throw new Error("owner_account_unbound");
-    return identity.memoryScope(accountId);
+    return identity.memoryScope(accountId, target);
   }
 }

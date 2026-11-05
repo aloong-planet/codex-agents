@@ -11,6 +11,7 @@ export type WorkflowTrigger = {
   requestedWorkflowId?: string;
   accountRef?: string;
   targetRef?: string;
+  requesterRef?: string;
   scheduleRef?: string;
   inputRefs?: Record<string, string>;
 };
@@ -26,6 +27,7 @@ export type WorkflowSignal = {
   expectedRevision: number;
   accountRef?: string;
   targetRef?: string;
+  requesterRef?: string;
   selection: unknown;
 };
 
@@ -40,6 +42,7 @@ export type WorkflowPendingCancellation = {
   expectedRevision: number;
   accountRef?: string;
   targetRef?: string;
+  requesterRef?: string;
 };
 
 export type WorkflowPendingInput = {
@@ -479,6 +482,12 @@ export class WorkflowEngine {
     if (!runColumns.some((column) => column.name === "target_ref")) {
       this.database.exec("ALTER TABLE workflow_run ADD COLUMN target_ref TEXT");
     }
+    for (const table of ["workflow_run", "workflow_signal", "workflow_pending_cancellation"]) {
+      const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === "requester_ref")) {
+        this.database.exec(`ALTER TABLE ${table} ADD COLUMN requester_ref TEXT`);
+      }
+    }
     const stepColumns = this.database.prepare("PRAGMA table_info(workflow_step)").all() as unknown as Array<{ name: string }>;
     if (!stepColumns.some((column) => column.name === "output_json")) {
       this.database.exec("ALTER TABLE workflow_step ADD COLUMN output_json TEXT");
@@ -555,10 +564,10 @@ export class WorkflowEngine {
     try {
       const result = this.database.prepare(`
         INSERT OR IGNORE INTO workflow_run(
-          run_id, source, trigger_id, requested_workflow_id, account_ref, target_ref,
+          run_id, source, trigger_id, requested_workflow_id, account_ref, target_ref, requester_ref,
           trigger_input_refs_json, occurred_at,
           status, revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
       `).run(
         runId,
         trigger.source,
@@ -566,6 +575,7 @@ export class WorkflowEngine {
         trigger.requestedWorkflowId ?? null,
         trigger.accountRef ?? null,
         trigger.targetRef ?? null,
+        trigger.requesterRef ?? null,
         canonicalJson(trigger.inputRefs ?? {}),
         trigger.occurredAt,
         at,
@@ -609,7 +619,8 @@ export class WorkflowEngine {
     if (signal.expectedRevision !== request.candidate_revision || run.revision !== request.candidate_revision) {
       throw new Error("workflow_signal_revision_mismatch");
     }
-    if (run.account_ref !== (signal.accountRef ?? null) || run.target_ref !== (signal.targetRef ?? null)) {
+    if (run.account_ref !== (signal.accountRef ?? null) || run.target_ref !== (signal.targetRef ?? null) ||
+        run.requester_ref !== (signal.requesterRef ?? null)) {
       throw new Error("workflow_signal_source_mismatch");
     }
     if (request.expires_at <= this.now()) {
@@ -650,11 +661,11 @@ export class WorkflowEngine {
       }
       const inserted = this.database.prepare(`
         INSERT INTO workflow_signal(
-          signal_id, signal_ref, run_id, account_ref, target_ref, candidate_revision, selection_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          signal_id, signal_ref, run_id, account_ref, target_ref, requester_ref, candidate_revision, selection_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         signal.signalId, signal.signalRef, request.run_id, signal.accountRef ?? null,
-        signal.targetRef ?? null, signal.expectedRevision, canonicalJson(signal.selection), at,
+        signal.targetRef ?? null, signal.requesterRef ?? null, signal.expectedRevision, canonicalJson(signal.selection), at,
       );
       if (Number(inserted.changes) !== 1) throw new Error("workflow_signal_conflict");
       const consumed = this.database.prepare(`
@@ -692,7 +703,7 @@ export class WorkflowEngine {
   private async cancelPendingObserved(cancellation: WorkflowPendingCancellation): Promise<WorkflowSignalReceipt> {
     validatePendingCancellation(cancellation);
     const existing = this.database.prepare(`
-      SELECT cancellation_id, signal_ref, run_id, account_ref, target_ref, candidate_revision
+      SELECT cancellation_id, signal_ref, run_id, account_ref, target_ref, requester_ref, candidate_revision
       FROM workflow_pending_cancellation WHERE cancellation_id = ?
     `).get(cancellation.cancellationId) as PendingCancellationRow | undefined;
     if (existing) return duplicateCancellationReceipt(existing, cancellation);
@@ -706,7 +717,8 @@ export class WorkflowEngine {
       throw new Error("workflow_signal_revision_mismatch");
     }
     if (run.account_ref !== (cancellation.accountRef ?? null) ||
-        run.target_ref !== (cancellation.targetRef ?? null)) {
+        run.target_ref !== (cancellation.targetRef ?? null) ||
+        run.requester_ref !== (cancellation.requesterRef ?? null)) {
       throw new Error("workflow_signal_source_mismatch");
     }
     if (request.expires_at <= this.now()) {
@@ -719,7 +731,7 @@ export class WorkflowEngine {
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const concurrent = this.database.prepare(`
-        SELECT cancellation_id, signal_ref, run_id, account_ref, target_ref, candidate_revision
+        SELECT cancellation_id, signal_ref, run_id, account_ref, target_ref, requester_ref, candidate_revision
         FROM workflow_pending_cancellation WHERE cancellation_id = ?
       `).get(cancellation.cancellationId) as PendingCancellationRow | undefined;
       if (concurrent) {
@@ -728,11 +740,11 @@ export class WorkflowEngine {
       }
       const inserted = this.database.prepare(`
         INSERT INTO workflow_pending_cancellation(
-          cancellation_id, signal_ref, run_id, account_ref, target_ref, candidate_revision, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          cancellation_id, signal_ref, run_id, account_ref, target_ref, requester_ref, candidate_revision, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         cancellation.cancellationId, cancellation.signalRef, request.run_id,
-        cancellation.accountRef ?? null, cancellation.targetRef ?? null,
+        cancellation.accountRef ?? null, cancellation.targetRef ?? null, cancellation.requesterRef ?? null,
         cancellation.expectedRevision, at,
       );
       const closed = this.database.prepare(`
@@ -867,8 +879,9 @@ export class WorkflowEngine {
       : undefined;
   }
 
-  listPendingSignals(accountRef: string, targetRef: string): WorkflowPendingSignal[] {
-    if (!isBoundedIdentifier(accountRef) || !isBoundedIdentifier(targetRef)) {
+  listPendingSignals(accountRef: string, targetRef: string, requesterRef?: string): WorkflowPendingSignal[] {
+    if (!isBoundedIdentifier(accountRef) || !isBoundedIdentifier(targetRef) ||
+        (requesterRef !== undefined && !isBoundedIdentifier(requesterRef))) {
       throw new Error("workflow_signal_source_invalid");
     }
     const rows = this.database.prepare(`
@@ -877,9 +890,9 @@ export class WorkflowEngine {
       FROM workflow_signal_request AS request
       JOIN workflow_run AS run ON run.run_id = request.run_id
       WHERE request.state = 'waiting'
-        AND run.status = 'needs_input' AND run.account_ref = ? AND run.target_ref = ?
+        AND run.status = 'needs_input' AND run.account_ref = ? AND run.target_ref = ? AND run.requester_ref IS ?
       ORDER BY request.created_at, request.signal_ref
-    `).all(accountRef, targetRef) as Array<{
+    `).all(accountRef, targetRef, requesterRef ?? null) as Array<{
       signal_ref: string;
       run_id: string;
       step_id: string;
@@ -910,14 +923,15 @@ export class WorkflowEngine {
     });
   }
 
-  supersedePendingSignals(accountRef: string, targetRef: string): string[] {
-    if (!isBoundedIdentifier(accountRef) || !isBoundedIdentifier(targetRef)) {
+  supersedePendingSignals(accountRef: string, targetRef: string, requesterRef?: string): string[] {
+    if (!isBoundedIdentifier(accountRef) || !isBoundedIdentifier(targetRef) ||
+        (requesterRef !== undefined && !isBoundedIdentifier(requesterRef))) {
       throw new Error("workflow_signal_source_invalid");
     }
     const at = this.now();
     this.database.exec("BEGIN IMMEDIATE");
     try {
-      const runIds = this.supersedePendingSignalsInTransaction(accountRef, targetRef, at);
+      const runIds = this.supersedePendingSignalsInTransaction(accountRef, targetRef, at, undefined, requesterRef);
       this.database.exec("COMMIT");
       return runIds;
     } catch (error) {
@@ -1007,7 +1021,7 @@ export class WorkflowEngine {
 
   private readSignal(signalId: string): WorkflowSignalRow | undefined {
     return this.database.prepare(`
-      SELECT signal_id, signal_ref, run_id, account_ref, target_ref, candidate_revision, selection_json, created_at
+      SELECT signal_id, signal_ref, run_id, account_ref, target_ref, requester_ref, candidate_revision, selection_json, created_at
       FROM workflow_signal WHERE signal_id = ?
     `).get(signalId) as WorkflowSignalRow | undefined;
   }
@@ -1022,7 +1036,7 @@ export class WorkflowEngine {
 
   private readRunBinding(runId: string): WorkflowRunBindingRow | undefined {
     return this.database.prepare(`
-      SELECT run_id, account_ref, target_ref, status, revision
+      SELECT run_id, account_ref, target_ref, requester_ref, status, revision
       FROM workflow_run WHERE run_id = ?
     `).get(runId) as WorkflowRunBindingRow | undefined;
   }
@@ -1096,29 +1110,29 @@ export class WorkflowEngine {
 
   private reconcileDuplicatePendingSignals(): void {
     const scopes = this.database.prepare(`
-      SELECT run.account_ref, run.target_ref
+      SELECT run.account_ref, run.target_ref, run.requester_ref
       FROM workflow_signal_request AS request
       JOIN workflow_run AS run ON run.run_id = request.run_id
       WHERE request.state = 'waiting' AND run.status = 'needs_input'
         AND run.account_ref IS NOT NULL AND run.target_ref IS NOT NULL
-      GROUP BY run.account_ref, run.target_ref
+      GROUP BY run.account_ref, run.target_ref, run.requester_ref
       HAVING COUNT(*) > 1
-    `).all() as unknown as Array<{ account_ref: string; target_ref: string }>;
+    `).all() as unknown as Array<{ account_ref: string; target_ref: string; requester_ref: string | null }>;
     for (const scope of scopes) {
       const newest = this.database.prepare(`
         SELECT run.run_id
         FROM workflow_signal_request AS request
         JOIN workflow_run AS run ON run.run_id = request.run_id
         WHERE request.state = 'waiting' AND run.status = 'needs_input'
-          AND run.account_ref = ? AND run.target_ref = ?
+          AND run.account_ref = ? AND run.target_ref = ? AND run.requester_ref IS ?
         ORDER BY run.occurred_at DESC, run.created_at DESC, run.run_id DESC
         LIMIT 1
-      `).get(scope.account_ref, scope.target_ref) as { run_id: string } | undefined;
+      `).get(scope.account_ref, scope.target_ref, scope.requester_ref) as { run_id: string } | undefined;
       if (!newest) continue;
       const at = this.now();
       this.database.exec("BEGIN IMMEDIATE");
       try {
-        this.supersedePendingSignalsInTransaction(scope.account_ref, scope.target_ref, at, newest.run_id);
+        this.supersedePendingSignalsInTransaction(scope.account_ref, scope.target_ref, at, newest.run_id, scope.requester_ref ?? undefined);
         this.database.exec("COMMIT");
       } catch (error) {
         if (this.database.isTransaction) this.database.exec("ROLLBACK");
@@ -1144,7 +1158,8 @@ export class WorkflowEngine {
   private duplicateSubmission(existing: WorkflowRunView, trigger: WorkflowTrigger): WorkflowSubmission {
     const binding = this.readRunBinding(existing.runId);
     const sourceBindingConflict = trigger.source !== "scheduler" && (
-      binding?.account_ref !== (trigger.accountRef ?? null) || binding?.target_ref !== (trigger.targetRef ?? null)
+      binding?.account_ref !== (trigger.accountRef ?? null) || binding?.target_ref !== (trigger.targetRef ?? null) ||
+      binding?.requester_ref !== (trigger.requesterRef ?? null)
     );
     if (existing.occurredAt !== trigger.occurredAt || existing.requestedWorkflowId !== trigger.requestedWorkflowId ||
         sourceBindingConflict ||
@@ -1605,10 +1620,10 @@ export class WorkflowEngine {
           FROM workflow_signal_request AS request
           JOIN workflow_run AS run ON run.run_id = request.run_id
           WHERE request.state = 'waiting' AND run.status = 'needs_input'
-            AND run.account_ref = ? AND run.target_ref = ?
+            AND run.account_ref = ? AND run.target_ref = ? AND run.requester_ref IS ?
           ORDER BY run.occurred_at DESC, run.created_at DESC, run.run_id DESC
           LIMIT 1
-        `).get(binding.account_ref, binding.target_ref) as {
+        `).get(binding.account_ref, binding.target_ref, binding.requester_ref) as {
           run_id: string;
           occurred_at: number;
           created_at: number;
@@ -1630,7 +1645,7 @@ export class WorkflowEngine {
           this.database.exec("COMMIT");
           return;
         }
-        this.supersedePendingSignalsInTransaction(binding.account_ref, binding.target_ref, at, runId);
+        this.supersedePendingSignalsInTransaction(binding.account_ref, binding.target_ref, at, runId, binding.requester_ref ?? undefined);
       }
       this.database.prepare(`
         INSERT INTO workflow_signal_request(
@@ -1669,16 +1684,17 @@ export class WorkflowEngine {
     targetRef: string,
     at: number,
     exceptRunId?: string,
+    requesterRef?: string,
   ): string[] {
     const rows = this.database.prepare(`
       SELECT request.signal_ref, run.run_id, run.revision
       FROM workflow_signal_request AS request
       JOIN workflow_run AS run ON run.run_id = request.run_id
       WHERE request.state = 'waiting' AND run.status = 'needs_input'
-        AND run.account_ref = ? AND run.target_ref = ?
+        AND run.account_ref = ? AND run.target_ref = ? AND run.requester_ref IS ?
         AND (? IS NULL OR run.run_id <> ?)
       ORDER BY request.created_at, request.signal_ref
-    `).all(accountRef, targetRef, exceptRunId ?? null, exceptRunId ?? null) as unknown as Array<{
+    `).all(accountRef, targetRef, requesterRef ?? null, exceptRunId ?? null, exceptRunId ?? null) as unknown as Array<{
       signal_ref: string;
       run_id: string;
       revision: number;
@@ -2196,6 +2212,7 @@ type WorkflowRunBindingRow = {
   run_id: string;
   account_ref: string | null;
   target_ref: string | null;
+  requester_ref: string | null;
   status: WorkflowRunStatus;
   revision: number;
 };
@@ -2219,6 +2236,7 @@ type WorkflowSignalRow = {
   run_id: string;
   account_ref: string | null;
   target_ref: string | null;
+  requester_ref: string | null;
   candidate_revision: number;
   selection_json: string;
   created_at: number;
@@ -2230,6 +2248,7 @@ type PendingCancellationRow = {
   run_id: string;
   account_ref: string | null;
   target_ref: string | null;
+  requester_ref: string | null;
   candidate_revision: number;
 };
 
@@ -2295,6 +2314,10 @@ function validateTrigger(trigger: WorkflowTrigger): void {
   if (trigger.scheduleRef !== undefined && !isBoundedIdentifier(trigger.scheduleRef)) {
     throw new Error("workflow_schedule_ref_invalid");
   }
+  if ((trigger.requesterRef !== undefined && !isBoundedIdentifier(trigger.requesterRef)) ||
+      (trigger.source !== "scheduler" && trigger.targetRef?.startsWith("feishu.group.") && !trigger.requesterRef)) {
+    throw new Error("workflow_requester_ref_invalid");
+  }
   validateTriggerInputRefs(trigger.inputRefs ?? {});
 }
 
@@ -2311,6 +2334,9 @@ function validateSignal(signal: WorkflowSignal): void {
   if (!Number.isSafeInteger(signal.expectedRevision) || signal.expectedRevision < 0) {
     throw new Error("workflow_signal_invalid");
   }
+  if (signal.requesterRef !== undefined && !isBoundedIdentifier(signal.requesterRef)) {
+    throw new Error("workflow_signal_invalid");
+  }
   canonicalJson(signal.selection);
 }
 
@@ -2318,6 +2344,7 @@ function validatePendingCancellation(cancellation: WorkflowPendingCancellation):
   if (!isBoundedIdentifier(cancellation.cancellationId) || !isBoundedIdentifier(cancellation.signalRef) ||
       (cancellation.accountRef !== undefined && !isBoundedIdentifier(cancellation.accountRef)) ||
       (cancellation.targetRef !== undefined && !isBoundedIdentifier(cancellation.targetRef)) ||
+      (cancellation.requesterRef !== undefined && !isBoundedIdentifier(cancellation.requesterRef)) ||
       !Number.isSafeInteger(cancellation.expectedRevision) || cancellation.expectedRevision < 0) {
     throw new Error("workflow_pending_cancel_invalid");
   }
@@ -2330,7 +2357,8 @@ function duplicateCancellationReceipt(
   if (existing.signal_ref !== cancellation.signalRef ||
       existing.candidate_revision !== cancellation.expectedRevision ||
       existing.account_ref !== (cancellation.accountRef ?? null) ||
-      existing.target_ref !== (cancellation.targetRef ?? null)) {
+      existing.target_ref !== (cancellation.targetRef ?? null) ||
+      existing.requester_ref !== (cancellation.requesterRef ?? null)) {
     throw new Error("workflow_pending_cancel_conflict");
   }
   return { runId: existing.run_id, duplicate: true };
@@ -2339,7 +2367,8 @@ function duplicateCancellationReceipt(
 function duplicateSignalReceipt(existing: WorkflowSignalRow, signal: WorkflowSignal): WorkflowSignalReceipt {
   if (existing.signal_ref !== signal.signalRef || existing.candidate_revision !== signal.expectedRevision ||
       existing.account_ref !== (signal.accountRef ?? null) ||
-      existing.target_ref !== (signal.targetRef ?? null) || existing.selection_json !== canonicalJson(signal.selection)) {
+      existing.target_ref !== (signal.targetRef ?? null) ||
+      existing.requester_ref !== (signal.requesterRef ?? null) || existing.selection_json !== canonicalJson(signal.selection)) {
     throw new Error("workflow_signal_conflict");
   }
   return { runId: existing.run_id, duplicate: true };

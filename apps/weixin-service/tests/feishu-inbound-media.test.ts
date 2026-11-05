@@ -73,6 +73,40 @@ it("normalizes a current image and same-chat quoted file into durable private at
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+it("keeps group attachments separate and admits quoted resources only from that group", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "feishu-group-media-"));
+  let quoteChat = "oc_alpha", downloads = 0;
+  const transport: FeishuResourceTransport = {
+    async getMessage() {
+      return { code: 0, data: { items: [{ message_id: "om_parent", chat_id: quoteChat, msg_type: "file", body: { content: '{"file_key":"file_parent","file_name":"report.pdf"}' } }] } };
+    },
+    async download(input) {
+      downloads++;
+      const stream = Readable.from([Buffer.from(input.type === "image" ? "group image" : "group quote")]);
+      return { stream, contentType: input.type === "image" ? "image/png" : "application/pdf", cancel() { stream.destroy(); } };
+    },
+  };
+  try {
+    const media = new FeishuInboundMedia(root, "oc_owner", transport);
+    const alpha = media.forChat("oc_alpha"), beta = media.forChat("oc_beta");
+    const current = { messageId: "om_image", type: "image", content: '{"image_key":"img_current"}' };
+    const result = await alpha.normalize({ ...current, parentId: "om_parent" });
+    expect(result.attachments).toHaveLength(1);
+    expect(result.quote?.attachments).toHaveLength(1);
+    expect(fs.readFileSync(result.attachments![0]!.path, "utf8")).toBe("group image");
+    expect(fs.readFileSync(result.quote!.attachments[0]!.path, "utf8")).toBe("group quote");
+    expect(path.dirname(result.attachments![0]!.path)).toBe(media.readableRoot("oc_alpha"));
+    const other = await beta.normalize(current), personal = await media.normalize(current);
+    expect(new Set([result.attachments![0]!.path, other.attachments![0]!.path, personal.attachments![0]!.path]).size).toBe(3);
+    const before = downloads;
+    quoteChat = "oc_beta";
+    await expect(alpha.normalize({ ...current, parentId: "om_parent" })).rejects.toThrow("feishu_quote_invalid");
+    quoteChat = "oc_owner";
+    await expect(alpha.normalize({ ...current, parentId: "om_parent" })).rejects.toThrow("feishu_quote_invalid");
+    expect(downloads).toBe(before);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 it("retains a long display filename without exceeding the local storage component limit", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "feishu-long-name-"));
   const fileName = `x.${"a".repeat(253)}`;

@@ -47,6 +47,27 @@ async function flush() { for (let i = 0; i < 60; i++) await Promise.resolve(); }
 afterEach(() => vi.useRealTimers());
 
 describe("automatic recovery lifecycle", () => {
+  it("retains the mandatory group profile and original request after connection recovery", async () => {
+    const peers: Peer[] = [];
+    const agent = new CodexConversation(() => { const peer = new Peer(peers.length); peers.push(peer); return peer; },
+      600_000, undefined, undefined, 300_000, { automaticRecovery: true, permissionProfile: "group", webSearch: "disabled" });
+    try {
+      await agent.startOrResume("thread", "/isolated/group", []);
+      const result = agent.reply("thread", "ALICE_GROUP_REQUEST"); await flush();
+      peers[0]!.disconnect(); await flush();
+      expect(peers).toHaveLength(2);
+      const resume = peers[1]!.sent.find((message) => message.method === "thread/resume")!;
+      expect(resume.params).toMatchObject({ threadId: "thread", permissions: "group", approvalPolicy: "never", runtimeWorkspaceRoots: [] });
+      expect(resume.params).not.toHaveProperty("sandbox");
+      const turn = peers[1]!.sent.find((message) => message.method === "turn/start")!;
+      expect(turn.params).toMatchObject({ threadId: "thread", permissions: "group", approvalPolicy: "never" });
+      expect(turn.params).not.toHaveProperty("sandboxPolicy");
+      expect(JSON.stringify(turn.params?.input)).toContain("ALICE_GROUP_REQUEST");
+      peers[1]!.complete("group recovered");
+      await expect(result).resolves.toBe("group recovered");
+    } finally { await agent.close(); }
+  });
+
   it("does not apply a retired turn's late error to the next request's recovery clock", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const peers: Peer[] = [];

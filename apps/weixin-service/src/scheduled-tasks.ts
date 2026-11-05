@@ -39,7 +39,7 @@ export type ScheduledTasksOptions = {
   notificationRoute?: OwnerNotificationRoute;
   renderReminder?: (task: Readonly<ScheduledTask>) => Promise<string>;
   diagnostics?: LocalDiagnostics;
-  research?: (input: { name: string; instruction: string; timezone: string; plannedAt: string; signal: AbortSignal }) => Promise<string>;
+  research?: (input: { destination?: NotificationAddress; name: string; instruction: string; timezone: string; plannedAt: string; signal: AbortSignal }) => Promise<string>;
   researchTimeoutMs?: number;
   limits?: Partial<ScheduledTaskLimits>;
   historyRetention?: { maxAgeMs?: number; maxBytes?: number };
@@ -366,7 +366,8 @@ export class ScheduledTasks {
     });
   }
 
-  private newsReconciliation() {
+  private newsReconciliation(scope: NotificationAddress) {
+    if (scope.target.startsWith("feishu.group.")) return undefined;
     return this.options.dailyNewsActive && !this.options.dailyNewsActive()
       ? { status: "blocked", code: "daily_news_reconciliation_pending", action: "日报所有权交接待核对；列表暂不完整，不能据此认定原日报不存在。请完成交接后再操作日报。" } : undefined;
   }
@@ -396,7 +397,7 @@ export class ScheduledTasks {
         const completed = new Set(tasks.filter((task) => this.taskLifecycle(task) === "completed").map((task) => task.id));
         const selected = tasks.filter((task) => view === "all" || (view === "completed" ? completed.has(task.id) : task.deletedAt === undefined && !completed.has(task.id)));
         const offset = Number(args.offset ?? 0), limit = Number(args.limit ?? 25);
-        return { status: "ok", view, ...(this.newsReconciliation() ? { reconciliation: this.newsReconciliation() } : {}), totalAll: tasks.length, completedTotal: completed.size, ...this.taskPage(selected, offset, limit) };
+        return { status: "ok", view, ...(this.newsReconciliation(trusted) ? { reconciliation: this.newsReconciliation(trusted) } : {}), totalAll: tasks.length, completedTotal: completed.size, ...this.taskPage(selected, offset, limit) };
       });
     }
     if (request.toolId === "schedules.read_text") {
@@ -416,7 +417,7 @@ export class ScheduledTasks {
       return this.transaction(() => {
         const tasks = this.tasks(trusted).filter((task) => task.id === args.reference || task.name === args.reference);
         if (tasks.length !== 1) {
-          if (!tasks.length && this.newsReconciliation()) return this.newsReconciliation();
+          if (!tasks.length && this.newsReconciliation(trusted)) return this.newsReconciliation(trusted);
           const offset = Number(args.offset ?? 0), limit = Number(args.limit ?? 5);
           return { status: tasks.length ? "needs_choice" : "not_found", ...this.taskPage(tasks, offset, limit) };
         }
@@ -784,7 +785,7 @@ export class ScheduledTasks {
         if (this.options.channel && !this.deliveryState(claim.occurrence).enabled) controller.abort();
         if (controller.signal.aborted) throw new Error("research_cancelled");
         if (!this.options.research) throw new Error("research_unavailable");
-        body = await this.options.research({ name: claim.task.name, instruction: claim.task.instruction,
+        body = await this.options.research({ destination: claim.task.destination, name: claim.task.name, instruction: claim.task.instruction,
           timezone: claim.task.timezone, plannedAt: claim.occurrence.plannedAt, signal: controller.signal });
         if (controller.signal.aborted) throw new Error(timedOut ? "research_timeout" : "research_cancelled");
         if (!body.trim()) throw new Error("research_output_invalid");
@@ -1401,7 +1402,7 @@ export class ScheduledTasks {
       }
       if (this.options.channel && !this.scopeState(trusted, notificationDestination).enabled) return { status: "error", code: "target_disabled" };
       const matches = this.tasks(trusted).filter((task) => task.id === args.reference || task.name === args.reference);
-      if (!matches.length && this.newsReconciliation()) return this.newsReconciliation();
+      if (!matches.length && this.newsReconciliation(trusted)) return this.newsReconciliation(trusted);
       if (matches.length !== 1) return { status: matches.length ? "needs_choice" : "not_found", ...this.taskPage(matches, 0, 5) };
       const task = matches[0]!;
       if (task.template === "daily_ai_news" && this.options.dailyNewsActive && !this.options.dailyNewsActive()) return { status: "blocked", code: "daily_news_reconciliation_pending", task: this.taskView(task) };

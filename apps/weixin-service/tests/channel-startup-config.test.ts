@@ -16,6 +16,40 @@ const configuration = () => ({
 });
 
 describe("startup channel configuration", () => {
+  it("rejects malformed group lists without widening a private binding", () => {
+    const base = configuration();
+    for (const groups of [null, {}, [{ chatId: "*", allowedSenderIds: ["ou_alice"] }],
+      [{ chatId: "oc_private", allowedSenderIds: ["ou_alice"] }],
+      [{ chatId: "oc_alpha", allowedSenderIds: ["*"] }],
+      [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice", "ou_alice"] }],
+      [{ chatId: "oc_alpha", allowedSenderIds: [] }, { chatId: "oc_alpha", allowedSenderIds: [] }]]) {
+      expect(() => parseChannelStartupConfiguration({ ...base, feishu: { ...base.feishu, groups } })).toThrow(/^channel_startup_configuration_invalid$/);
+    }
+    const privateOnly = parseChannelStartupConfiguration(base);
+    expect(privateOnly.owner.conversationAddresses()).toHaveLength(1);
+    expect(privateOnly.owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_alpha", senderId: "ou_owner", conversationType: "group" })).toBeUndefined();
+  });
+  it("keeps group authority and memory separate while retaining the private owner", () => {
+    const input = { ...configuration(), feishu: { ...configuration().feishu, groups: [
+      { chatId: "oc_alpha", allowedSenderIds: ["ou_alice", "ou_bob"] },
+      { chatId: "oc_beta", allowedSenderIds: ["ou_bob"] },
+    ] } };
+    const result = parseChannelStartupConfiguration(input);
+    const owner = result.owner;
+    const alpha = owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_alpha", senderId: "ou_alice", conversationType: "group" });
+    const beta = owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_beta", senderId: "ou_bob", conversationType: "group" });
+    expect(alpha).toBeDefined(); expect(beta).toBeDefined();
+    expect(alpha!.accountId).toBe(owner.conversationAddress().accountId);
+    expect(alpha!.target).not.toBe(beta!.target);
+    expect(owner.memoryScope(alpha!.accountId, alpha!.target)).not.toBe("old-bot@im.bot");
+    expect(owner.memoryScope(alpha!.accountId, alpha!.target)).not.toBe(owner.memoryScope(beta!.accountId, beta!.target));
+    expect(owner.memoryScope(owner.conversationAddress().accountId, owner.conversationAddress().target)).toBe("old-bot@im.bot");
+    input.feishu.groups[0]!.allowedSenderIds.push("ou_guest");
+    expect(owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_alpha", senderId: "ou_guest", conversationType: "group" })).toBeUndefined();
+    expect(owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_beta", senderId: "ou_alice", conversationType: "group" })).toBeUndefined();
+    expect(owner.admit({ accountId: "cli_0123456789abcdef", target: "oc_alpha", senderId: "ou_alice", conversationType: "private" })).toBeUndefined();
+  });
+
   it("captures one selected owner and retains stable task storage independently of the recipient", () => {
     const input = configuration();
     const result = parseChannelStartupConfiguration(input);

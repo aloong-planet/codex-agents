@@ -65,6 +65,9 @@ importers:
         specifier: 7.2.4
         version: 7.2.4
     devDependencies:
+      '@eslint/js':
+        specifier: 9.39.5
+        version: 9.39.5
       '@playwright/test':
         specifier: ^1.55.0
         version: 1.62.1

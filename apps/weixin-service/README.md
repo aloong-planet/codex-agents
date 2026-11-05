@@ -1,6 +1,6 @@
 # 个人微信直连腾讯 iLink 本地 Demo
 
-Startup explicitly enables one or both owner-bound Weixin iLink and Feishu private channels. The service does not use OpenClaw CLI/gateway or read its configuration, accounts, logs or credentials.
+Startup explicitly enables one or both owner-bound Weixin iLink and Feishu private channels, with optional allowlisted Feishu groups. The service does not use OpenClaw CLI/gateway or read its configuration, accounts, logs or credentials.
 
 实现依据腾讯 `@tencent-weixin/openclaw-weixin@2.4.6` 的公开协议事实，但运行时不加载
 该 OpenClaw 插件。重新绑定同一微信可能使旧 OpenClaw 微信连接失效。
@@ -69,7 +69,7 @@ This migration uses an already-bound Weixin account and its existing private sta
 }
 ```
 
-All values above are placeholders. Supply your Feishu bot application's ID/secret and the owner's actual private chat ID/open ID. Configure that application for the SDK long connection and message-receive event, with permission to receive private messages and send as the bot, read referenced messages and message resources, and upload images/files. The application ID must match its binding. No HTTP callback endpoint or group access is provided. Actual application permissions and real message receipt require platform-side verification.
+All values above are placeholders. Supply your Feishu bot application's ID/secret and the owner's actual private chat ID/open ID. Configure that application for the SDK long connection and message-receive event, with permission to receive private messages and send as the bot, read referenced messages and message resources, and upload images/files. The application ID must match its binding. The SDK long connection is used; no HTTP callback endpoint is provided. Group access requires the additional configuration below. Actual application permissions and real message receipt require platform-side verification.
 
 Stop the service, set `enabledChannels` to `["weixin"]`, `["feishu"]` or `["weixin", "feishu"]`, and restart with the same state directory. The set must be nonempty, unique and contain only supported channels. Old `channel` configurations remain readable as single-channel selections; when using `enabledChannels`, remove the old `channel` field to avoid conflicting selectors. File edits do not change a running process. Each enabled channel requires its own binding and credentials. A disabled binding can retain a future notification preference, but does not activate a transport.
 
@@ -79,7 +79,47 @@ The main chat model connection also recovers automatically. After an unexpected 
 
 Both bindings share curated owner memory, permissions and task management. Raw chat history, model threads, message ordering and pending choices remain separate. New tasks and memory plans capture their creation conversation; later viewing or editing from the other chat does not change the notification destination. Legacy tasks/plans without a preference acquire Feishu for future notifications; upgrading those records requires a valid Feishu binding. Existing occurrences, cached output and accepted/uncertain delivery records retain their original destination and outcome. The first activation of explicit binding renews an older model context without binding identity while preserving its transcript. A successful API receipt means channel acceptance, not confirmed phone receipt.
 
-Feishu accepts text, image, file and supported rich-text messages, including referenced attachments from the bound private conversation. It exposes the shared authorized local file, media selection/delivery and schedule tools. Fixture mode is a separate local test entry and cannot establish real-channel acceptance.
+Feishu accepts text, image, file and supported rich-text messages, including referenced attachments from the same authorized private conversation or group. It exposes the shared authorized local file, media selection/delivery and schedule tools. Fixture mode is a separate local test entry and cannot establish real-channel acceptance.
+
+### Feishu group configuration
+
+Add `groups` to the existing `feishu` object; preserve its credentials, owner bindings, `memoryAccountId` and `taskScope`. The following is a fragment, not a replacement for the complete configuration:
+
+```json
+{
+  "groups": [
+    {
+      "chatId": "oc_EXAMPLEGROUP",
+      "allowedSenderIds": ["ou_EXAMPLEMEMBER"]
+    }
+  ]
+}
+```
+
+Replace these synthetic example IDs with actual group chat IDs and application-scoped member open IDs. Each group must be explicitly listed; an owner who wants to invoke the bot in a group must also appear in that group's member list. Wildcards, duplicate groups/members and the bound private chat as a group are rejected. At most 98 groups and 200 members per group are accepted. An absent/empty group list keeps private-only access; an empty member list permits observation but no invocation. Maintain these lists locally, optionally with Codex assistance, and restart to apply changes. Removing a binding prevents its queued work from being admitted; it does not erase retained history or move task deliveries.
+
+In the Feishu application console, publish bot access and subscribe to `im.message.receive_v1` through the SDK long connection. In addition to existing private/media permissions, enable `im:message.group_at_msg:readonly`, `im:message.group_msg` and `im:message:send_as_bot` (see [Feishu's supported bot permissions](https://open.feishu.cn/document/develop-robots/add-bot-to-external-group)). All-message permission is needed for ordinary discussion: without it, the service cannot record messages Feishu does not deliver, as also noted in [OpenClaw's group access guidance](https://docs.openclaw.ai/channels/feishu/access-control). Verify approval, publication and bot visibility in the actual tenant. The bot must be present in the group. Bot identity is resolved through `/open-apis/bot/v3/info`; a failed lookup disables group invocation while retaining private access.
+
+Only an allowlisted human's real platform mention of this bot invokes it. Typing its display name, mentioning another bot, quoting its reply or using only @all does not. Text and supported rich text are accepted; other members' ordinary messages and unauthorized mentions are passive context. Context supplied to an admitted turn retains authors and event identities, with up to 100 preceding observations, 1,000 characters per observation and 16,000 characters total. Passive messages do not run tools, create tasks or directly enter memory curation.
+
+Members share their group's model history and curated memory. Private and other-group memory remain separate. Group runtimes use a clean configuration/home and a named restricted permission profile; the installed Codex must support that profile on thread start, resume, turns and CLI research. This path was exercised with Codex `0.166.0-alpha.6`. Authentication is copied privately into the isolated runtime; personal configuration, skills, plugins and memory are not inherited. Native host filesystem/network access is restricted; existing business-file operations use trusted service tools and current saved grants. Service state, diagnostic files, personal model configuration and internal memory stay protected even under an ancestor directory grant. A failed group runtime does not fall back to the private runtime or stop healthy conversations.
+
+All authorized members may manage their group's reminders and public-web research tasks. Even an explicit all-channel query stays inside that group; private daily news remains private. Task execution and plan follow-ups return to the source group. Pending file choices, clarification and cancellation belong to their original requester, who must mention the bot again; another member's request does not replace them. Accepted/unknown sends are not replayed after restart or failure.
+
+### Real-group acceptance
+
+After deployment, configure a test group and consenting test members locally, verify the platform permissions above, and record the exact version, requests, replies and received artifacts. Automated fixture acceptance does not establish real platform delivery.
+
+| Scenario | Action | Expected observation |
+|---|---|---|
+| Access and genuine mentions | Test an unlisted group, a guest mention, a typed bot name, @all, then an authorized real mention. | Only the authorized real mention in the listed group invokes a reply. |
+| Ordinary shared discussion | A guest posts a harmless temporary code; Alice mentions the bot to ask about it, then Bob continues. | The group can refer to delivered discussion with its author; the guest message alone causes no answer or operation. |
+| Independent memory and context | Use distinct temporary codes and explicitly saved preferences in private, Alpha and Beta conversations. | Each group recalls its own context/memory; private and other-group details do not appear. |
+| Original requester choices | Alice and Bob each request an ambiguous authorized file list. Bob attempts Alice's short reference; Alice then selects her own and Bob cancels his. | No cross-request takeover; only the selected authorized file returns to the source group. |
+| Shared group tasks | Alice creates a one-time group reminder; Bob edits it. Ask for all tasks and a known private task ID. | Group task management works, foreign tasks stay unavailable, and the reminder arrives once in the original group. |
+| Restart and revocation | Coordinate a restart with separate pending choices/tasks, then remove a member or group and restart again. | Eligible work retains its identity and destination; removed callers/groups cannot resume it; settled sends are not repeated. |
+
+Use only harmless files in already authorized directories. Record channel acceptance separately from human receipt. Unknown sends require inspection in the original group, not automatic retry.
 
 ### Upgrading an existing installation
 

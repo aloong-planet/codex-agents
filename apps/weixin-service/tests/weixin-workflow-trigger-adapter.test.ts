@@ -202,7 +202,7 @@ describe("WeixinWorkflowTriggerAdapter", () => {
     });
 
     await expect(adapter.tryHandle(event("查一下今天无锡的天气"))).resolves.toEqual({ handled: false });
-    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a");
+    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a", undefined);
   });
 
   it("pending_new_goal_supersedes_before_main_turn", async () => {
@@ -222,7 +222,7 @@ describe("WeixinWorkflowTriggerAdapter", () => {
     await expect(adapter.tryHandlePending?.(event("把相册最新一张图片发给我")))
       .resolves.toEqual({ handled: false });
     expect(supersedePendingSignals).toHaveBeenCalledOnce();
-    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a");
+    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a", undefined);
   });
 
   it("lets the model semantically cancel the only pending operation without keyword matching", async () => {
@@ -388,7 +388,7 @@ describe("WeixinWorkflowTriggerAdapter", () => {
       text: "在用户授权的 Pictures 目录中查找与王林相关的图片，并发送到当前微信会话",
     }));
     expect(submit).toHaveBeenCalledOnce();
-    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a");
+    expect(supersedePendingSignals).toHaveBeenCalledWith("account-a", "target-a", undefined);
     expect(supersedePendingSignals.mock.invocationCallOrder[0])
       .toBeLessThan(submit.mock.invocationCallOrder[0]!);
     expect(signal).not.toHaveBeenCalled();

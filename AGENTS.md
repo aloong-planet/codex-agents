@@ -23,6 +23,8 @@
 
 Cross-skill project facts are declared in the repository-root `capabilities.toml`.
 
+Group invocation, memory, model recovery, file access, pending continuation and scheduled delivery must preserve the conversation/requester boundaries in [ADR-0023](docs/adr/0023-isolate-feishu-group-authority.md).
+
 ## Agent skills
 
 ### Issue tracker
