@@ -15,6 +15,9 @@ export type TrustedWorkflowTurn = {
   accountId: string;
   target: string;
   requesterRef?: string;
+  senderAccountId?: string;
+  dispatchRequestId?: string;
+  dispatchRetry?: boolean;
   occurredAt: number;
   originalTextRef: string;
   attachmentRefs: string[];
@@ -286,7 +289,7 @@ export class WorkflowToolHost implements DynamicToolHost {
       }
       binding.owner = "workflow";
       binding.runRef = result.runRef;
-      if (result.receipt) binding.receipt = result.receipt;
+      if (result.receipt) binding.receipt = { ...result.receipt, runRef: result.receipt.runRef ?? result.runRef };
       if (result.receiptErrorCode) binding.receiptErrorCode = result.receiptErrorCode;
       return this.finishTrace(member, argumentsValue, binding, startedAt, waitMs,
         success({ status: "workflow_claimed", finalReplyOwner: "workflow" }), ownerBefore);

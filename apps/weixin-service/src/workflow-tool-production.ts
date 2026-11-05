@@ -197,7 +197,7 @@ export class WorkflowToolProductionControl {
   private readonly activeBindings = new Set<string>();
   constructor(
     private readonly host: Pick<WorkflowToolHost, "bind" | "contractHash">,
-    private readonly fileArtifacts: Pick<WorkflowFileArtifactStore, "captureQuery" | "deleteQuery">,
+    private readonly fileArtifacts: Pick<WorkflowFileArtifactStore, "captureTurnText" | "deleteQuery">,
     private readonly mediaRequests?: MediaTurnEvidenceStore,
     private readonly localFiles?: LocalFileTurnControl,
   ) {}
@@ -209,12 +209,15 @@ export class WorkflowToolProductionControl {
   async bind(threadId: string, event: InboundTextEvent): Promise<WorkflowToolTurnBinding> {
     if (this.activeBindings.has(threadId)) throw new Error("workflow_tool_turn_already_bound");
     const hasAttachments = (event.attachments?.length ?? 0) + (event.quote?.attachments.length ?? 0) > 0;
-    const originalText = this.fileArtifacts.captureQuery(event.key, event.text, { allowEmpty: hasAttachments || event.conversationType === "group" });
+    const originalText = this.fileArtifacts.captureTurnText(event.key, event.text, { allowEmpty: hasAttachments || event.conversationType === "group" });
     this.activeBindings.add(threadId);
     const trusted: TrustedWorkflowTurn = {
       eventKey: event.key,
       accountId: event.accountId,
       target: event.target,
+      ...(event.senderAccountId ? { senderAccountId: event.senderAccountId } : {}),
+      ...(event.dispatchRequestId ? { dispatchRequestId: event.dispatchRequestId } : {}),
+      ...(event.dispatchRetry ? { dispatchRetry: true } : {}),
       ...(conversationRequester(event) ? { requesterRef: conversationRequester(event)! } : {}),
       occurredAt: event.receivedAt,
       originalTextRef: originalText.handle,

@@ -113,6 +113,7 @@ export class ScheduledTasks {
       CREATE TABLE IF NOT EXISTS scheduled_news_barrier (recipient TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS scheduled_news_owner (id TEXT PRIMARY KEY, source_hash TEXT NOT NULL, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS scheduled_operation (id TEXT PRIMARY KEY, hash TEXT NOT NULL, json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS dispatch_schedule_operation (request_id TEXT NOT NULL, operation_id TEXT NOT NULL, PRIMARY KEY(request_id, operation_id));
     `);
     this.articles = new NewsArticleStore(this.database);
     try {
@@ -370,6 +371,15 @@ export class ScheduledTasks {
     if (scope.target.startsWith("feishu.group.")) return undefined;
     return this.options.dailyNewsActive && !this.options.dailyNewsActive()
       ? { status: "blocked", code: "daily_news_reconciliation_pending", action: "日报所有权交接待核对；列表暂不完整，不能据此认定原日报不存在。请完成交接后再操作日报。" } : undefined;
+  }
+
+  dispatchEvidence(requestId: string): number {
+    return Number(this.database.prepare("SELECT COUNT(*) AS count FROM dispatch_schedule_operation WHERE request_id = ?").get(requestId)!.count);
+  }
+
+  private recordOperation(key: string, requestHash: string, result: unknown, trusted: TrustedWorkflowTurn): void {
+    this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(result));
+    if (trusted.dispatchRequestId) this.database.prepare("INSERT INTO dispatch_schedule_operation VALUES (?, ?)").run(trusted.dispatchRequestId, key);
   }
 
   async execute(request: WorkflowToolRequest, trusted: TrustedWorkflowTurn): Promise<unknown> {
@@ -1324,7 +1334,7 @@ export class ScheduledTasks {
         originalText: original!, sourceText }, `scheduled:${task.id}`)) return { status: "error", code: "reminder_already_managed" };
       const result = { status: "created", task: this.taskView(task) };
       this.database.prepare("INSERT INTO scheduled_task VALUES (?, ?, ?, ?)").run(task.id, trusted.accountId, trusted.target, JSON.stringify(task));
-      this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(result));
+      this.recordOperation(key, requestHash, result, trusted);
       return result;
     });
   }
@@ -1420,7 +1430,7 @@ export class ScheduledTasks {
         for (const item of occurrences) if (isPending(item)) this.saveOccurrence({ ...item, delivery: "cancelled", reason: "cancelled_by_task_deletion" });
         for (const item of this.notifications()) if (item.taskId === task.id && item.delivery === "pending") this.saveNotification({ ...item, delivery: "suppressed" });
         const receipt = { status: "deleted", task: this.taskView(deleted) };
-        this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(receipt));
+        this.recordOperation(key, requestHash, receipt, trusted);
         return receipt;
       }
       if (tool === "schedules.retry_news") {
@@ -1429,7 +1439,7 @@ export class ScheduledTasks {
         catch (error) { return { status: "blocked", code: error instanceof Error ? error.message : "daily_news_retry_unavailable", action: "请查看日报状态和执行名额，容量不足时等待较早任务完成；已缓存正文会按会话恢复续发，未知或已接受结果不会重发。" }; }
         admitted.push(claim);
         const receipt = { status: "started", occurrenceId: claim.occurrence.id, task: this.taskView(task) };
-        this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(receipt));
+        this.recordOperation(key, requestHash, receipt, trusted);
         return receipt;
       }
       if (tool === "schedules.run_now") {
@@ -1457,7 +1467,7 @@ export class ScheduledTasks {
           execution: "running", delivery: "not_generated", worker: this.worker, reservedBytes: l.maxBodyBytes };
         this.insertOccurrence(occurrence);
         const receipt = { status: "started", occurrenceId: occurrence.id, task: this.taskView(task) };
-        this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(receipt));
+        this.recordOperation(key, requestHash, receipt, trusted);
         admitted.push({ task, occurrence });
         return receipt;
       }
@@ -1472,7 +1482,7 @@ export class ScheduledTasks {
         this.saveTask(updated);
         if (!updated.enabled) this.stopNewsRetries(updated);
         const result = { status: updated.enabled ? "enabled" : "disabled", task: this.taskView(updated) };
-        this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(result));
+        this.recordOperation(key, requestHash, result, trusted);
         return result;
       }
       const changesContent = args.instruction !== undefined || args.reminderText !== undefined || args.reminderMode !== undefined;
@@ -1496,7 +1506,7 @@ export class ScheduledTasks {
       if (resolved) delete updated.blocker;
       this.saveTask(updated);
       const result = { status: "updated", task: this.taskView(updated) };
-      this.database.prepare("INSERT INTO scheduled_operation VALUES (?, ?, ?)").run(key, requestHash, JSON.stringify(result));
+      this.recordOperation(key, requestHash, result, trusted);
       return result;
     });
     this.executionQueue.push(...admitted);
@@ -1620,7 +1630,7 @@ function researchFailureCause(code: string): string | undefined {
 
 function deliveryAddress(item: { destination: Destination; deliveryDestination?: NotificationDestination }): NotificationDestination {
   const destination: NotificationDestination = item.deliveryDestination ?? item.destination;
-  return { accountId: destination.accountId, target: destination.target, ...(destination.channel === "feishu" ? { channel: "feishu" as const } : {}) };
+  return { accountId: destination.accountId, target: destination.target, ...(destination.senderAccountId ? { senderAccountId: destination.senderAccountId } : {}), ...(destination.channel === "feishu" ? { channel: "feishu" as const } : {}) };
 }
 function unavailableChannel(): ScheduledChannelState {
   return { enabled: false, credentialStatus: "stale", credentialGeneration: "unavailable", contextGeneration: null };

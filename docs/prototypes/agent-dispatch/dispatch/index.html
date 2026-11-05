@@ -1,0 +1,276 @@
+<!doctype html>
+
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Prototype — 群消息分派与汇报</title>
+<style>
+  :root{
+    --bg:#f7f8f9; --card:#ffffff; --text:#37352f; --text-2:#787774;
+    --line:#e8eaed; --line-strong:#d9dce0; --accent:#8a67ab; --accent-soft:#f0ebf6;
+  }
+
+  *{box-sizing:border-box;margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  body{background:var(--bg);color:var(--text);font-size:13px;padding:28px;max-width:860px;margin:0 auto}
+  h1{font-size:16px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+  .tag{font-size:10px;border:1px solid var(--line-strong);border-radius:4px;padding:1px 6px;color:var(--text-2)}
+  .q{color:var(--text-2);line-height:1.7;margin-bottom:18px}
+  h4{font-size:12px;color:var(--text-2);margin:18px 0 8px}
+  .dg{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+  .dg pre{font-size:12px;white-space:pre-wrap}
+  .dg.pan{height:56vh;padding:0;overflow:hidden;position:relative;cursor:grab;touch-action:none;user-select:none;background:#fdfdfd}
+  .dg.pan.dragging{cursor:grabbing}
+  .dg.pan svg{display:block;transform-origin:0 0;will-change:transform;overflow:visible}
+  /* With htmlLabels:false, mermaid puts a rect.background under every edge label, and its stylesheet sets the fill to primaryColor (#ECECFF, pale purple);
+     the edgeLabelBackground variable does not reach it, and mermaid's styles have high specificity, so !important is needed to make it transparent (confirmed in Chrome) */
+  .dg svg .edgeLabel rect.background{fill:transparent !important}
+  /* Edge labels one size smaller than node text (nodes default to 16px), so the state nodes stand out as the main subject */
+  .dg svg .edgeLabel text,.dg svg .edgeLabel tspan{font-size:14px}
+  .rst{position:absolute;top:8px;right:8px;z-index:2;border:1px solid var(--line-strong);
+    background:var(--card);color:var(--text-2);border-radius:6px;padding:3px 9px;font-size:12px;cursor:pointer}
+  .rst:hover{color:var(--accent);border-color:var(--accent)}
+  code{display:block;background:var(--card);border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;font-size:12px;user-select:all;overflow-x:auto;white-space:pre}
+  .hint{font-size:12px;color:var(--text-2);margin-top:14px}
+
+  /* ── Driving panel ── */
+  .drive{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  .st{display:flex;flex-direction:column;gap:9px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+  .st-row{display:flex;align-items:center;gap:10px;font-size:13px}
+  .st-row .k{width:96px;color:var(--text-2);font-family:ui-monospace,Menlo,monospace;font-size:12px;flex:none}
+  .badge{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;font-weight:600;
+    padding:2px 10px;border-radius:5px;border:1px solid transparent}
+  .badge.pending{background:#fff6b8;border-color:#e4c800;color:#5c5100}
+  .badge.accepted{background:#dbeafe;border-color:#93c5fd;color:#1e40af}
+  .badge.done{background:#dcfce7;border-color:#86efac;color:#166534}
+  .badge.failed,.badge.rejected{background:#fee2e2;border-color:#fca5a5;color:#991b1b}
+  .badge.expired{background:var(--line);border-color:var(--line-strong);color:var(--text-2)}
+  .badge.empty{background:transparent;border-color:var(--line-strong);color:var(--text-2);border-style:dashed}
+  .bar{width:170px;height:7px;border-radius:4px;background:var(--line);overflow:hidden;flex:none}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .18s}
+  .num{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums}
+  .val{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+  .val.nil{color:var(--text-2);opacity:.7}
+  .illegal{margin:12px 0;padding:8px 12px;border-radius:7px;font-size:12.5px;border:1px solid}
+  .illegal.ok{color:var(--text-2);border-color:var(--line);background:transparent}
+  .illegal.idle{color:var(--text-2);border-color:var(--line);background:transparent;opacity:.6}
+  .illegal .ev{font-family:ui-monospace,Menlo,monospace;color:var(--accent);font-weight:600}
+  .illegal.bad{color:#991b1b;border-color:#fca5a5;background:#fee2e2}
+
+  .acts{display:flex;flex-direction:column;gap:10px}
+  .grp{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .grp-t{font-size:11px;color:var(--text-2);width:78px;flex:none;
+    font-family:ui-monospace,Menlo,monospace}
+  .acts button{font:inherit;font-size:12.5px;padding:5px 13px;border-radius:6px;cursor:pointer;
+    border:1px solid var(--line-strong);background:var(--bg);color:var(--text);transition:.12s}
+  .acts button:hover{border-color:var(--accent);color:var(--accent)}
+  .acts button:active{transform:translateY(1px)}
+  .acts button.ghost{border-style:dashed;color:var(--text-2);margin-left:4px}
+  .acts button.ghost:hover{border-style:solid;color:var(--accent)}
+  /* Greyed out = unreachable from the current state (derived from legal(state), not judged by the UI itself) */
+  /* Greying out does not use opacity: opacity would also fade the pseudo-element tooltip and make its text unreadable. Use specific faded colours instead. */
+  .acts button[aria-disabled="true"]{cursor:not-allowed;border-style:dotted;
+    color:var(--text-2);opacity:1;border-color:var(--line);background:transparent}
+  .acts button[aria-disabled="true"]:hover{border-color:var(--line-strong);color:var(--text-2)}
+  /* Instant tooltip: the native title has a delay of about 1 s, and the reason for greying out must be visible at once */
+  .acts button{position:relative}
+  .acts button[data-tip]:hover::after{
+    content:attr(data-tip);position:absolute;bottom:calc(100% + 7px);left:50%;transform:translateX(-50%);
+    background:#1b1b1f;color:#fff;font-size:11.5px;line-height:1.45;padding:6px 10px;border-radius:6px;
+    white-space:nowrap;z-index:20;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.28)}
+  .acts button[data-tip]:hover::before{
+    content:"";position:absolute;bottom:calc(100% + 2px);left:50%;transform:translateX(-50%);
+    border:5px solid transparent;border-top-color:#1b1b1f;z-index:20;pointer-events:none}
+  .stress{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:12px;color:var(--text-2);cursor:pointer}
+  .stress input{cursor:pointer}
+  code.inl{display:inline;background:var(--bg);border:1px solid var(--line);border-radius:4px;
+    padding:1px 5px;font-size:11.5px}
+  .drive .hint{margin-top:14px;line-height:1.6}
+  /* Highlight the current state's node on the diagram */
+  .dg svg g.node.cur rect,.dg svg g.node.cur polygon,.dg svg g.node.cur circle{
+    stroke-width:4px !important}
+
+  body{max-width:1120px;background:#f8fafc;color:#172033}
+  .q{color:#475569}.examples{padding:14px 18px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;line-height:1.9;margin-bottom:18px}
+  .examples small{color:#475569}.preview-grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,1fr);gap:18px;margin-top:20px}
+  .chat,.observations{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;min-width:0}.chat h4,.observations h4{margin-top:0}
+  .message{border-left:3px solid #475569;padding:10px 12px;margin:9px 0;background:#f8fafc;line-height:1.65;border-radius:3px}.message strong{display:block;color:#334155}.message p{white-space:pre-wrap}.message.sam{border-color:#1d4ed8}.message.alice{border-color:#7e22ce}.message.bill{border-color:#047857}.message.jack{border-color:#9a3412}
+  .message.sam strong{color:#1d4ed8}.message.alice strong{color:#7e22ce}.message.bill strong{color:#047857}.message.jack strong{color:#9a3412}
+  .delivery{padding:9px 0;border-bottom:1px solid #e2e8f0;font-size:12px;line-height:1.6}.delivery b{font-weight:600}.graphs{margin-top:20px;background:#fff;padding:14px;border:1px solid #e2e8f0;border-radius:10px}.graphs summary,details summary{cursor:pointer;font-weight:600}.dg.pan{height:340px;background:#fff}.dg svg g.node.cur rect{stroke-width:4px!important}
+  pre#state-json{font:11px/1.6 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:10px;max-height:380px;overflow:auto}
+  .badge.proposal,.badge.clarification,.badge.redirect{background:#faf5ff;border-color:#7e22ce;color:#6b21a8}.badge.queued,.badge.received{background:#eff6ff;border-color:#1d4ed8;color:#1e40af}.badge.running{background:#ecfdf5;border-color:#047857;color:#065f46}.badge.reporting{background:#fff7ed;border-color:#9a3412;color:#9a3412}.badge.unknown{background:#fef2f2;border-color:#b91c1c;color:#991b1b}.badge.ignored{background:#f8fafc;border-color:#475569;color:#334155}
+  @media(max-width:760px){body{padding:16px}.preview-grid{grid-template-columns:1fr}.grp-t{width:100%}.acts button[data-tip]:hover::after{white-space:normal;width:230px;left:0;transform:none}.dg.pan{height:280px}}
+</style>
+<script src="../../manifest.js"></script>
+<script src="../../app-identity.js"></script>
+</head>
+<body>
+  <h1>群消息分派与汇报 <span class="tag">Logic</span></h1>
+  <div class="q">问题：主动发现、点名转派和结果汇报能否保持每项需求只有一位承办者？<br>这是流程原型，使用预设场景；不会调用模型、发送飞书消息或生成文件。已确认：Sam 只协调，推断待办需原作者确认。待确认方案：原发起人取消、失败后明确重试、沿用 Codex 运行环境。</div>
+
+
+
+  <section class="examples">
+    <strong>首批可验收任务</strong>
+    <div>Alice：商品上架材料包 · Bill：一天行程与预算 · Jack：代码分析、补丁与回归用例</div>
+    <small>同群共享业务事实；每个 Agent 保存自己的执行过程。以下结果、文件名均为演示。</small>
+  </section>
+  <h4>选择群消息，再按步骤推进</h4>
+  <div class="drive">
+    <div class="st">
+      <div class="st-row"><span class="k">当前阶段</span><span id="v-status" class="badge">—</span></div>
+      <div class="st-row"><span class="k">流程进度</span>
+        <span class="bar"><i id="v-bar"></i></span><span id="v-prog" class="num">0 / 0</span></div>
+      
+      <div class="st-row"><span class="k">承办 Agent</span><span id="v-path" class="val nil">—</span></div>
+      <div class="st-row"><span class="k">执行结果</span><span id="v-err" class="val nil">—</span></div>
+    </div>
+    <div id="v-illegal" class="illegal idle">No event dispatched yet</div>
+    <div class="acts">
+
+      <div class="grp"><span class="grp-t">群消息</span>
+        <button data-new="alice">Alice：商品文案</button><button data-new="bill">Bill：行程安排</button><button data-new="jack">Jack：代码问题</button>
+        <button data-new="inferred">讨论中发现待办</button><button data-new="wrong">@ Bill 修代码</button><button data-new="unclear">需求不明确</button>
+        <button data-new="casual">普通闲聊</button><button data-new="guest">未授权成员</button><button id="btn-reset" class="ghost">清空</button>
+      </div>
+      <div class="grp"><span class="grp-t">识别与确认</span>
+        <button data-act="recognize">Sam 识别</button><button data-act="confirm">原作者确认</button><button data-act="decline">原作者婉拒</button><button data-act="clarify">补充技术需求</button><button data-act="reassign">Sam 转派 Jack</button>
+      </div>
+      <div class="grp"><span class="grp-t">Agent 处理</span>
+        <button data-act="accept">承办 Agent 接单</button><button data-act="complete">处理完成</button><button data-act="fail">处理失败</button><button data-act="cancel">原发起人取消</button>
+      </div>
+      <div class="grp"><span class="grp-t">通知发送</span>
+        <button data-act="deliver">发送下一条通知</button><button data-act="uncertain">发送结果未知</button><button data-act="reject_send">明确发送失败</button><button data-act="retry_report">仅重试结果通知</button>
+      </div>
+      <div class="grp"><span class="grp-t">边界演示</span>
+        <button data-act="other_confirm">其他成员确认</button><button data-act="other_cancel">其他成员取消</button><button data-act="duplicate">收到重复消息</button><button data-act="restart">模拟恢复已存状态</button>
+      </div>
+    </div>
+    <label class="stress"><input type="checkbox" id="stress"><span>允许点击灰色动作，检查模型是否会拒绝（演示开关）</span></label>
+    <p class="hint">灰色动作表示当前不能发生，悬停可看原因。先识别，再接单，最后完成；每次点“发送下一条通知”可查看群里出现的内容。发送失败与工作执行结果分别记录。</p>
+  </div>
+
+<section class="preview-grid">
+    <div class="chat"><h4>群内消息预览</h4><div id="chat-items"></div></div>
+    <div class="observations"><h4>完整相关状态</h4><div id="delivery-state"></div><details><summary>查看任务记录</summary><pre id="state-json">null</pre></details></div>
+  </section>
+  <details class="graphs"><summary>查看分派与汇报状态图</summary><div id="dgs"></div></details>
+<script src="../../vendor/mermaid.min.js"></script>
+<script src="./model.mmd.js"></script>
+<script src="./logic.js"></script>
+<script>
+  const host = document.getElementById('dgs');
+  const packs = Object.values(window.MERMAID_SOURCES || {}).flat();
+  (async () => {
+    if (!packs.length) { host.innerHTML = '<div class="hint">No diagram source: the directory has no .mmd, or sync-mmd.mjs has not been run.</div>'; return; }
+    let i = 0;
+    for (const d of packs) {
+      const h = document.createElement('h4'); h.textContent = d.title;
+      const box = document.createElement('div'); box.className = 'dg';
+      host.appendChild(h); host.appendChild(box);
+      if (!window.mermaid) {
+        const pre = document.createElement('pre'); pre.textContent = d.src; box.appendChild(pre);
+        continue; // vendor library missing: fall back to showing the diagram source text
+      }
+      try {
+        // The built-in dark theme is nearly greyscale and default is designed for light backgrounds — use base + themeVariables to take the project palette
+        const dark = false;
+        mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'base',
+          themeVariables: dark ? {
+            primaryColor: '#2c2733', primaryTextColor: '#e6e6e5', primaryBorderColor: '#a084c7',
+            lineColor: '#9b9a97', textColor: '#e6e6e5', edgeLabelBackground: '#1f2124',
+            noteBkgColor: '#34373c', noteTextColor: '#e6e6e5', background: '#18191b',
+            secondaryColor: '#1f2124', tertiaryColor: '#232526'
+          } : {
+            primaryColor: '#f0ebf6', primaryTextColor: '#37352f', primaryBorderColor: '#8a67ab',
+            lineColor: '#787774', textColor: '#37352f', edgeLabelBackground: '#ffffff',
+            noteBkgColor: '#f7f8f9', noteTextColor: '#37352f', background: '#ffffff',
+            secondaryColor: '#ffffff', tertiaryColor: '#f7f8f9'
+          } });
+        const { svg } = await mermaid.render('mmd-' + i++, d.src);
+        box.innerHTML = svg;
+        enablePanZoom(box);
+      } catch (e) {
+        const pre = document.createElement('pre'); pre.textContent = d.src; box.appendChild(pre);
+      }
+    }
+  })();
+
+  // Canvas interaction: drag = pan; pinch or ⌘/Ctrl + wheel = smooth zoom (anchored at the pointer); a plain wheel scrolls the page; double-click or ⌂ = reset to fit
+  function enablePanZoom(box){
+    const svg = box.querySelector('svg');
+    if (!svg || !svg.viewBox || !svg.viewBox.baseVal.width) return;
+    const natW = svg.viewBox.baseVal.width, natH = svg.viewBox.baseVal.height;
+    svg.style.maxWidth = 'none'; svg.style.width = natW + 'px'; svg.style.height = natH + 'px';
+    box.classList.add('pan');
+    box.insertAdjacentHTML('beforeend', '<button class="rst" title="Reset view (same as double-clicking the canvas)">⌂</button>');
+    let s = 1, tx = 0, ty = 0, dragging = false, sx = 0, sy = 0;
+    const apply = () => { svg.style.transform = `translate(${tx}px,${ty}px) scale(${s})`; };
+    const fit = () => {
+      const r = box.getBoundingClientRect();
+      s = Math.min((r.width - 28) / natW, (r.height - 28) / natH, 1);
+      tx = (r.width - natW * s) / 2; ty = (r.height - natH * s) / 2; apply();
+    };
+    fit();
+    box.querySelector('.rst').addEventListener('click', (e) => { e.stopPropagation(); fit(); });
+    box.addEventListener('dblclick', fit);
+    box.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.rst')) return;
+      dragging = true; sx = e.clientX - tx; sy = e.clientY - ty;
+      box.classList.add('dragging'); box.setPointerCapture(e.pointerId);
+    });
+    box.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      tx = e.clientX - sx; ty = e.clientY - sy; apply();
+    });
+    const end = () => { dragging = false; box.classList.remove('dragging'); };
+    box.addEventListener('pointerup', end); box.addEventListener('pointercancel', end);
+    box.addEventListener('wheel', (e) => {
+      if (!e.ctrlKey && !e.metaKey) return; // a plain scroll is not hijacked; the page scrolls normally
+      e.preventDefault();
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 16; else if (e.deltaMode === 2) dy *= 120; // normalise line/page modes to pixels
+      dy = Math.max(-60, Math.min(60, dy)); // cap a single step: one mouse notch ≈ ±12%
+      const r = box.getBoundingClientRect();
+      const px = e.clientX - r.left, py = e.clientY - r.top;
+      const ns = Math.min(5, Math.max(0.2, s * Math.exp(-dy * 0.002)));
+      tx = px - (px - tx) * (ns / s); ty = py - (py - ty) * (ns / s); s = ns; apply();
+    }, { passive: false });
+  }
+</script>
+
+<script>
+  (function(){
+    const SM=window.StateMachine;
+    let state=null,lastEvent=null;
+    const $=id=>document.getElementById(id);
+    const deliveryLabels={queued:'等待发送',accepted:'演示已送达',rejected:'明确失败',unknown:'结果未知，不自动重发',cancelled:'已撤销未发送通知'};
+    const actionLabels=Object.fromEntries([...document.querySelectorAll('[data-act]')].map(b=>[b.dataset.act,b.textContent]));
+    function highlight(){document.querySelectorAll('.dg svg g.node,.dg svg g.stateGroup').forEach(n=>n.classList.toggle('cur',state!==null&&n.textContent.trim()===SM.LABELS[state.status]));}
+    function render(){
+      $('v-status').textContent=state?SM.LABELS[state.status]:'—';$('v-status').className='badge '+(state?.status||'empty');
+      $('v-bar').style.width=(state?state.progress/4*100:0)+'%';$('v-prog').textContent=(state?.progress||0)+' / 4';
+      $('v-path').textContent=state?(state.agent||'null'):'—';$('v-err').textContent=state?(state.outcome||'null'):'—';
+      const receipt=$('v-illegal');receipt.className='illegal '+(state?.illegal?'bad':lastEvent?'ok':'idle');
+      receipt.textContent=state?.illegal?'⚠ '+state.illegal:lastEvent&&state?'已执行 '+actionLabels[lastEvent]+' → '+SM.LABELS[state.status]:lastEvent?'⚠ 没有任务，动作已忽略':'尚未执行动作';
+      const permission=SM.legal(state),stress=$('stress').checked;
+      document.querySelectorAll('[data-act]').forEach(b=>{const info=permission[b.dataset.act];b.setAttribute('aria-disabled',String(!info.legal&&!stress));if(info.legal)b.removeAttribute('data-tip');else b.dataset.tip=info.why;});
+      const chat=$('chat-items');chat.replaceChildren();
+      const messages=state?[...state.inputs,...state.outbox.filter(m=>m.delivery==='accepted')].sort((a,b)=>a.order-b.order):[];
+      if(!messages.length){chat.textContent='请选择一条群消息。演示不会连接真实飞书。';}
+      for(const message of messages){const row=document.createElement('div');row.className='message '+message.speaker.toLowerCase();const speaker=document.createElement('strong');speaker.textContent=message.speaker;const text=document.createElement('p');text.textContent=message.text;row.append(speaker,text);chat.append(row);}
+      const delivery=$('delivery-state');delivery.replaceChildren();
+      const totals=document.createElement('div');totals.className='delivery';totals.textContent=state?'承办次数：'+state.operations+'；执行结果：'+(state.outcome||'未完成'):'没有任务';delivery.append(totals);
+      for(const item of state?.outbox||[]){const row=document.createElement('div');row.className='delivery';row.textContent='#'+item.id+' '+item.speaker+' · '+deliveryLabels[item.delivery]+'\n'+item.text;delivery.append(row);}
+      $('state-json').textContent=JSON.stringify(state,null,2);highlight();
+    }
+    document.querySelectorAll('[data-act]').forEach(b=>b.addEventListener('click',()=>{if(b.getAttribute('aria-disabled')==='true')return;lastEvent=b.dataset.act;state=SM.reduce(state,{type:lastEvent});render();}));
+    document.querySelectorAll('[data-new]').forEach(b=>b.addEventListener('click',()=>{state=SM.initial(b.dataset.new);lastEvent=null;render();}));
+    $('btn-reset').addEventListener('click',()=>{state=null;lastEvent=null;render();});$('stress').addEventListener('change',render);
+    document.querySelector('.graphs').addEventListener('toggle',()=>{document.querySelectorAll('.rst').forEach(b=>b.click());highlight();});
+    window.DispatchDemo={state:()=>state};render();
+    let attempts=0;const timer=setInterval(()=>{if(document.querySelector('.dg svg')||++attempts>40){clearInterval(timer);highlight();}},100);
+  })();
+</script>
+</body>
+</html>

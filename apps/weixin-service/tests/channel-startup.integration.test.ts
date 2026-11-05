@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -14,7 +15,7 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
 // Cancel uses a canned fixture Router decision; this verifies host effects, not live-model semantics.
-type State = { fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
+type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
   workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
   workflowModulePermissions?: { modules: { moduleId: string; revision: number; scopes: { scopeId: string }[] }[] };
@@ -67,11 +68,49 @@ async function start(directory: string, extraEnv: Record<string, string> = {}) {
   try { await until((value) => value.channel === "feishu" ? value.ready === true : value.codex?.enabledTargets.length > 0); }
   catch (error) { await stop(child); throw error; }
   return { state, until, close: async () => { await stop(child); expect(child.exitCode, output).toBe(0); },
+    crash: async () => {
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGKILL"); await exited;
+      expect(child.signalCode).toBe("SIGKILL");
+    },
     async post(route: string, body: unknown) {
       const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json" }, body: JSON.stringify(body) });
       expect(response.status, await response.clone().text()).toBe(200);
     } };
 }
+
+it("receives signed webhook events through real main and replies once through the configured Feishu sender", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "channel-webhook-main-"));
+  const callbackPort = await freePort();
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    const base = config("feishu");
+    const webhook = { port: callbackPort, path: "/feishu/events", verificationToken: "fixture-token", encryptKey: "fixture-key" };
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...base, feishu: { ...base.feishu, receiveMode: "webhook", webhook } }));
+    running = await start(directory);
+    const event = { schema: "2.0", header: { event_id: "event_main", event_type: "im.message.receive_v1", app_id: base.feishu.appId, token: webhook.verificationToken },
+      event: { sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } }, message: { message_id: "om_http_main", chat_id: "oc_private", chat_type: "p2p",
+        create_time: String(Date.now()), message_type: "text", content: '{"text":"Webhook 接收测试"}' } } };
+    for (const eventId of ["event_main", "event_redelivery"]) {
+      event.header.event_id = eventId;
+      const iv = randomBytes(16), cipher = createCipheriv("aes-256-cbc", createHash("sha256").update(webhook.encryptKey).digest(), iv);
+      const body = JSON.stringify({ encrypt: Buffer.concat([iv, cipher.update(JSON.stringify(event)), cipher.final()]).toString("base64") });
+      const timestamp = "1608725989", nonce = "fixture-http-nonce";
+      const response = await fetch(`http://127.0.0.1:${callbackPort}/feishu/events`, { method: "POST", headers: {
+        "x-lark-request-timestamp": timestamp, "x-lark-request-nonce": nonce,
+        "x-lark-signature": createHash("sha256").update(timestamp + nonce + webhook.encryptKey + body).digest("hex"),
+      }, body, signal: AbortSignal.timeout(2000) });
+      expect(response.status).toBe(200);
+      await response.text();
+    }
+    const result = await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    expect(result.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_private", message: "这是 fixture Codex 回复。" })]);
+    expect(result.fixtureModelRequests).toHaveLength(1);
+    expect(result.codex.runs.at(-1)?.phase).toBe("completed");
+    expect(result.codex.transcript.filter((item) => item.role === "user").map((item) => item.text)).toEqual(["Webhook 接收测试"]);
+    console.log(JSON.stringify({ kind: "webhook_main_acceptance", replies: result.fixtureTextOutbox, runs: result.codex.runs.map(({ phase }) => phase) }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
 
 it("switches via stop/configure/start, retains permissions and histories, and keeps the running selector fixed", async () => {
   const directory = mkdtempSync(join(tmpdir(), "channel-main-"));
@@ -754,3 +793,616 @@ it("shares only group discussion, binds choices to the requester and delivers gr
       runs: restored.codex.runs, workflows: restored.workflows?.runs, mediaOutbox: sent.feishuFixtureMediaOutbox, textOutbox: delivered.feishuFixtureTextOutbox }));
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 60000);
+
+
+it("dispatches an ordinary group request once and reports using the selected specialist application", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-main-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const input = { event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: "om_dispatch_alice", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+        content: JSON.stringify({ text: "帮我整理闲鱼商品描述" }), mentions: [] } },
+      dispatchDecision: { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理闲鱼商品描述", message: "" } };
+    await running.post("/api/fixture/inbound", input);
+    await running.post("/api/fixture/inbound", input);
+    const result = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(result.agentFixtureOutboxes?.alice?.text.map(({ chatId, message }) => ({ chatId, message }))).toEqual([
+      { chatId: "oc_alpha", message: "我准备处理：整理闲鱼商品描述。完成后会在本群汇报。" },
+      { chatId: "oc_alpha", message: "这是 fixture Codex 回复。" },
+    ]);
+    expect(result.fixtureTextOutbox).toEqual([]);
+    expect(result.agentFixtureOutboxes?.bill?.text).toEqual([]);
+    expect(result.agentFixtureOutboxes?.jack?.text).toEqual([]);
+    expect(result.agentDispatch?.jobs).toEqual([expect.objectContaining({ agentId: "alice", senderAccountId: "cli_aaaaaaaaaaaaaaaa", requester: "ou_owner", status: "completed" })]);
+    expect(result.fixtureModelRequests).toHaveLength(1);
+    expect(JSON.stringify(result.fixtureModelRequests![0]!.input)).toContain("你是 Alice");
+    console.log(JSON.stringify({ kind: "dispatch_explicit_request", command: "帮我整理闲鱼商品描述", jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+function dispatchConfig(directory: string, dual = false) {
+    const configuration = config("feishu");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration, ...(dual ? { channel: undefined, enabledChannels: ["weixin", "feishu"] } : {}), feishu: { ...configuration.feishu,
+      groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }],
+      dispatch: { groupChatIds: ["oc_alpha"], agents: [{ id: "sam" },
+        { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" },
+        { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] },
+    } }));
+}
+
+it("keeps inferred work idle until its original author confirms the proposal", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-proposal-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const send = (id: string, sender: string, text: string, dispatchDecision: unknown, modelToolCalls?: unknown[]) => running!.post("/api/fixture/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+        message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, modelToolCalls,
+    });
+    await send("om_inferred_bill", "ou_owner", "周末可能想去附近玩玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
+    const proposed = await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    expect(proposed.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["要不要请 Bill 帮你安排周末出行？请回复这条建议确认，或告诉我暂时不用。"]);
+    expect(proposed.agentDispatch?.jobs[0]?.status).toBe("proposed");
+    expect(proposed.fixtureModelRequests).toEqual([]);
+    expect(proposed.agentFixtureOutboxes?.bill?.text).toEqual([]);
+    const requestId = proposed.agentDispatch!.jobs[0]!.id;
+    await send("om_other_confirmation", "ou_colleague", "确认", { kind: "confirm", agentId: null, requestId, summary: "", message: "" });
+    const denied = await running.until((state) => state.fixtureTextOutbox?.length === 2);
+    expect(denied.agentDispatch?.jobs[0]?.status).toBe("proposed");
+    expect(denied.fixtureModelRequests).toEqual([]);
+    expect(denied.agentFixtureOutboxes?.bill?.text).toEqual([]);
+    await send("om_proposal_supplement_one", "ou_owner", "从南京站出发，1秒后提醒我检查计划", { kind: "supplement", agentId: null, requestId, summary: "", message: "" });
+    await running.until((state) => state.fixtureTextOutbox?.length === 3);
+    await send("om_proposal_supplement_two", "ou_owner", "只安排一天，不要住宿", { kind: "supplement", agentId: null, requestId, summary: "", message: "" });
+    await running.until((state) => state.fixtureTextOutbox?.length === 4);
+    await send("om_author_confirmation", "ou_owner", "确认，预算200元，不要创建文件。", { kind: "confirm", agentId: null, requestId, summary: "", message: "" }, [
+      { namespace: "schedules", tool: "create", arguments: { name: "检查计划", instruction: "检查计划", reminderText: "该检查计划了。", reminderMode: "natural", delaySeconds: 1, sourceText: "1秒后提醒我检查计划" } },
+    ]);
+    const completed = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(completed.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual(["我准备处理：安排周末出行。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
+    expect(completed.agentDispatch?.jobs).toEqual([expect.objectContaining({ agentId: "bill", requester: "ou_owner", status: "completed" })]);
+    expect(completed.fixtureModelRequests).toHaveLength(1);
+    expect(JSON.stringify(completed.fixtureModelRequests![0]!.input)).toContain("周末可能想去附近玩玩");
+    expect(JSON.stringify(completed.fixtureModelRequests![0]!.input)).toContain("从南京站出发");
+    expect(JSON.stringify(completed.fixtureModelRequests![0]!.input)).toContain("只安排一天，不要住宿");
+    expect(JSON.stringify(completed.fixtureModelRequests![0]!.input)).toContain("确认，预算200元，不要创建文件。");
+    const reminded = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 3, 5000);
+    expect(reminded.agentFixtureOutboxes?.bill?.text[2]).toMatchObject({ chatId: "oc_alpha", message: "该检查计划了。" });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("does not execute guest, bot, casual or invalid coordinator decisions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-admission-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const send = (id: string, sender: string, senderType: string, text: string, dispatchDecision: unknown) => running!.post("/api/fixture/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: senderType, sender_id: { open_id: sender } },
+        message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision,
+    });
+    const task = { kind: "dispatch", agentId: "alice", requestId: null, summary: "修改商品", message: "" };
+    await send("om_guest_task", "ou_guest", "user", "帮我修改商品", task);
+    await send("om_bot_task", "ou_owner", "bot", "帮我修改商品", task);
+    await send("om_casual", "ou_owner", "user", "今天心情不错", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" });
+    await send("om_unknown_agent", "ou_owner", "user", "交给陌生角色", { ...task, agentId: "unknown-agent" });
+    await send("om_sam_execution", "ou_owner", "user", "Sam 自己修改", { ...task, agentId: "sam" });
+    await send("om_message_as_request", "ou_owner", "user", "整理商品文案", { ...task, requestId: "om_message_as_request" });
+    await send("om_malformed_decision", "ou_owner", "user", "无效结果", { kind: "dispatch" });
+    const checked = await running.until((state) => state.fixtureTextOutbox?.length === 4);
+    expect(checked.fixtureTextOutbox?.map(({ message }) => message)).toEqual([
+      "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。",
+      "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。",
+      "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。",
+      "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。",
+    ]);
+    expect(checked.fixtureModelRequests).toEqual([]);
+    expect(checked.agentDispatch?.jobs).toEqual([]);
+    expect(checked.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("resolves genuine cross-application mentions and explains reassignment before one specialist executes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-mentions-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    const send = (id: string, appIds: string[], decision: unknown) => running!.post("/api/fixture/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+          // Sender-app-scoped bot open IDs deliberately differ from each specialist's own open ID.
+          mentions: appIds.map((_, index) => ({ key: `@_user_${index}`, id: { open_id: `ou_samview${index}` }, name: index === 0 ? "Bill" : "Jack" })),
+          content: JSON.stringify({ text: `${appIds.map((_, index) => `@_user_${index}`).join(" ")} 帮我修复代码` }) } },
+      messageDetails: { message_id: id, chat_id: "oc_alpha", msg_type: "text", body: { content: '{"text":"帮我修复代码"}' },
+        mentions: appIds.map((id, index) => ({ key: `@_user_${index}`, id, id_type: "app_id", name: index === 0 ? "Bill" : "Jack" })) },
+      dispatchDecision: decision,
+    });
+    await send("om_bill_wrong_scope", ["cli_bbbbbbbbbbbbbbbb"], { kind: "dispatch", agentId: "jack", requestId: null, summary: "修复代码",
+      message: "这属于技术开发事务。我请 Sam 重新分派给 Jack，由他独立处理。" });
+    const reassigned = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(reassigned.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual(["这属于技术开发事务。我请 Sam 重新分派给 Jack，由他独立处理。"]);
+    expect(reassigned.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["已将这项需求转派给 Jack。"]);
+    expect(reassigned.agentFixtureOutboxes?.jack?.text.map(({ message }) => message)).toEqual(["我准备处理：修复代码。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
+    expect(reassigned.fixtureModelRequests).toHaveLength(1);
+    expect(reassigned.agentDispatch?.jobs[0]).toMatchObject({ agentId: "jack", status: "completed" });
+    await send("om_multi_named", ["cli_bbbbbbbbbbbbbbbb", "cli_cccccccccccccccc"], { kind: "dispatch", agentId: "jack", requestId: null, summary: "不能直接执行", message: "" });
+    const clarified = await running.until((state) => state.fixtureTextOutbox?.length === 2);
+    expect(clarified.fixtureTextOutbox?.at(-1)?.message).toBe("你点名了多个 Agent。这项事务希望由谁独立负责？");
+    expect(clarified.fixtureModelRequests).toHaveLength(1);
+    expect(clarified.agentDispatch?.jobs).toHaveLength(1);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("keeps each specialist identity for files and scheduled reminders across restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-delivery-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-artifacts-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  try {
+    dispatchConfig(directory, true); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+    const at = new Date(Date.now() + 10000).toISOString();
+    for (const agentId of ["alice", "bill", "jack"]) {
+      const text = `请保存并发回 ${agentId} 计划，稍后在本群提醒，原文：${agentId} 独立提醒`;
+      await running.post("/api/fixture/feishu/inbound", {
+        event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+          message: { message_id: `om_${agentId}_artifact`, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } },
+        dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: `${agentId} 计划与提醒`, message: "" },
+        modelToolCalls: [
+          { namespace: "schedules", tool: "create", arguments: { name: `${agentId} 提醒`, instruction: `${agentId} 独立提醒`, reminderText: `${agentId} 独立提醒`, reminderMode: "verbatim", at, sourceText: text } },
+          { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: `${agentId}-plan.txt`, content: `${agentId} plan`, overwrite: false } },
+          { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 1, path: ["fileRef"] } }] } },
+        ],
+      });
+      const sent = await running.until((state) => state.agentFixtureOutboxes?.[agentId]?.text.at(-1)?.message === "文件已发送，请查收。");
+      expect(sent.agentFixtureOutboxes?.[agentId]?.media).toEqual([expect.objectContaining({ chatId: "oc_alpha", fileName: `${agentId}-plan.txt`, bytesBase64: Buffer.from(`${agentId} plan`).toString("base64") })]);
+      expect(sent.feishuFixtureMediaOutbox).toEqual([]);
+      expect(sent.fixtureOutbox).toEqual([]);
+    }
+    const managementText = "把 alice 提醒改名为运营资料提醒，保存并发回修改后的名称";
+    await running.post("/api/fixture/feishu/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_colleague" } },
+        message: { message_id: "om_colleague_manages_alice", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text: managementText }) } },
+      dispatchDecision: { kind: "dispatch", agentId: "bill", requestId: null, summary: "修改同群提醒名称", message: "" },
+      modelToolCalls: [
+        { namespace: "schedules", tool: "list", arguments: {} },
+        { namespace: "schedules", tool: "inspect", arguments: { reference: "alice 提醒" } },
+        { namespace: "schedules", tool: "edit", arguments: { reference: "alice 提醒", expectedRevision: { $fixtureToolResult: { call: 1, path: ["task", "revision"] } }, name: "运营资料提醒", sourceText: managementText } },
+        { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: "managed-reminder.txt", content: { $fixtureToolResult: { call: 2, path: ["task", "name"] } }, overwrite: false } },
+        { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 3, path: ["fileRef"] } }] } },
+      ],
+    });
+    const managed = await running.until((state) => state.agentFixtureOutboxes?.bill?.media.length === 2 && state.agentDispatch?.jobs.at(-1)?.status === "completed");
+    expect(managed.agentFixtureOutboxes?.bill?.media[1]).toMatchObject({ chatId: "oc_alpha", fileName: "managed-reminder.txt", bytesBase64: Buffer.from("运营资料提醒").toString("base64") });
+    await running.close(); running = await start(directory, env);
+    const delivered = await running.until((state) => ["alice", "bill", "jack"].every((id) => state.agentFixtureOutboxes?.[id]?.text.length === 1));
+    expect(delivered.agentFixtureOutboxes).toEqual({
+      alice: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "alice 独立提醒" })], media: [] },
+      bill: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "bill 独立提醒" })], media: [] },
+      jack: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "jack 独立提醒" })], media: [] },
+    });
+    expect(delivered.fixtureModelRequests).toEqual([]);
+    expect(delivered.feishuFixtureTextOutbox).toEqual([]);
+    expect(delivered.weixinFixtureReplies).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it.each([["accepted", "2"], ["rejected", "2"], ["accepted", "取消"]] as const)("resumes a specialist file choice after restart only for its original requester (%s prompt, %s response)", async (promptOutcome, choice) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-pending-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-pending-files-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  const send = (id: string, sender: string, text: string, dispatchDecision: unknown, modelToolCalls?: unknown[]) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, modelToolCalls,
+  });
+  try {
+    dispatchConfig(directory, true); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: false })) });
+    await running.post("/api/fixture/feishu/inbound", { applicationControl: { agentId: "alice", textOutcomes: ["accepted", promptOutcome] } });
+    await send("om_alice_choice", "ou_owner", "列出 Agent 笔记让我选发哪个", { kind: "dispatch", agentId: "alice", requestId: null, summary: "选择并发送运营笔记", message: "" }, [
+      { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+        candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } },
+    ]);
+    const pending = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && state.agentFixtureOutboxes?.alice?.text.length === (promptOutcome === "accepted" ? 2 : 1));
+    const run = pending.workflows!.runs.find(({ status }) => status === "needs_input")!;
+    expect(run).toBeDefined();
+    if (promptOutcome === "accepted") expect(pending.agentFixtureOutboxes?.alice?.text.at(-1)?.message).toContain("Agent Alpha.md");
+    expect(pending.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    await running.close(); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    if (promptOutcome === "rejected") {
+      await send("om_prompt_retry", "ou_owner", "只重发汇报", { kind: "retry_report", agentId: null, requestId: pending.agentDispatch!.jobs[0]!.id, summary: "", message: "" });
+      const reported = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 1);
+      expect(reported.agentFixtureOutboxes?.alice?.text[0]?.message).toContain("Agent Alpha.md");
+      expect(reported.fixtureModelRequests).toEqual([]);
+    }
+    await send("om_other_choice", "ou_colleague", "2", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明你的需求。" });
+    const denied = await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+    expect(denied.workflows?.runs.find(({ runRef }) => runRef === run.runRef)?.status).toBe("needs_input");
+    expect(denied.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    await send("om_original_choice", "ou_owner", choice, { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" });
+    await send("om_choice_barrier", "ou_colleague", "说明下你能做什么", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明想完成的事情。" });
+    const sent = await running.until((state) => state.feishuFixtureTextOutbox?.length === 2);
+    expect(sent.agentFixtureOutboxes?.alice?.media).toEqual(choice === "取消" ? [] : [expect.objectContaining({ chatId: "oc_alpha", fileName: "Agent Beta.md", bytesBase64: Buffer.from("# Agent Beta\n").toString("base64") })]);
+    expect(sent.agentFixtureOutboxes?.bill?.media).toEqual([]);
+    expect(sent.feishuFixtureMediaOutbox).toEqual([]);
+    expect(sent.fixtureModelRequests).toEqual([]);
+    expect(sent.workflows?.runs.find(({ runRef }) => runRef === run.runRef)).toMatchObject(choice === "取消" ? { status: "cancelled", effects: [] } : { status: "succeeded", effects: [{ state: "accepted" }] });
+    expect(sent.agentDispatch?.jobs[0]?.status).toBe(choice === "取消" ? "cancelled" : "completed");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("continues a queued supplement after the requester resolves a specialist file choice", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-pending-supplement-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-pending-supplement-files-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, text: string, dispatchDecision: unknown, options: Record<string, unknown> = {}) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, ...options,
+  });
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: false })) });
+    await send("om_held_file_choice", "列出 Agent 笔记让我选发哪个", { kind: "dispatch", agentId: "alice", requestId: null, summary: "选择运营笔记", message: "" }, { modelHold: true, modelToolCalls: [
+      { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+        candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } },
+    ] });
+    const busy = await running.until((state) => state.fixtureModelRequests?.length === 1);
+    await send("om_file_supplement", "补充：文件发完后解释如何整理商品标签", { kind: "supplement", agentId: null, requestId: busy.agentDispatch!.jobs[0]!.id, summary: "", message: "" });
+    await send("om_supplement_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" });
+    await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+    await running.post("/api/fixture/feishu/inbound", { modelControl: { messageId: "om_held_file_choice", action: "release" } });
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    await send("om_file_selection", "2", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" });
+    const done = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 5, 5000);
+    expect(done.agentDispatch?.jobs[0]?.status).toBe("completed");
+    expect(done.fixtureModelRequests).toHaveLength(2);
+    expect(JSON.stringify(done.fixtureModelRequests![1]!.input)).toContain("用户消息：\\n补充：文件发完后解释如何整理商品标签");
+    expect(done.agentFixtureOutboxes?.alice?.media).toEqual([expect.objectContaining({ chatId: "oc_alpha", fileName: "Agent Beta.md", bytesBase64: Buffer.from("# Agent Beta\n").toString("base64") })]);
+    expect(done.feishuFixtureMediaOutbox).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("accepts requester-only cancel and supplements while a specialist is still running", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-busy-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, sender: string, text: string, dispatchDecision: unknown, modelHold = false) => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, modelHold,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await send("om_held_alice", "ou_owner", "帮我整理商品", { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理商品", message: "" }, true);
+    const busy = await running.until((state) => state.fixtureModelRequests?.length === 1);
+    const requestId = busy.agentDispatch!.jobs[0]!.id;
+    expect(busy.agentDispatch?.jobs[0]?.status).toBe("running");
+    await send("om_other_cancel", "ou_colleague", "取消", { kind: "cancel", agentId: null, requestId, summary: "", message: "" });
+    const denied = await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    expect(denied.agentDispatch?.jobs[0]?.status).toBe("running");
+    await send("om_owner_cancel", "ou_owner", "取消", { kind: "cancel", agentId: null, requestId, summary: "", message: "" });
+    const cancelled = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(cancelled.agentDispatch?.jobs[0]?.status).toBe("cancelled");
+    expect(cancelled.agentFixtureOutboxes?.alice?.text.at(-1)?.message).toBe("已停止继续处理。已经完成的操作不会自动撤销。");
+    await send("om_held_bill", "ou_owner", "安排周末出行", { kind: "dispatch", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" }, true);
+    const bill = await running.until((state) => state.fixtureModelRequests?.length === 2);
+    const billId = bill.agentDispatch!.jobs.find(({ agentId }) => agentId === "bill")!.id;
+    await send("om_bill_extra", "ou_owner", "补充：预算 300 元", { kind: "supplement", agentId: null, requestId: billId, summary: "预算 300 元", message: "" });
+    await send("om_other_extra", "ou_colleague", "改为无限预算", { kind: "supplement", agentId: null, requestId: billId, summary: "无限预算", message: "" });
+    const stillBusy = await running.until((state) => state.fixtureTextOutbox?.length === 2);
+    expect(stillBusy.fixtureModelRequests).toHaveLength(2);
+    await running.post("/api/fixture/inbound", { modelControl: { messageId: "om_held_bill", action: "release" } });
+    const done = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 4);
+    expect(done.agentDispatch?.jobs.find(({ agentId }) => agentId === "bill")?.status).toBe("completed");
+    expect(done.fixtureModelRequests).toHaveLength(3);
+    expect(done.fixtureModelRequests![2]!.threadId).toBe(done.fixtureModelRequests![1]!.threadId);
+    expect(JSON.stringify(done.fixtureModelRequests![2]!.input)).toContain("补充：预算 300 元");
+    // Another person's control text can be inert discussion, but never the active request.
+    expect(JSON.stringify(done.fixtureModelRequests![2]!.input)).not.toContain("用户消息：\\n改为无限预算");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it.each(["restart", "cancel"] as const)("preserves queued supplements while result delivery is pending: %s", async (action) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-supplement-delivery-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, text: string, dispatchDecision: unknown, modelHold = false) => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, modelHold,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["accepted", "held"] } });
+    await send("om_bill_original", "安排周末出行", { kind: "dispatch", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" }, true);
+    const busy = await running.until((state) => state.fixtureModelRequests?.length === 1);
+    const requestId = busy.agentDispatch!.jobs[0]!.id;
+    await send("om_bill_supplement", "补充：预算 300 元", { kind: "supplement", agentId: null, requestId, summary: "", message: "" });
+    await send("om_intake_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" });
+    await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    await running.post("/api/fixture/inbound", { modelControl: { messageId: "om_bill_original", action: "release" } });
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    if (action === "restart") {
+      await running.crash(); running = await start(directory);
+      const done = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+      expect(done.agentDispatch?.jobs[0]?.status).toBe("completed");
+      expect(done.fixtureModelRequests).toHaveLength(1);
+      expect(JSON.stringify(done.fixtureModelRequests![0]!.input)).toContain("用户消息：\\n补充：预算 300 元");
+    } else {
+      await send("om_cancel_supplement", "取消后续补充", { kind: "cancel", agentId: null, requestId, summary: "", message: "" });
+      await send("om_cancel_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "取消后还有什么问题？" });
+      const cancelled = await running.until((state) => state.fixtureTextOutbox?.some(({ message }) => message === "取消后还有什么问题？") === true);
+      expect(cancelled.agentDispatch?.jobs[0]?.status).toBe("cancelled");
+      await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", releaseText: true } });
+      await running.close(); running = await start(directory);
+      expect((await running.state()).agentDispatch?.jobs[0]?.status).toBe("cancelled");
+      expect((await running.state()).fixtureModelRequests).toEqual([]);
+    }
+  } finally { await running?.crash(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("retries failed dispatch after restart without repeating a completed edit with a fresh read hash", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-retry-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-retry-files-"));
+  mkdirSync(join(business, "demo-vault", ".obsidian"), { recursive: true }); writeFileSync(join(business, "demo-vault", "sample.txt"), "x\n");
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  const tools = [
+    { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "sample.txt", kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+    { namespace: "files", tool: "read", arguments: { fileRef: { $fixtureToolResult: { call: 0, path: ["entries", 0, "fileRef"] } } } },
+    { namespace: "files", tool: "edit", arguments: { fileRef: { $fixtureToolResult: { call: 1, path: ["fileRef"] } }, expectedSha256: { $fixtureToolResult: { call: 1, path: ["sha256"] } }, oldText: "x", newText: "xx", replaceAll: true } },
+  ];
+  const send = (id: string, text: string, dispatchDecision: unknown, modelReply: string, sendFile = false) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision, modelToolCalls: [...tools, ...(sendFile ? [{ namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 2, path: ["fileRef"] } }] } }] : [])], modelReply,
+  });
+  try {
+    dispatchConfig(directory, true); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+    await send("om_jack_partial", "把 sample.txt 的 x 改为 xx，并整理报告、发回文件", { kind: "dispatch", agentId: "jack", requestId: null, summary: "修改样例并整理报告", message: "" },
+      JSON.stringify({ message: "已修改样例，但报告生成失败。", results: [{ subject: "修改样例并整理报告", status: "partial" }] }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(readFileSync(join(business, "demo-vault", "sample.txt"), "utf8")).toBe("xx\n");
+    expect(failed.agentFixtureOutboxes?.jack?.text.at(-1)?.message).toContain("已确认完成 1 次本地文件修改");
+    const requestId = failed.agentDispatch!.jobs[0]!.id;
+    await running.close(); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    expect((await running.state()).fixtureModelRequests).toEqual([]);
+    await send("om_jack_retry", "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
+      JSON.stringify({ message: "已保留修改并补齐报告。", results: [{ subject: "修改样例并整理报告", status: "completed" }] }), true);
+    const completed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(readFileSync(join(business, "demo-vault", "sample.txt"), "utf8")).toBe("xx\n");
+    expect(completed.fixtureModelRequests).toHaveLength(1);
+    expect(completed.agentFixtureOutboxes?.jack?.text.at(-1)?.message).toBe("文件已发送，请查收。");
+    expect(completed.agentFixtureOutboxes?.jack?.media).toEqual([expect.objectContaining({ fileName: "sample.txt", bytesBase64: Buffer.from("xx\n").toString("base64") })]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("shares only curated group facts across isolated role sessions and resets them after permission changes", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-memory-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, chat: string, agentId: string, text: string) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: chat, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } },
+    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: text, message: "" },
+  });
+  try {
+    dispatchConfig(directory, true);
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    configuration.feishu.groups.push({ chatId: "oc_beta", allowedSenderIds: ["ou_owner"] });
+    configuration.feishu.dispatch.groupChatIds.push("oc_beta");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    const binding = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")!;
+    running = await start(directory);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    await running.post("/api/fixture/workflow/inbound", { text: "PRIVATE_EXECUTION_MARKER。请记住私人信息。" });
+    const personal = await running.until((state) => state.weixinFixtureReplies?.length === 2);
+    const memory = new AccountMemoryStore(join(directory, "memory")), curator = new AccountMemoryToolHost(memory);
+    const seed = async (accountId: string, target: string, id: string, text: string) => {
+      expect(await curator.commit({ accountId, jobId: id, batchId: id, mutationPolicy: { mode: "free_add" }, evidenceEntryIds: [id],
+        evidenceTexts: { [id]: text }, evidenceOrigins: { [id]: { eventKey: id, target } } },
+      { batchId: id, basedOnRevision: memory.read(accountId).revision, decisions: [{ kind: "remember", category: "projects", value: text, evidenceEntryIds: [id], confidence: 1 }] })).toMatchObject({ status: "committed" });
+    };
+    const personalEntry = personal.codex.transcript.find((entry) => entry.role === "user" && entry.text.startsWith("PRIVATE_EXECUTION"))!;
+    await seed("fixture-bot", personalEntry.target, personalEntry.id, "PRIVATE_MEMORY_SENTINEL");
+    await send("om_alpha_seed", "oc_alpha", "alice", "请记住 ALPHA_BUSINESS_FACT");
+    const alpha = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    const alphaJob = alpha.agentDispatch!.jobs[0]!;
+    const alphaTarget = binding.owner.groupAddress("oc_alpha")!;
+    await seed(binding.owner.memoryScope(alphaTarget.accountId, alphaTarget.target), alphaTarget.target, alphaJob.id, "ALPHA_BUSINESS_FACT");
+    await send("om_beta_seed", "oc_beta", "alice", "请记住 BETA_BUSINESS_FACT");
+    const beta = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 4);
+    const betaJob = beta.agentDispatch!.jobs[1]!;
+    const betaTarget = binding.owner.groupAddress("oc_beta")!;
+    await seed(binding.owner.memoryScope(betaTarget.accountId, betaTarget.target), betaTarget.target, betaJob.id, "BETA_BUSINESS_FACT");
+    await send("om_alpha_bill", "oc_alpha", "bill", "请根据群业务事实安排出行");
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    await send("om_alpha_jack", "oc_alpha", "jack", "请根据群业务事实给出技术建议");
+    const shared = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(shared.fixtureModelRequests).toHaveLength(5);
+    const [privateRequest, aliceAlpha, aliceBeta, billAlpha, jackAlpha] = shared.fixtureModelRequests!;
+    expect(new Set([privateRequest!.threadId, aliceAlpha!.threadId, aliceBeta!.threadId, billAlpha!.threadId, jackAlpha!.threadId]).size).toBe(5);
+    for (const request of [billAlpha!, jackAlpha!]) {
+      expect(JSON.stringify(request.input)).toContain("ALPHA_BUSINESS_FACT");
+      expect(JSON.stringify(request.input)).not.toContain("BETA_BUSINESS_FACT");
+      expect(JSON.stringify(request.input)).not.toContain("PRIVATE_MEMORY_SENTINEL");
+      expect(JSON.stringify(request.input)).not.toContain("PRIVATE_EXECUTION_MARKER");
+    }
+    expect(JSON.stringify(aliceBeta!.input)).not.toContain("ALPHA_BUSINESS_FACT");
+    await running.close(); running = await start(directory);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    await send("om_bill_resumed", "oc_alpha", "bill", "继续规划");
+    const resumed = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(resumed.fixtureModelRequests![0]!.threadId).toBe(billAlpha!.threadId);
+    const notes = resumed.workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: false, write: false })) });
+    await send("om_bill_new_permissions", "oc_alpha", "bill", "按当前授权继续规划");
+    const changed = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 4);
+    expect(changed.fixtureModelRequests![1]!.threadId).not.toBe(billAlpha!.threadId);
+    expect(JSON.stringify(changed.fixtureModelRequests![1]!.input)).toContain("ALPHA_BUSINESS_FACT");
+    expect(memory.read("fixture-bot").entries.map(({ value }) => value)).toEqual(["PRIVATE_MEMORY_SENTINEL"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("retries only rejected reports without rerunning work and never retries unknown report delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-reports-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, text: string, dispatchDecision: unknown) => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", textOutcomes: ["accepted", "rejected"] } });
+    await send("om_report_rejected", "帮我整理商品", { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理商品", message: "" });
+    const finished = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    const requestId = finished.agentDispatch!.jobs[0]!.id;
+    expect(finished.agentFixtureOutboxes?.alice?.text).toHaveLength(1);
+    await send("om_retry_report", "只重发汇报", { kind: "retry_report", agentId: null, requestId, summary: "", message: "" });
+    const reported = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(reported.fixtureModelRequests).toHaveLength(1);
+    expect(reported.agentFixtureOutboxes?.alice?.text.at(-1)?.message).toBe("这是 fixture Codex 回复。");
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["accepted", "unknown"] } });
+    await send("om_report_unknown", "帮我安排出行", { kind: "dispatch", agentId: "bill", requestId: null, summary: "安排出行", message: "" });
+    const unknown = await running.until((state) => state.agentDispatch?.jobs.find(({ agentId }) => agentId === "bill")?.status === "completed" && state.agentFixtureOutboxes?.bill?.text.length === 2);
+    const billId = unknown.agentDispatch!.jobs.find(({ agentId }) => agentId === "bill")!.id;
+    await send("om_retry_unknown", "只重发汇报", { kind: "retry_report", agentId: null, requestId: billId, summary: "", message: "" });
+    const blocked = await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    expect(blocked.fixtureTextOutbox?.[0]?.message).toBe("这条汇报已被接收或发送结果无法确认，不能自动重发。业务操作不会重新执行。");
+    expect(blocked.fixtureModelRequests).toHaveLength(2);
+    expect(blocked.agentFixtureOutboxes?.bill?.text).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it.each(["member", "group", "application"] as const)("fails closed for an unavailable assignee and fences queued work after %s replacement", async (replacement) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-revocation-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, sender: string, agentId: string, modelHold = false, chatId = "oc_alpha") => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text: "处理当前请求" }) } },
+    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: "处理当前请求", message: "" }, modelHold,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "unavailable" } });
+    await send("om_assignee_offline", "ou_owner", "alice");
+    const unavailable = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    expect(unavailable.fixtureModelRequests).toEqual([]);
+    expect(unavailable.fixtureTextOutbox).toEqual([]);
+    expect(unavailable.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "ready" } });
+    await send("om_running_before_revocation", "ou_owner", "alice", true);
+    await running.until((state) => state.fixtureModelRequests?.length === 1);
+    await send("om_queued_before_revocation", "ou_owner", "alice");
+    const queued = await running.until((state) => state.agentDispatch?.jobs.length === 3);
+    expect(queued.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["failed", "running", "queued"]);
+    await running.close(); running = undefined;
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    if (replacement === "member") configuration.feishu.groups[0].allowedSenderIds = ["ou_colleague"];
+    else if (replacement === "group") {
+      configuration.feishu.groups[0].chatId = "oc_beta";
+      configuration.feishu.dispatch.groupChatIds = ["oc_beta"];
+    } else configuration.feishu.dispatch.agents[1].appId = "cli_dddddddddddddddd";
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    running = await start(directory);
+    await send("om_authorized_after_revocation", "ou_colleague", "bill", false, replacement === "group" ? "oc_beta" : "oc_alpha");
+    const restored = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(restored.fixtureModelRequests).toHaveLength(1);
+    expect(restored.agentFixtureOutboxes?.alice?.text).toEqual([]);
+    expect(restored.fixtureTextOutbox).toEqual([]);
+    expect(restored.agentDispatch?.jobs[2]?.status).toBe(replacement === "application" ? "failed" : "cancelled");
+    expect(restored.agentDispatch?.jobs.some(({ requester, status }) => requester === "ou_owner" && ["running", "queued"].includes(status))).toBe(false);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("reports confirmed file work after a hard interruption without automatically replaying it", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-crash-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-crash-files-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  try {
+    dispatchConfig(directory, true); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+    await running.post("/api/fixture/feishu/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: "om_crash_write", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [],
+          content: JSON.stringify({ text: "明天提醒我检查计划；先停用这个提醒。保存 crash-plan.txt，然后继续完善计划" }) } },
+      dispatchDecision: { kind: "dispatch", agentId: "jack", requestId: null, summary: "保存并完善计划", message: "" }, modelHold: true,
+      modelToolCalls: [
+        { namespace: "schedules", tool: "create", arguments: { name: "检查计划", instruction: "检查计划", reminderText: "该检查计划了。", reminderMode: "natural", delaySeconds: 86400, sourceText: "明天提醒我检查计划" } },
+        { namespace: "schedules", tool: "disable", arguments: { reference: { $fixtureToolResult: { call: 0, path: ["task", "id"] } }, expectedRevision: 1, sourceText: "先停用这个提醒" } },
+        { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: "crash-plan.txt", content: { $fixtureToolResult: { call: 1, path: ["status"] } }, overwrite: false } },
+      ],
+    });
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" &&
+      readFileSync(join(business, "demo-vault", "crash-plan.txt"), "utf8") === "disabled");
+    await running.crash(); running = undefined;
+    running = await start(directory, env);
+    const recovered = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 1);
+    expect(recovered.agentDispatch?.jobs[0]?.status).toBe("failed");
+    expect(recovered.fixtureModelRequests).toEqual([]);
+    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("服务中断");
+    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("已确认完成 1 次本地文件修改");
+    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("已确认完成 2 次定时任务操作");
+    expect(readFileSync(join(business, "demo-vault", "crash-plan.txt"), "utf8")).toBe("disabled");
+    expect(recovered.agentFixtureOutboxes?.alice?.text).toEqual([]);
+    expect(recovered.feishuFixtureTextOutbox).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("retains uncertain workflow ownership on explicit retry without starting another specialist turn", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-workflow-retry-"));
+  const business = mkdtempSync(join(tmpdir(), "dispatch-workflow-files-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business };
+  const send = (id: string, dispatchDecision: unknown) => running!.post("/api/fixture/feishu/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [],
+        content: JSON.stringify({ text: "保存并发回这个文件" }) } }, dispatchDecision,
+    modelToolCalls: [
+      { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: "uncertain.txt", content: "one submission", overwrite: false } },
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 0, path: ["fileRef"] } }] } },
+    ],
+  });
+  try {
+    dispatchConfig(directory, true); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+    await running.post("/api/fixture/feishu/inbound", { applicationControl: { agentId: "jack", mediaOutcomes: ["unknown"] } });
+    await send("om_unknown_file", { kind: "dispatch", agentId: "jack", requestId: null, summary: "保存并发送文件", message: "" });
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(failed.agentFixtureOutboxes?.jack?.media).toEqual([expect.objectContaining({ fileName: "uncertain.txt", bytesBase64: Buffer.from("one submission").toString("base64") })]);
+    expect(failed.workflows?.runs.filter(({ workflowId }) => workflowId === "weixin.send-files")).toEqual([expect.objectContaining({ status: "outcome_unknown", effects: [expect.objectContaining({ state: "unknown" })] })]);
+    const requestId = failed.agentDispatch!.jobs[0]!.id;
+    await running.close(); running = await start(directory, env);
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    await send("om_retry_unknown_file", { kind: "retry", agentId: null, requestId, summary: "", message: "" });
+    const retried = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 2);
+    expect(retried.fixtureModelRequests).toEqual([]);
+    expect(retried.agentFixtureOutboxes?.jack?.media).toEqual([]);
+    expect(retried.workflows?.runs.filter(({ workflowId }) => workflowId === "weixin.send-files")).toEqual([expect.objectContaining({ status: "outcome_unknown", effects: [expect.objectContaining({ state: "unknown" })] })]);
+    expect(retried.agentFixtureOutboxes?.jack?.text.at(-1)?.message).toContain("无法确认");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);

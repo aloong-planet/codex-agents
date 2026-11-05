@@ -44,6 +44,38 @@ export class LocalFileOperationStore {
     if (!columns.some((column) => column.name === "prepared_json")) {
       this.database.exec("ALTER TABLE local_file_operation ADD COLUMN prepared_json TEXT");
     }
+    this.database.exec(`CREATE TABLE IF NOT EXISTS dispatch_file_operation (
+      request_id TEXT NOT NULL, event_key TEXT NOT NULL, resource_key TEXT NOT NULL, logical_key TEXT NOT NULL,
+      operation_key TEXT NOT NULL, PRIMARY KEY(request_id, event_key, operation_key)
+    )`);
+  }
+
+  dispatchReplay(requestId: string, eventKey: string, resourceKey: string, logicalKey: string): LocalFileOperationRecord | undefined {
+    const unknown = this.database.prepare(`SELECT 1 FROM dispatch_file_operation AS binding
+      JOIN local_file_operation AS operation ON operation.operation_key = binding.operation_key
+      WHERE binding.request_id = ? AND binding.event_key = ? AND operation.status = 'started' LIMIT 1`).get(requestId, eventKey);
+    if (unknown) throw new Error("local_file_content_conflict");
+    const row = this.database.prepare(`SELECT operation_key FROM dispatch_file_operation
+      WHERE request_id = ? AND event_key = ? AND logical_key = ? ORDER BY rowid DESC LIMIT 1`).get(requestId, eventKey, logicalKey);
+    if (row) return this.get(String(row.operation_key));
+    if (this.database.prepare("SELECT 1 FROM dispatch_file_operation WHERE request_id = ? AND event_key = ? AND resource_key = ? LIMIT 1")
+      .get(requestId, eventKey, resourceKey)) throw new Error("local_file_content_conflict");
+    return undefined;
+  }
+
+  bindDispatch(requestId: string, eventKey: string, resourceKey: string, logicalKey: string, operationKey: string): void {
+    this.database.prepare("INSERT OR IGNORE INTO dispatch_file_operation VALUES (?, ?, ?, ?, ?)")
+      .run(requestId, eventKey, resourceKey, logicalKey, operationKey);
+  }
+
+  dispatchEvidence(requestId: string): { completed: number; unknown: number } {
+    const counts = { completed: 0, unknown: 0 };
+    for (const row of this.database.prepare(`SELECT operation.status, COUNT(DISTINCT operation.operation_key) AS count
+      FROM dispatch_file_operation AS binding JOIN local_file_operation AS operation ON operation.operation_key = binding.operation_key
+      WHERE binding.request_id = ? GROUP BY operation.status`).all(requestId)) {
+      counts[row.status === "completed" ? "completed" : "unknown"] = Number(row.count);
+    }
+    return counts;
   }
 
   get(operationKey: string): LocalFileOperationRecord | undefined {

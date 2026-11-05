@@ -2,12 +2,14 @@ import { readFileSync } from "node:fs";
 import { PersonalOwnerIdentity, type PersonalChannel, type PersonalChannelBinding, type PersonalOwnerConfiguration } from "./personal-owner-identity.js";
 import { OwnerNotificationRoute, type NotificationAddress } from "./notification-channel.js";
 import { FeishuConversationIdentity } from "./feishu-conversation-identity.js";
+import type { FeishuWebhookConfiguration } from "./feishu-webhook-receiver.js";
+import { parseFeishuDispatch, type FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 
 export type ChannelStartupEntry = {
   binding: Readonly<PersonalChannelBinding>;
 } & (
   | { channel: "weixin"; owner: PersonalOwnerIdentity }
-  | { channel: "feishu"; owner: FeishuConversationIdentity; connection: Readonly<{ appId: string; appSecret: string }> }
+  | { channel: "feishu"; owner: FeishuConversationIdentity; connection: Readonly<{ appId: string; appSecret: string }>; webhook?: Readonly<FeishuWebhookConfiguration>; dispatch?: Readonly<FeishuDispatchConfiguration> }
 );
 export type ChannelStartupConfiguration = ChannelStartupEntry & {
   enabledChannels: readonly PersonalChannel[];
@@ -64,7 +66,18 @@ export function parseChannelStartupConfiguration(value: unknown): ChannelStartup
       const appId = text(connection.appId);
       const appSecret = text(connection.appSecret);
       if (appId !== selected.binding.accountId) throw new Error("feishu_binding_invalid");
-      return Object.freeze({ ...selected, channel, owner: new FeishuConversationIdentity(selected.owner, appId, connection.groups === undefined ? [] : connection.groups), connection: Object.freeze({ appId, appSecret }) });
+      if (connection.receiveMode !== undefined && !["websocket", "webhook"].includes(String(connection.receiveMode))) throw new Error("feishu_receive_mode_invalid");
+      let webhook: Readonly<FeishuWebhookConfiguration> | undefined;
+      if (connection.receiveMode === "webhook") {
+        const input = record(connection.webhook);
+        if (typeof input.port !== "number" || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535 ||
+            typeof input.path !== "string" || input.path.length > 200 || !/^\/[A-Za-z0-9/_-]+$/.test(input.path) ||
+            Object.keys(input).some((key) => !["port", "path", "verificationToken", "encryptKey"].includes(key))) throw new Error("feishu_webhook_invalid");
+        webhook = Object.freeze({ port: input.port, path: input.path, verificationToken: text(input.verificationToken), encryptKey: text(input.encryptKey) });
+      } else if (connection.webhook !== undefined) throw new Error("feishu_receive_mode_invalid");
+      const owner = new FeishuConversationIdentity(selected.owner, appId, connection.groups === undefined ? [] : connection.groups);
+      const dispatch = connection.dispatch === undefined ? undefined : parseFeishuDispatch(connection.dispatch, { appId, appSecret }, owner);
+      return Object.freeze({ ...selected, channel, owner, connection: Object.freeze({ appId, appSecret }), ...(webhook ? { webhook } : {}), ...(dispatch ? { dispatch } : {}) });
     }));
     // This explicit, stable address names existing task storage, not the new recipient.
     const scopeInput = record(config.taskScope);

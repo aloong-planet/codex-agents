@@ -25,6 +25,8 @@ Cross-skill project facts are declared in the repository-root `capabilities.toml
 
 Group invocation, memory, model recovery, file access, pending continuation and scheduled delivery must preserve the conversation/requester boundaries in [ADR-0023](docs/adr/0023-isolate-feishu-group-authority.md).
 
+Deployments and file-tool acceptance must use the Node version pinned in CI; changing that version requires real permission-worker write and recovery validation, as described in [agent dispatch runtime decisions](docs/specs/agent-dispatch.md#implementation-decisions).
+
 ## Agent skills
 
 ### Issue tracker

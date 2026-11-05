@@ -12,7 +12,7 @@ The owner wants to use Weixin and Feishu private conversations without stopping 
 
 ## Solution
 
-Activate the configured private channels together behind one independent business core. Keep owner memory, permissions and tasks shared, conversation histories separate, and replies bound to their source. New tasks and plan reminders retain the channel where they were created. Existing tasks without an explicit delivery preference use Feishu for future notifications; already-created delivery records retain their original destinations and outcomes. Configuration changes still require a restart. Feishu groups use explicit local chat and member allowlists, shared context within each group, and independent memory and tasks. Ordinary group discussion is context; only an authorized member mentioning the bot can initiate a request.
+Activate the configured private channels together behind one independent business core. Keep owner memory, permissions and tasks shared, conversation histories separate, and replies bound to their source. New tasks and plan reminders retain the channel where they were created. Existing tasks without an explicit delivery preference use Feishu for future notifications; already-created delivery records retain their original destinations and outcomes. Configuration changes still require a restart. Feishu groups use explicit local chat and member allowlists, shared context within each group, and independent memory and tasks. In legacy group mode, ordinary discussion is context and only an authorized bot mention initiates a request. Explicitly enabled [agent dispatch](agent-dispatch.md) admits authorized ordinary messages under its separate recognition and confirmation rules.
 
 ## User Stories
 
@@ -57,9 +57,9 @@ As the owner, I can submit work in either chat without contaminating the other c
 
 As the owner, I can enable selected Feishu groups and members so those members can use the assistant together.
 
-- channel-switching::US-005/AC-01: Only a locally allowlisted group and a sender in that group's member list can initiate a request by an authenticated mention of this bot.
+- channel-switching::US-005/AC-01: Only a locally allowlisted group and a sender in that group's member list can initiate a request. Legacy mode requires an authenticated mention of this bot; enabled dispatch mode uses [agent-dispatch::US-001](agent-dispatch.md).
 - channel-switching::US-005/AC-02: Members in the same group share conversation history and eligible model context; different groups and private conversations remain separate.
-- channel-switching::US-005/AC-03: Ordinary messages from all human members of an enabled group supply context without invoking the model, tools, memory curation or task creation. Sender identity remains attached to each observation; an unauthorized mention is also observation only.
+- channel-switching::US-005/AC-03: In legacy mode, ordinary messages from all human members of an enabled group supply context without invoking the model, tools, memory curation or task creation. In dispatch mode, authorized ordinary messages additionally enter recognition under [agent-dispatch::US-001](agent-dispatch.md); guest messages remain observation only. Sender identity remains attached to each observation; an unauthorized mention is also observation only.
 - channel-switching::US-005/AC-04: Replies, errors, authorized file results and reminders return only to the source group. Joining a new group does not enable it automatically.
 - channel-switching::US-005/AC-05: The owner maintains group and member lists in local configuration. Changes take effect on restart; malformed or duplicate entries fail validation without silently broadening access.
 
@@ -77,7 +77,7 @@ As an authorized member, I can manage the group's tasks while keeping another me
 
 - channel-switching::US-007/AC-01: All authorized members of a group can create, inspect, edit, pause, resume and cancel its scheduled tasks and reminders. Lists, counts, pagination, history, direct references and explicit all-channel requests stay within that group.
 - channel-switching::US-007/AC-02: Group task execution, plan follow-ups and retries retain the group's trusted destination; neither private nor other-group tasks can be read, edited or delivered through it.
-- channel-switching::US-007/AC-03: A pending file choice, clarification or cancellation belongs to its original requester. Another member cannot select, cancel, supersede or recover that request; the original requester must mention the bot again to continue it.
+- channel-switching::US-007/AC-03: A pending file choice, clarification or cancellation belongs to its original requester. Another member cannot select, cancel, supersede or recover that request; legacy mode requires the original requester to mention the bot again; enabled dispatch mode permits the requester's ordinary continuation under [agent-dispatch::REQ-007](agent-dispatch.md).
 - channel-switching::US-007/AC-04: A new request by another member can coexist with the first member's Pending Request while sharing ordinary group conversation context.
 
 ## Functional Requirements
@@ -103,7 +103,7 @@ An invalid startup configuration, startup connection failure or active channel f
 
 ### channel-switching::REQ-007 Direct Feishu replies
 
-- channel-switching::REQ-007/AC-01: Feishu business messages do not send a separate automatic processing acknowledgement; ordinary replies, workflow results and failure notices are still delivered.
+- channel-switching::REQ-007/AC-01: Legacy Feishu business messages do not send a separate automatic processing acknowledgement. Enabled dispatch uses the task-specific selected-agent acceptance in [agent-dispatch::US-003/AC-01](agent-dispatch.md); ordinary replies, workflow results and failure notices are still delivered.
 - channel-switching::REQ-007/AC-02: Weixin retains its existing native typing and text-acknowledgement fallback behavior.
 
 ### channel-switching::REQ-008 Migrate future notification preferences
@@ -256,7 +256,7 @@ Recovery verification additionally injects process exit during a live turn and b
 
 - Hot configuration reload, runtime channel toggles, live task handover, cross-channel task transfer and switching barriers.
 - Unlisted groups, unlisted callers, automatic group enrollment and member management from chat.
-- Implicit reply-to-bot activation without a real mention and native group management screens.
+- Implicit reply-to-bot activation without a real mention in legacy mode, and native group management screens. Enabled dispatch admission is defined separately in [agent dispatch](agent-dispatch.md).
 - Automatic fallback or cross-channel resend on failure.
 - Copying Pending Requests or merging conversation histories across channels.
 - Native Feishu interactive cards, Feishu voice recognition and changes to existing Weixin voice support.

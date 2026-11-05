@@ -3,11 +3,12 @@ import type { SendTextResult } from "./channel-contract.js";
 /** Local artifact ceiling; a transport may impose a stricter submission limit. */
 export const MAX_MEDIA_ARTIFACT_BYTES = 100 * 1024 * 1024;
 
-export type MediaDeliveryDestination = { accountId: string; target: string };
+export type MediaDeliveryDestination = { accountId: string; target: string; senderAccountId?: string };
 
 export type MediaDeliveryInput = {
   accountId: string;
   target: string;
+  senderAccountId?: string;
   filePath: string;
   operationId: string;
 };

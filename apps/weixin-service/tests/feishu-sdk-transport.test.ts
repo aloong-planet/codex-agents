@@ -53,6 +53,25 @@ it("forwards bot identity only through an open SDK session", async () => {
   await expect(transport.botOpenId()).rejects.toThrow("feishu_bot_identity_unavailable");
 });
 
+it("starts an outbound-only application without a socket and retains its authenticated REST sender", async () => {
+  const lark = await import("@larksuiteoapi/node-sdk");
+  const token = vi.spyOn(lark.defaultHttpInstance, "post").mockResolvedValue(
+    { code: 0, tenant_access_token: "fixture-outbound-access", expire: 7200 } as unknown as Awaited<ReturnType<typeof lark.defaultHttpInstance.post>>);
+  const request = vi.spyOn(lark.defaultHttpInstance, "request").mockResolvedValue(
+    { code: 0, data: { message_id: "om_outbound" } } as unknown as Awaited<ReturnType<typeof lark.defaultHttpInstance.request>>);
+  const transport = new FeishuSdkTransport({ appId: "cli_outbound_only", appSecret: "fixture-secret", mode: "outbound" });
+  let ready = 0;
+  try {
+    await transport.start({ async message() { throw new Error("outbound_application_received_event"); }, ready() { ready++; }, unavailable() {} });
+    expect(ready).toBe(1);
+    expect(await transport.sendText({ chatId: "oc_group", text: "准备处理商品文案", uuid: "outbound-fixed" })).toEqual({ code: 0, data: { message_id: "om_outbound" } });
+    expect(request.mock.calls).toHaveLength(1);
+    expect(request.mock.calls[0]![0]).toMatchObject({ url: "https://open.feishu.cn/open-apis/im/v1/messages",
+      data: { receive_id: "oc_group", msg_type: "text", content: '{"text":"准备处理商品文案"}', uuid: "outbound-fixed" } });
+    expect(token.mock.calls[0]![1]).toEqual({ app_id: "cli_outbound_only", app_secret: "fixture-secret" });
+  } finally { transport.close(); request.mockRestore(); token.mockRestore(); }
+});
+
 it("resolves bot identity through the real pinned SDK and rejects unusable responses", async () => {
   const lark = await import("@larksuiteoapi/node-sdk");
   const { createFeishuSdkSession } = await import("../src/feishu-sdk-transport.js");
@@ -185,6 +204,7 @@ it("maps resource operations through the real pinned SDK and bounds token HTTP r
     expect(requests[0]).toMatchObject({ url: "https://open.feishu.cn/open-apis/im/v1/images", data: { image_type: "message", image: Buffer.from("image bytes") }, timeout: 15000 });
     expect(requests[1]).toMatchObject({ data: { file_type: "stream", file_name: "报告.pdf", file: Buffer.from("file bytes") }, timeout: 15000 });
     expect(requests[2]).toMatchObject({ params: { receive_id_type: "chat_id" }, data: { receive_id: "oc_owner", msg_type: "file", content: '{"file_key":"file_uploaded"}', uuid: "fixed-operation" }, timeout: 15000 });
+    expect(requests[3]).toMatchObject({ params: { user_id_type: "open_id" } });
     expect(requests[4]).toMatchObject({ url: "https://open.feishu.cn/open-apis/im/v1/messages/om_parent/resources/img_received", params: { type: "image" }, responseType: "stream", timeout: 15000 });
     expect(tokenCalls).toHaveLength(1);
     expect(tokenCalls[0]).toEqual(["https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", { app_id: "cli_media_projection", app_secret: "fixture-secret" }, expect.objectContaining({ timeout: 15000 })]);

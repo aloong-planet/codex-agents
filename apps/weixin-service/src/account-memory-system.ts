@@ -10,7 +10,7 @@ import { resolveMemoryTarget, type MemorySearchCandidate } from "./account-memor
 import type { AccountMemoryEmbeddingStatus } from "./account-memory-search-index.js";
 
 export type MemoryTurnEntry = {
-  source?: { eventKey: string; target: string };
+  source?: { eventKey: string; target: string; senderAccountId?: string };
   id: string;
   text: string;
   createdAt: number;

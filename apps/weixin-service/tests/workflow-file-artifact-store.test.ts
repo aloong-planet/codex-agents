@@ -12,6 +12,20 @@ const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((directory) => fs.rmSync(directory, { recursive: true, force: true })));
 
 describe("WorkflowFileArtifactStore", () => {
+  it("bounds complete turn text independently from legacy search queries", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-turn-text-"));
+    dirs.push(root);
+    const permissions = new WorkflowModulePermissionStore(path.join(root, "permissions.sqlite"));
+    const store = new WorkflowFileArtifactStore(path.join(root, "artifacts"), permissions);
+    try {
+      const text = "😀".repeat(16384);
+      const captured = store.captureTurnText("complete-turn", text);
+      expect(store.resolveQuery(captured.handle)).toBe(text);
+      expect(() => store.captureTurnText("too-large", `${text}a`)).toThrow("workflow_file_query_invalid");
+      expect(() => store.captureQuery("legacy-query", "a".repeat(501))).toThrow("workflow_file_query_invalid");
+    } finally { permissions.close(); }
+  });
+
   it("keeps an authorized local file behind a durable opaque handle", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "workflow-file-artifact-"));
     dirs.push(root);

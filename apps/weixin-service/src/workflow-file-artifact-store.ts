@@ -87,8 +87,16 @@ export class WorkflowFileArtifactStore {
   }
 
   captureQuery(triggerKey: string, query: string, options: { allowEmpty?: boolean } = {}): { handle: string; expiresAt: number } {
+    return this.captureText(triggerKey, query, options.allowEmpty === true, 500);
+  }
+
+  captureTurnText(triggerKey: string, text: string, options: { allowEmpty?: boolean } = {}): { handle: string; expiresAt: number } {
+    return this.captureText(triggerKey, text, options.allowEmpty === true, 64 * 1024);
+  }
+
+  private captureText(triggerKey: string, query: string, allowEmpty: boolean, maxBytes: number): { handle: string; expiresAt: number } {
     const normalized = query.trim();
-    if (!triggerKey || triggerKey.length > 512 || (!normalized && !options.allowEmpty) || Buffer.byteLength(normalized, "utf8") > 500) {
+    if (!triggerKey || triggerKey.length > 512 || (!normalized && !allowEmpty) || Buffer.byteLength(normalized, "utf8") > maxBytes) {
       throw new Error("workflow_file_query_invalid");
     }
     const handle = `filequery_${crypto.createHash("sha256").update(triggerKey).digest("hex").slice(0, 32)}`;

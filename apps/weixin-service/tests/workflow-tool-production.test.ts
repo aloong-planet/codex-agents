@@ -9,6 +9,7 @@ import { WeixinTurnAdapter } from "../src/weixin-turn-adapter.js";
 import { scriptedTurnRunner } from "./fixtures/scripted-turn-runner.js";
 
 import type { InboundTextEvent } from "../src/demo-service.js";
+import type { InboundContent } from "../src/channel-contract.js";
 import { WorkflowToolGateway } from "../src/workflow-tool-gateway.js";
 import { WorkflowToolHost } from "../src/workflow-tool-host.js";
 import {
@@ -21,6 +22,29 @@ import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalo
 import { WorkflowEngine, type WorkflowSubmission, type WorkflowTrigger } from "../src/workflow-engine.js";
 
 describe("WorkflowToolProductionControl", () => {
+  it("retains the complete specialist task brief without treating it as a short file search", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "long-task-binding-"));
+    const permissions = new WorkflowModulePermissionStore(path.join(root, "permissions.sqlite"));
+    const files = new WorkflowFileArtifactStore(path.join(root, "artifacts"), permissions);
+    const catalog = createProductionWorkflowToolCatalog({ files: false, media: true });
+    const engine = new WorkflowEngine(path.join(root, "workflows.sqlite"));
+    const host = new WorkflowToolHost(catalog, new WorkflowToolGateway(catalog, [], engine, () => { throw new Error("unused"); }));
+    const control = new WorkflowToolProductionControl(host, files);
+    const text = "请帮我整理闲鱼和淘宝的商品文案包，保存为 demo-vault 中的 alice-listing.md，并把文件发回本群。商品事实：九成新二手机械键盘，品牌 Keychron，型号 K2，蓝牙和有线连接，红轴，购于 2025 年，键帽轻微使用痕迹，功能正常，原包装和 USB 线齐全，售价 200 元，南京同城自提。需要两个平台各自的标题、描述、成色披露和买家 FAQ；未提供的信息注明待确认，不要捏造，不发布商品。";
+    const event: InboundContent = { key: "c".repeat(64), accountId: "bot", target: "group", senderId: "ou_owner", conversationType: "group", text,
+      messageId: "long-task", source: "text", receivedAt: Date.now() };
+    try {
+      expect(Buffer.byteLength(text)).toBeGreaterThan(500);
+      const binding = await control.bind("thread", event);
+      try {
+        expect(files.resolveQuery(files.queryHandle(event.key)!)).toBe(text);
+        expect(binding.snapshot()).toMatchObject({ owner: "model" });
+      } finally { await binding.release(); }
+      expect(files.queryHandle(event.key)).toBeNull();
+      expect(() => files.captureQuery("legacy-search", text)).toThrow("workflow_file_query_invalid");
+    } finally { await engine.close(); permissions.close(); fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
   it("binds a textless attachment without inventing original user text", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "media-binding-"));
     const permissions = new WorkflowModulePermissionStore(path.join(root, "permissions.sqlite"));
@@ -136,7 +160,7 @@ describe("WorkflowToolProductionControl", () => {
       bind: vi.fn(() => ({ seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" as const }), release: releaseHost })),
     };
     const fileArtifacts = {
-      captureQuery: vi.fn(() => ({
+      captureTurnText: vi.fn(() => ({
         handle: "filequery_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         expiresAt: 1_788_286_400_000,
       })),
@@ -173,7 +197,7 @@ describe("WorkflowToolProductionControl", () => {
       bind: vi.fn(() => ({ seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" as const }), release: releaseHost })),
     };
     const fileArtifacts = {
-      captureQuery: vi.fn(() => ({
+      captureTurnText: vi.fn(() => ({
         handle: "filequery_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         expiresAt: 1_788_286_400_000,
       })),
@@ -216,7 +240,7 @@ describe("WorkflowToolProductionControl", () => {
       bind: vi.fn(() => { throw new Error("workflow_tool_turn_already_bound"); }),
     };
     const fileArtifacts = {
-      captureQuery: vi.fn(() => ({
+      captureTurnText: vi.fn(() => ({
         handle: "filequery_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         expiresAt: 1_788_286_400_000,
       })),

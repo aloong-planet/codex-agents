@@ -94,6 +94,12 @@ export type DeliveryReference = {
 };
 
 export type InboundMessage = DeliveryReference & {
+  /** Host-selected execution and sending identity; never taken from model tool arguments. */
+  agentId?: string;
+  dispatchRequestId?: string;
+  dispatchRetry?: boolean;
+  senderAccountId?: string;
+  mentionedAgentIds?: string[];
   discussion?: Array<{ key: string; senderId: string; text: string; receivedAt: number }>;
   messageId: string;
   source: "text" | "voice" | "media";

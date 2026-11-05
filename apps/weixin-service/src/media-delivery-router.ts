@@ -7,7 +7,7 @@ export class MediaDeliveryRouter implements MediaDeliveryPort {
   private readonly routes: readonly MediaRoute[];
 
   constructor(routes: readonly MediaRoute[]) {
-    if (routes.length === 0 || new Set(routes.map(({ destination }) => JSON.stringify([destination.accountId, destination.target]))).size !== routes.length) {
+    if (routes.length === 0 || new Set(routes.map(({ destination }) => JSON.stringify([destination.accountId, destination.target, destination.senderAccountId]))).size !== routes.length) {
       throw new Error("media_routes_invalid");
     }
     this.routes = routes.map(({ destination, delivery }) => ({ destination: { ...destination }, delivery }));
@@ -27,6 +27,6 @@ export class MediaDeliveryRouter implements MediaDeliveryPort {
   }
 
   private resolve(destination: MediaDeliveryDestination): MediaDeliveryPort | undefined {
-    return this.routes.find((route) => route.destination.accountId === destination.accountId && route.destination.target === destination.target)?.delivery;
+    return this.routes.find((route) => route.destination.accountId === destination.accountId && route.destination.target === destination.target && route.destination.senderAccountId === destination.senderAccountId)?.delivery;
   }
 }

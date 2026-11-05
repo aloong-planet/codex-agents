@@ -30,6 +30,7 @@ export class NotificationChannelRouter implements NotificationChannel {
   }
 
   private resolve(destination: NotificationDestination): NotificationChannel | undefined {
+    if (destination.senderAccountId && (destination.channel !== "feishu" || !destination.target.startsWith("feishu.group."))) return undefined;
     return this.routes.find((route) => route.destination.channel === (destination.channel ?? "weixin") &&
       route.destination.accountId === destination.accountId && route.destination.target === destination.target)?.channel;
   }

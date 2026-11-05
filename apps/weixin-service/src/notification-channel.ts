@@ -1,7 +1,7 @@
 import type { SendTextResult } from "./channel-contract.js";
 
 export type NotificationAddress = { accountId: string; target: string };
-export type NotificationDestination = NotificationAddress & { channel?: "weixin" | "feishu" };
+export type NotificationDestination = NotificationAddress & { channel?: "weixin" | "feishu"; senderAccountId?: string };
 export type GroupNotificationScope = { memoryAccountId: string; destination: NotificationDestination & { channel: "feishu" } };
 export type NotificationChannelState = { enabled: boolean; credentialStatus: "usable" | "stale"; credentialGeneration: string; contextGeneration: string | null; contextUpdatedAt?: number };
 export interface NotificationChannel {
@@ -45,14 +45,15 @@ export class OwnerNotificationRoute {
     return this.destinations.some((item) => sameAddress(address, item)) ? { ...this.scope } : undefined;
   }
 
-  capture(address: NotificationAddress): NotificationDestination | undefined {
+  capture(address: NotificationAddress & { senderAccountId?: string }): NotificationDestination | undefined {
     const destination = this.destinations.find((item) => sameAddress(address, item)) ?? this.groups.find((item) => sameAddress(address, item.destination))?.destination;
-    return destination ? { ...destination } : undefined;
+    if (address.senderAccountId && (!address.target.startsWith("feishu.group.") || !/^cli_[a-fA-F0-9]{16}$/.test(address.senderAccountId))) return undefined;
+    return destination ? { ...destination, ...(address.senderAccountId ? { senderAccountId: address.senderAccountId } : {}) } : undefined;
   }
 
   resolve(scope: NotificationAddress, preference?: NotificationDestination): NotificationDestination | undefined {
     const group = this.groups.find((item) => sameAddress(item.destination, scope));
-    if (group) return !preference || (sameAddress(group.destination, preference) && preference.channel === "feishu") ? { ...group.destination } : undefined;
+    if (group) return !preference ? { ...group.destination } : (sameAddress(group.destination, preference) && preference.channel === "feishu") ? { ...preference } : undefined;
     if (!sameAddress(scope, this.scope)) return undefined;
     if (preference) return this.destinations.some((item) => sameAddress(item, preference) && (preference.channel ?? "weixin") === item.channel) ? { ...preference } : undefined;
     if (!this.capturesCreationDestination) return { ...this.selected };
@@ -75,9 +76,9 @@ export class OwnerNotificationRoute {
     return accountId === this.memoryAccountId && this.destinations.some((item) => targets.includes(item.target)) ? { ...this.scope } : undefined;
   }
 
-  captureMemory(accountId: string, target: string): NotificationDestination | undefined {
+  captureMemory(accountId: string, target: string, senderAccountId?: string): NotificationDestination | undefined {
     const group = this.groups.find((item) => item.memoryAccountId === accountId && item.destination.target === target);
-    if (group) return { ...group.destination };
+    if (group) return this.capture({ ...group.destination, ...(senderAccountId ? { senderAccountId } : {}) });
     if (accountId !== this.memoryAccountId) return undefined;
     const matches = this.destinations.filter((item) => item.target === target);
     return matches.length === 1 ? { ...matches[0]! } : undefined;
