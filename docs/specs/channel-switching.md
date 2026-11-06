@@ -1,10 +1,12 @@
 # Personal channels and Feishu groups
 
-> Status: startup supports one or both bound personal channels and allowlisted Feishu groups. Private owner memory is shared; each group has separate shared context, memory and tasks.
+> Status: startup supports one or both bound personal channels and allowlisted Feishu groups. General-assistant private owner memory is shared; each group has separate shared context, memory and tasks.
 > Deployed: on 2026-11-05, the owner confirmed real-group bot mentions and replies, recall of ordinary group discussion, and a one-time reminder returning to the original group, using release `20261105-feishu-groups-626d865`.
 > Pending: remaining real-group observations include multiple members, cross-group/private memory boundaries, file choices, restart and revocation; follow the [group acceptance procedure](../../apps/weixin-service/README.md#real-group-acceptance).
 > Pending: real-channel observations remain for task lists, reminders, other media/pending choices, shared curated memory and restart recovery. Follow the [acceptance procedure](../../apps/weixin-service/README.md#real-channel-acceptance); fixture evidence and accepted subsets do not establish the remaining phone observations.
 > Related: [workflow behavior](workflow-runs.md), [module permissions](workflow-module-permissions.md), ADR-0004, ADR-0008, ADR-0009, ADR-0010.
+
+This specification covers the general assistant channels and group use. [Penny private bookkeeping](finance-assistant.md) has a separate application, financial history and owner binding; it does not participate in shared personal memory or the pairing flow below.
 
 ## Problem Statement
 

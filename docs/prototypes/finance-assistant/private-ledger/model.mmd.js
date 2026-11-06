@@ -1,0 +1,8 @@
+// 派生文件:由 sync-mmd.mjs 从本目录 *.mmd 生成,勿手改;改图请改 .mmd 后重跑脚本。
+window.MERMAID_SOURCES = window.MERMAID_SOURCES || {};
+window.MERMAID_SOURCES["finance-assistant/private-ledger"] = [
+  {
+    "title": "Penny 私聊记账：确认前不计入收支",
+    "src": "%% title: Penny 私聊记账：确认前不计入收支\n%%{init: {\n  'theme': 'base',\n  'htmlLabels': false,\n  'state': { 'htmlLabels': false },\n  'flowchart': { 'htmlLabels': false },\n  'themeVariables': {\n    'primaryColor': '#ECECFF',\n    'primaryBorderColor': '#D5D5FF',\n    'primaryTextColor': '#000000',\n    'lineColor': '#757575',\n    'textColor': '#212121',\n    'edgeLabelBackground': 'transparent',\n    'noteBkgColor': '#FFF6B8',\n    'noteBorderColor': '#E4C800',\n    'noteTextColor': '#5C5100',\n    'tertiaryColor': '#f5f5f5',\n    'background': '#FFFFFF'\n  }\n}}%%\nstateDiagram-v2\n  direction LR\n  state \"ready\" as ready\n  state \"needs_details\" as needs_details\n  state \"awaiting_confirmation\" as awaiting_confirmation\n  state \"committed\" as committed\n  state \"cancelled\" as cancelled\n  state \"rejected\" as rejected\n  [*] --> ready: 明确文字\n  [*] --> awaiting_confirmation: 文件 / 清晰截图 / 撤销\n  [*] --> needs_details: 信息不清\n  [*] --> rejected: 群聊 / 非本人\n  [*] --> committed: 只读查询\n  ready --> committed: post\n  needs_details --> awaiting_confirmation: fill_amount\n  awaiting_confirmation --> awaiting_confirmation: choose_personal / choose_business\n  awaiting_confirmation --> committed: confirm\n  ready --> cancelled: cancel\n  needs_details --> cancelled: cancel\n  awaiting_confirmation --> cancelled: cancel\n  committed --> [*]\n  cancelled --> [*]\n  rejected --> [*]"
+  }
+];

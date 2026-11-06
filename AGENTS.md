@@ -27,6 +27,8 @@ Group invocation, memory, model recovery, file access, pending continuation and 
 
 Deployments and file-tool acceptance must use the Node version pinned in CI; changing that version requires real permission-worker write and recovery validation, as described in [agent dispatch runtime decisions](docs/specs/agent-dispatch.md#implementation-decisions).
 
+Financial state, attachments, execution history and reply destinations must remain owner-bound and separate from general personal memory and group dispatch under [ADR-0025](docs/adr/0025-isolate-private-financial-authority.md).
+
 ## Agent skills
 
 ### Issue tracker

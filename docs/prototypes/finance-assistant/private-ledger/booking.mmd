@@ -1,0 +1,43 @@
+%% title: Penny 私聊记账：确认前不计入收支
+%%{init: {
+  'theme': 'base',
+  'htmlLabels': false,
+  'state': { 'htmlLabels': false },
+  'flowchart': { 'htmlLabels': false },
+  'themeVariables': {
+    'primaryColor': '#ECECFF',
+    'primaryBorderColor': '#D5D5FF',
+    'primaryTextColor': '#000000',
+    'lineColor': '#757575',
+    'textColor': '#212121',
+    'edgeLabelBackground': 'transparent',
+    'noteBkgColor': '#FFF6B8',
+    'noteBorderColor': '#E4C800',
+    'noteTextColor': '#5C5100',
+    'tertiaryColor': '#f5f5f5',
+    'background': '#FFFFFF'
+  }
+}}%%
+stateDiagram-v2
+  direction LR
+  state "ready" as ready
+  state "needs_details" as needs_details
+  state "awaiting_confirmation" as awaiting_confirmation
+  state "committed" as committed
+  state "cancelled" as cancelled
+  state "rejected" as rejected
+  [*] --> ready: 明确文字
+  [*] --> awaiting_confirmation: 文件 / 清晰截图 / 撤销
+  [*] --> needs_details: 信息不清
+  [*] --> rejected: 群聊 / 非本人
+  [*] --> committed: 只读查询
+  ready --> committed: post
+  needs_details --> awaiting_confirmation: fill_amount
+  awaiting_confirmation --> awaiting_confirmation: choose_personal / choose_business
+  awaiting_confirmation --> committed: confirm
+  ready --> cancelled: cancel
+  needs_details --> cancelled: cancel
+  awaiting_confirmation --> cancelled: cancel
+  committed --> [*]
+  cancelled --> [*]
+  rejected --> [*]

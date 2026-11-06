@@ -1,8 +1,10 @@
 # codex-weixin
 
-A local personal assistant using Codex App Server, with independently enabled Weixin iLink and Feishu channels, including allowlisted Feishu group conversations. Private chats share owner memory while each group has its own shared context, memory and tasks. Group and member access is configured locally and takes effect on restart.
+A local personal assistant using Codex App Server, with independently enabled Weixin iLink and Feishu channels, including allowlisted Feishu group conversations. The general-assistant private chats share owner memory while each group has its own shared context, memory and tasks. Group and member access is configured locally and takes effect on restart.
 
 Selected groups can enable automatic task dispatch: Sam interprets authorized members' ordinary messages and coordinates Alice (commerce), Bill (daily life) and Jack (development). Each specialist accepts and reports work using its own bot identity. Inferred tasks wait for their author's confirmation. See [dispatch setup and acceptance](docs/ops/feishu-agent-dispatch.md) for the required applications, authenticated callbacks and deployment checks.
+
+Penny provides separate owner-only [private bookkeeping](docs/ops/penny-private-bookkeeping.md): record clear text, review payment screenshots before confirmation, and query separate personal/business CNY books. Its financial history does not enter shared personal or group memory. Statement-file import is unavailable.
 
 ## 目录
 

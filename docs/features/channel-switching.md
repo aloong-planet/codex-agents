@@ -4,7 +4,7 @@
 
 ## Overview
 
-The owner can use personal Weixin and Feishu chats and enable selected people in selected Feishu groups. Private chats retain personal continuity; each group shares its own discussion, memory and tasks.
+The owner can use personal Weixin and Feishu chats and enable selected people in selected Feishu groups. General-assistant private chats retain personal continuity; each group shares its own discussion, memory and tasks.
 
 ## Capabilities
 
@@ -13,7 +13,7 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 - Feishu supports text, images, files, supported rich text and text reminders. Private chats and mention-only groups reply directly without an automatic processing acknowledgement; dispatch specialists announce the accepted task. Weixin retains its typing indication and fallback acknowledgement.
 - Current, quoted and recent images and authorized local files can be selected and sent. Replies, errors and media return to the conversation that requested them.
 - Saved choices resume in their original conversation after restart subject to current permissions. In a group, only the original requester can choose, clarify or cancel; mention-only groups require another bot mention. Another member's request can coexist.
-- Private chats share curated personal memory. Each group recalls and saves only its own memory, including plans, independently of private chats and other groups.
+- General-assistant private chats share curated personal memory; [Penny bookkeeping](finance-assistant.md) has separate private financial history. Each group recalls and saves only its own memory, including plans, independently of private chats and other groups.
 - Members share their group's discussion history; private chats and different groups have separate contexts and message order. Other conversations can accept work while one is busy.
 - Ordinary messages from all human members in an enabled group can inform a later answer, with their authors retained. In mention-only groups they do not themselves trigger replies or operations. Unlisted members cannot initiate work in either mode.
 - Authorized group members use the owner's existing business-file grants. They gain no additional directories and cannot read service-private state or personal model memory through those grants.

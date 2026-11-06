@@ -28,6 +28,10 @@ pnpm start
 
 Configure the enabled channels below before starting. When Weixin is enabled, open <http://127.0.0.1:4317> for its existing management panel. Local status at <http://127.0.0.1:4317/api/state> includes independent `channels.weixin` and `channels.feishu` enabled/readiness fields. Feishu-only mode has read-only status and reuses saved permissions; there is no new permission editor.
 
+## Penny private bookkeeping
+
+Penny is an optional separate Feishu private bot configured through `PENNY_CONFIG_PATH`. It records clear text, previews payment images and calculates separate personal/business CNY books; statement-file import is unavailable. Its history is separate from the general assistant memory described below. See [Penny setup and owner acceptance](../../docs/ops/penny-private-bookkeeping.md) for its app-scoped binding, private credentials, callback route and test sequence. Do not use the general pairing command below to replace the existing Feishu binding with Penny.
+
 ## Channel configuration
 
 Use `CHANNEL_CONFIG_PATH=/absolute/private/channel.json`, or place `channel.json` beside the existing private `state.json`. Keep its parent private and its file readable only by the owner (`0700` directory, `0600` file). Do not commit it: the Feishu application secret is sensitive.
