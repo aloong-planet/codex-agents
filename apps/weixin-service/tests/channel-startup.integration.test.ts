@@ -157,6 +157,32 @@ it("contains an invalid Penny configuration without blocking existing private me
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+it("contains Penny callback startup failure while later Weixin messages still succeed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "penny-port-conflict-"));
+  const occupied = createServer();
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    await new Promise<void>((resolve) => occupied.listen(0, "127.0.0.1", resolve));
+    const address = occupied.address();
+    if (!address || typeof address === "string") throw new Error("no_port");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    writeFileSync(join(directory, "penny.json"), JSON.stringify({ appId: "cli_eeeeeeeeeeeeeeee", appSecret: "PENNY_SECRET_UNAVAILABLE",
+      tenantKey: "penny-tenant", ownerOpenId: "ou_pennyowner", privateChatId: "oc_pennyprivate",
+      webhook: { port: address.port, path: "/feishu/penny/events", verificationToken: "penny-token", encryptKey: "penny-key" },
+    }), { mode: 0o600 });
+    running = await start(directory, { PENNY_CONFIG_PATH: join(directory, "penny.json") });
+    await running.until((state) => state.penny?.error === "penny_startup_unavailable");
+    await running.post("/api/fixture/workflow/inbound", { text: "Penny 端口冲突后继续微信对话" });
+    const result = await running.until((state) => state.weixinFixtureReplies?.length === 2);
+    expect(result.penny).toEqual({ configured: true, ready: false, error: "penny_startup_unavailable" });
+    expect(result.weixinFixtureReplies?.map((reply) => reply.message)).toEqual(["已收到，正在处理。", "这是 fixture Codex 回复。"]);
+    expect(JSON.stringify(result)).not.toContain("PENNY_SECRET_UNAVAILABLE");
+  } finally {
+    await running?.close(); await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+}, 30000);
+
 it("receives signed webhook events through real main and replies once through the configured Feishu sender", async () => {
   const directory = mkdtempSync(join(tmpdir(), "channel-webhook-main-"));
   const callbackPort = await freePort();

@@ -117,6 +117,36 @@ describe("private financial ledger", () => {
     expect(recovered.query(turn("query"), { ...november, book: "business" }).records).toHaveLength(2);
   });
 
+  it("rolls back every row and source identity when screenshot confirmation fails partway through", () => {
+    const { open } = setup(), ledger = open();
+    ledger.record(turn("original-income"), [{ kind: "income", amount: "100", date: "2026-11-01", description: "original sale" }]);
+    const candidate: FinanceImport = { kind: "screenshot", rows: [
+      { draft: { kind: "expense", amount: "10", date: "2026-11-06", description: "first valid expense" }, source: { profile: "normalized-fixture", eventId: "rollback-first" } },
+      { draft: { kind: "expense_refund", amount: "20", date: "2026-11-06", description: "refund with wrong direction", refundOf: { recordRef: "F00000001" } },
+        source: { profile: "normalized-fixture", eventId: "rollback-refund" } },
+    ] };
+    const preview = ledger.prepareImport(turn("screenshot"), candidate);
+    expect(preview.rows).toHaveLength(2);
+    expect(preview.rows.map((row) => row.issue)).toEqual([undefined, undefined]);
+    ledger.markPresented(turn("shown"), preview.id, 1);
+    expect(() => ledger.confirm(confirmation(preview.id, 1), preview.id, 1)).toThrow("finance_refund_original_invalid");
+    expect(ledger.query(turn("query"), november).records.map((record) => record.ref)).toEqual(["F00000001"]);
+    ledger.close(); const recovered = open();
+    expect(recovered.preview(turn("preview"), preview.id)).toMatchObject({ status: "pending", revision: 1, presentedRevision: 1 });
+    expect(recovered.inspect(turn("original"), "F00000001").history).toMatchObject([{ revision: 1, amountMinor: "10000" }]);
+    expect(recovered.query(turn("query"), november).totals).toMatchObject({ netIncome: "100.00", netExpenses: "0.00" });
+    expect(() => recovered.confirm(confirmation(preview.id, 1), preview.id, 1)).toThrow("finance_refund_original_invalid");
+    const corrected: FinanceImport = { kind: "screenshot", rows: [candidate.rows[0]!, {
+      ...candidate.rows[1]!, draft: { kind: "income_refund", amount: "20", date: "2026-11-06", description: "seller refund", refundOf: { recordRef: "F00000001" } },
+    }] };
+    const revised = recovered.reviseImport(turn("fix-refund-direction"), preview.id, 1, corrected);
+    expect(revised.rows.map((row) => row.duplicateRef)).toEqual([undefined, undefined]);
+    recovered.markPresented(turn("revised-shown"), preview.id, 2);
+    const result = recovered.confirm(confirmation(preview.id, 2, "confirm-revised"), preview.id, 2);
+    expect(result).toMatchObject({ records: [{ ref: "F00000002", amountMinor: "1000" }, { ref: "F00000003", amountMinor: "2000" }], skipped: { duplicates: 0, excluded: 0 } });
+    expect(recovered.query(turn("query"), november).totals).toMatchObject({ netIncome: "80.00", netExpenses: "10.00" });
+  });
+
   it("keeps correction history and confirms a withdrawal once across two open ledger instances", () => {
     const { open } = setup(), ledger = open();
     ledger.record(turn("lunch"), [{ kind: "expense", amount: "35", description: "午饭" }]);
