@@ -287,7 +287,7 @@ metrics 使用低优先级排队：默认总队列仍为 256 条，其中预留 
 
 - **FR-01** 主模型拥有回复权时，最终答复为包含 message 字符串与 results 数组的严格对象；每个结果仅包含 subject 字符串和 status 枚举，不接受缺字段、错误类型或额外字段。
 - **FR-02** 普通聊天没有业务操作结论时返回 results 空数组；空数组不同于未产生结构化结果。
-- **FR-03** results 按本轮业务目标组织，而非按 tool 调用组织；同一目标经过多次查询仍是一项，独立目标可有多项，不因数组增加多工作流执行能力。
+- **FR-03** results 按本轮业务目标组织，而非按 tool 调用组织；同一目标经过多次查询仍是一项，独立目标可有多项，不因数组增加多工作流执行能力。 Only user-requested goals belong in the results; explicitly excluded actions do not become additional goals. Providing code and test cases without running them can complete that request, with execution honestly reported as unperformed. If execution itself was requested but could not happen, that goal remains incomplete.
 - **FR-04** subject 只是简短业务目标描述，不是稳定 ID，不用于绑定、路由、选择或执行；不得以 subject 的固定措辞作为测试真值。
 - **FR-05** status=completed 表示所述业务目标已经完成，不表示手机已收到或所有其他目标均完成。
 - **FR-06** status=partial 表示同一业务目标只完成一部分；独立目标分别成功与失败时分别报告，不额外插入汇总 partial。

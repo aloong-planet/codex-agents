@@ -16,6 +16,7 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
 // Cancel uses a canned fixture Router decision; this verifies host effects, not live-model semantics.
 // Production coordinator JSON decoding and tool-free invocation are covered in agent-dispatch-classifier.test.ts.
+// DISPATCH_RESULT_SCOPE_LIVE=1 opts into real model goal-scope checks; all channel sends remain fixtures.
 type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
   workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
@@ -822,6 +823,36 @@ it("dispatches an ordinary group request once and reports using the selected spe
     console.log(JSON.stringify({ kind: "dispatch_explicit_request", command: "帮我整理闲鱼商品描述", jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+it.skipIf(process.env.DISPATCH_RESULT_SCOPE_LIVE !== "1")("reports only requested specialist goals when test execution is excluded", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-result-scope-live-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, { WORKFLOW_SIMULATOR_MODEL: "live" });
+    const cases = [
+      { text: "请分析 TypeScript 函数 function discount(price: number, off: number) { return price - off; }。要求结果不能为负数；请在本群回复修正代码和 3 个边界测试案例，并明确测试尚未运行。不要修改文件或运行命令。", status: "completed" },
+      { text: "新任务：请实际运行 TypeScript 编译器来验证 function discount(price: number, off: number) { return Math.max(0, price - off); }，必须给出真实执行结果；不能运行就明确说明，不要把代码审阅当成执行成功。", status: "failed" },
+    ];
+    for (const [index, sample] of cases.entries()) {
+      const before = await running.state();
+      const replyCount = before.agentFixtureOutboxes?.jack?.text.length ?? 0;
+      await running.post("/api/fixture/inbound", { event: { app_id: "cli_0123456789abcdef",
+        sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: `om_live_result_scope_${index}`, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group",
+          message_type: "text", mentions: [], content: JSON.stringify({ text: sample.text }) } } });
+      const result = await running.until((state) => (state.agentDispatch?.jobs.length ?? 0) === index + 1 &&
+        ["completed", "failed", "waiting", "cancelled"].includes(state.agentDispatch!.jobs[index]!.status) &&
+        (state.agentFixtureOutboxes?.jack?.text.length ?? 0) >= replyCount + 2, 180000);
+      const job = result.agentDispatch!.jobs[index]!;
+      const reply = result.agentFixtureOutboxes!.jack!.text.at(-1)!.message;
+      console.log(JSON.stringify({ kind: "dispatch_result_scope_live", command: sample.text, job, reply }));
+      expect(job.agentId).toBe("jack");
+      expect(job.status).toBe(sample.status);
+      if (index === 0) expect(reply).toMatch(/测试.{0,8}(?:未|没有).{0,4}(?:运行|执行)/u);
+    }
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 390000);
 
 function dispatchConfig(directory: string, dual = false) {
     const configuration = config("feishu");
