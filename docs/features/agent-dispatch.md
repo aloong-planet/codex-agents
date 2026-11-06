@@ -17,6 +17,7 @@ Authorized members of selected Feishu groups can ask for help in ordinary discus
 - Same-group specialists share curated business facts while keeping separate execution histories. Private and other-group memories remain separate.
 - Authorized members retain their existing file access. File choices stay with their requester; all authorized members can manage the group's scheduled tasks. Files and reminders retain their originating specialist and group after restart.
 - Duplicate messages do not start duplicate work. Saved queued work can recover after restart; interrupted work reports failure and awaits an explicit retry when safe continuation is unavailable.
+- Completion is assessed against the requested work. When you ask for code and test cases without execution, delivering them can complete the request while clearly stating that tests were not run. Requested execution that cannot happen remains incomplete.
 - Business completion and report delivery are separate. Retrying a rejected report does not execute the task again; accepted or uncertain sends are not automatically repeated.
 
 ## Boundaries and non-goals

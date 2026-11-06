@@ -59,6 +59,7 @@ export function parseStoredMainBusinessResult(value: unknown): StoredMainBusines
 export const MAIN_REPLY_INSTRUCTIONS = [
   "最终答复只输出符合 outputSchema 的 JSON：message 是发给用户的自然中文正文，results 是本轮业务目标的结果数组；普通聊天使用空数组。",
   "每项 subject 是简短目标说明，不是 ID；一个目标的多次工具调用归为一项，独立目标可分别报告。",
+  "results 只列用户本轮实际要求完成的目标，不得把用户明确排除或禁止的动作新增为目标。例如只要求提供代码和测试用例、明确不要运行时，交付代码和用例即可分别记 completed；测试尚未运行应在 message 中如实说明，不新增运行测试的失败项。若用户实际要求运行而未能运行，则该目标必须如实记为未完成，不能用代码审阅替代执行。",
   "status 类型：completed 已完成；partial 同一目标部分完成；not_found 未找到；needs_input 需要补充或选择；blocked 受权限、政策或前置条件阻止；failed 已知执行失败；cancelled 已取消或放弃；in_progress 仍在进行；unknown 实际结果无法确认。",
   "根据完整对话和真实执行证据自行选择类型，不把中间工具结果当作最终结论，不虚构完成。结果只是报告，不是执行命令或手机送达证明。",
 ].join("\n");
