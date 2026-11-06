@@ -33,3 +33,7 @@ Group model sessions use isolated configuration, disable inherited host memory a
 - User-confirmed group, member, context, file, memory, task and pending-request decisions (2026-11-05).
 - [OpenClaw Feishu implementation](https://github.com/openclaw/openclaw/tree/7c2ff8f775acca3e5c93c9c22b6247e37df29bae/extensions/feishu).
 - [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+## Dispatch-mode extension
+
+[ADR-0024](0024-coordinate-independent-group-agents.md) adds recognition of authorized ordinary messages in explicitly enabled dispatch groups, with original-author confirmation for inferred work. The private/group, requester, file and task boundaries above continue to apply; mention-only groups retain the original admission rule.

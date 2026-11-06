@@ -63,6 +63,8 @@ type FileBinding = {
 
 type TurnSession = {
   eventKey: string;
+  dispatchRequestId?: string;
+  dispatchRetry?: boolean;
   accountId: string;
   scopes: Map<string, ScopeBinding>;
   sandboxes: Map<string, NodeFileSandbox>;
@@ -111,6 +113,9 @@ export type LocalFileSendCandidate = {
 };
 
 export class LocalFileTools implements InlineWorkflowToolExecutor {
+  dispatchEvidence(requestId: string): { completed: number; unknown: number } {
+    return this.operations.dispatchEvidence(requestId);
+  }
   private closing: Promise<void> | undefined;
   private readonly diagnostics: import("./local-diagnostics.js").LocalDiagnostics | undefined;
   private readonly sessions = new Map<string, TurnSession>();
@@ -225,6 +230,8 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     }
     const session: TurnSession = {
       eventKey: trusted.eventKey,
+      ...(trusted.dispatchRequestId ? { dispatchRequestId: trusted.dispatchRequestId } : {}),
+      ...(trusted.dispatchRetry ? { dispatchRetry: true } : {}),
       accountId: trusted.accountId,
       scopes,
       sandboxes,
@@ -776,9 +783,12 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       newText: requiredString(input.newText, true),
       replaceAll: input.replaceAll === true,
     };
-    const requestHash = hashStable(normalizedRequest);
-    const operationKey = hashStable({ event: normalizedRequest.eventKey, requestHash });
-    const previous = this.operations.get(operationKey);
+    const dispatch = dispatchMutationKeys(normalizedRequest);
+    const replay = session.dispatchRequestId && session.dispatchRetry
+      ? this.operations.dispatchReplay(session.dispatchRequestId, session.eventKey, dispatch.resource, dispatch.logical) : undefined;
+    const requestHash = replay?.requestHash ?? hashStable(normalizedRequest);
+    const operationKey = replay?.operationKey ?? hashStable({ event: normalizedRequest.eventKey, requestHash });
+    const previous = replay ?? this.operations.get(operationKey);
     this.assertCurrentMutationAccess(scope, true);
     if (previous?.status === "completed" && previous.result) {
       await this.assertCompletedMutationCurrent(sandbox, scope, file.relativePath, previous.result);
@@ -806,6 +816,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     }
     this.consumeWriteBytes(session, planned.sizeBytes);
     this.operations.start(operationKey, requestHash, planned);
+    if (session.dispatchRequestId) this.operations.bindDispatch(session.dispatchRequestId, session.eventKey, dispatch.resource, dispatch.logical, operationKey);
     if (previous?.status === "started") {
       const reconciled = await this.reconcileStartedMutation(
         sandbox,
@@ -857,9 +868,12 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       overwrite,
       expectedSha256: overwrite ? requiredSha256(input.expectedSha256) : null,
     };
-    const requestHash = hashStable(normalizedRequest);
-    const operationKey = hashStable({ event: normalizedRequest.eventKey, requestHash });
-    const previous = this.operations.get(operationKey);
+    const dispatch = dispatchMutationKeys(normalizedRequest);
+    const replay = session.dispatchRequestId && session.dispatchRetry
+      ? this.operations.dispatchReplay(session.dispatchRequestId, session.eventKey, dispatch.resource, dispatch.logical) : undefined;
+    const requestHash = replay?.requestHash ?? hashStable(normalizedRequest);
+    const operationKey = replay?.operationKey ?? hashStable({ event: normalizedRequest.eventKey, requestHash });
+    const previous = replay ?? this.operations.get(operationKey);
     this.assertCurrentMutationAccess(scope, overwrite);
     if (previous?.status === "completed" && previous.result) {
       await this.assertCompletedMutationCurrent(sandbox, scope, relativePath, previous.result);
@@ -873,6 +887,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     };
     this.consumeWriteBytes(session, planned.sizeBytes);
     this.operations.start(operationKey, requestHash, planned);
+    if (session.dispatchRequestId) this.operations.bindDispatch(session.dispatchRequestId, session.eventKey, dispatch.resource, dispatch.logical, operationKey);
     if (previous?.status === "started") {
       const reconciled = await this.reconcileStartedMutation(
         sandbox,
@@ -1232,4 +1247,10 @@ function currentMode(canonicalRoot: string, relativePath: string): number {
   const info = fs.lstatSync(absolutePath);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error("local_file_path_unsafe");
   return info.mode & 0o777;
+}
+
+// A retry may have fresh file references and a fresh read hash; those do not authorize repeating the same edit.
+function dispatchMutationKeys(request: Record<string, unknown>): { resource: string; logical: string } {
+  const logical = { ...request }; delete logical.expectedSha256;
+  return { resource: hashStable([request.moduleId, request.scopeId, request.relativePath]), logical: hashStable(logical) };
 }

@@ -12,6 +12,7 @@ export interface FeishuTransport {
   start(handlers: { message(event: unknown): Promise<void>; unavailable(): void; ready(): void }): Promise<void>;
   sendText(input: { chatId: string; text: string; uuid: string }): Promise<{ code?: number; data?: { message_id?: string } }>;
   botOpenId?(): Promise<string>;
+  getMessage?(messageId: string): Promise<unknown>;
   close(): void | Promise<void>;
 }
 
@@ -36,6 +37,8 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   private readonly leaseOwner = randomUUID();
   private readonly generation: string;
   private lastInboundAt: number | undefined;
+  private agentDispatcher: ((message: InboundContent) => void) | undefined;
+  private agentSenders = new Map<string, { transport: FeishuTransport; ready: () => boolean }>();
 
   constructor(
     private readonly config: Extract<ChannelStartupEntry, { channel: "feishu" }>,
@@ -84,6 +87,15 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   }
 
   activateInboundDispatch(): void { this.dispatchEnabled = true; this.kick(); }
+  bindAgentDispatcher(dispatcher: (message: InboundContent) => void, senders: ReadonlyMap<string, { transport: FeishuTransport; ready: () => boolean }>): void {
+    if (this.started || this.agentDispatcher || !this.config.dispatch) throw new Error("feishu_agent_dispatch_binding_invalid");
+    this.agentDispatcher = dispatcher;
+    this.agentSenders = new Map(senders);
+  }
+  usesAgentDispatch(target: string): boolean {
+    const chatId = this.config.owner.deliveryTarget(this.config.owner.conversationAddress().accountId, target);
+    return chatId !== undefined && this.config.dispatch?.groupChatIds.includes(chatId) === true;
+  }
   pauseInboundDispatch(): void { this.dispatchEnabled = false; }
   async close(): Promise<void> {
     this.closing = true;
@@ -112,8 +124,10 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   subscribe(listener: () => void): () => void { this.observers.add(listener); return () => this.observers.delete(listener); }
   state(destination: NotificationDestination) {
     const selected = destination.channel === "feishu" && this.config.owner.ownsAddress(destination.accountId, destination.target);
-    return { enabled: selected && this.ready && !this.closing, credentialStatus: this.ready ? "usable" as const : "stale" as const,
-      credentialGeneration: this.generation, contextGeneration: selected ? this.config.owner.contextHash(destination.accountId, destination.target) : null };
+    const sender = this.application(destination);
+    const ready = selected && this.ready && !this.closing && sender?.ready() === true;
+    return { enabled: ready, credentialStatus: ready ? "usable" as const : "stale" as const,
+      credentialGeneration: sender?.generation ?? "unavailable", contextGeneration: selected ? this.config.owner.contextHash(destination.accountId, destination.target) : null };
   }
 
   async sendText(destination: DeliveryReference, message: string): Promise<SendTextResult> {
@@ -169,6 +183,7 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
     let content = message.content;
     let observation = false;
     let groupText: string | undefined;
+    let mentionedAgentIds: string[] | undefined;
     if (group) {
       await this.identityReady;
       if (!this.botOpenId) return;
@@ -176,8 +191,25 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
         const parsed = feishuGroupMessage(message.message_type, content, message.mentions, this.botOpenId);
         content = parsed.content;
         groupText = parsed.observation;
-        observation = !admitted || !parsed.addressed;
+        observation = !admitted || (!parsed.addressed && !this.usesAgentDispatch(address.target));
       } catch { this.failure("feishu_message_invalid"); return; }
+      if (!observation && this.usesAgentDispatch(address.target)) {
+        const postMentions = message.message_type === "post" && message.content.includes('"at"');
+        if ((Array.isArray(message.mentions) && message.mentions.length > 0) || postMentions) {
+          const response = object(await this.transport.getMessage?.(message.message_id));
+          const items = object(response?.data)?.items;
+          const item = Array.isArray(items) && items.length === 1 ? object(items[0]) : undefined;
+          if (response?.code !== 0 || item?.message_id !== message.message_id || item?.chat_id !== chatId ||
+              (item.mentions !== undefined && !Array.isArray(item.mentions))) throw new Error("feishu_agent_mentions_unavailable");
+          const mentions = (item.mentions ?? []) as unknown[];
+          mentionedAgentIds = [...new Set(mentions.flatMap((value) => {
+            const mention = object(value);
+            if (mention?.id_type !== "app_id") return [];
+            const agent = this.config.dispatch!.agents.find(({ appId }) => appId === mention.id);
+            return agent ? [agent.id] : [];
+          }))];
+        }
+      }
     }
     let normalized: Pick<InboundContent, "source" | "text" | "attachments" | "quote">;
     if (observation) {
@@ -195,6 +227,7 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
       normalized = { source: "text", text };
     }
     const inbound: InboundContent = { ...address, key, ...normalized,
+      ...(mentionedAgentIds ? { mentionedAgentIds } : {}),
       messageId: message.message_id, senderId, conversationType,
       receivedAt, observedAt: this.now() };
     this.inbox.ingestMessage(inbound, this.config.owner.contextHash(address.accountId, address.target), observation);
@@ -226,10 +259,17 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
       }
       if (admission.observation) { this.inbox.complete(job.eventKey, this.leaseOwner, job.revision); continue; }
       const message: InboundMessage = { ...address, key: job.eventKey, messageId: job.messageId,
+        ...(job.mentionedAgentIds ? { mentionedAgentIds: job.mentionedAgentIds } : {}),
         senderId: admission.senderId, conversationType: admission.conversationType, deliveryRef: randomUUID(),
         ...(admission.conversationType === "group" ? { discussion: this.inbox.groupDiscussion(address.accountId, address.target, job.eventKey) } : {}),
         source: job.source, text: job.text, ...(job.attachments ? { attachments: job.attachments } : {}), ...(job.quote ? { quote: job.quote } : {}),
         receivedAt: job.receivedAt, observedAt: job.observedAt };
+      if (this.usesAgentDispatch(address.target)) {
+        if (!this.agentDispatcher) throw new Error("feishu_agent_dispatch_unavailable");
+        this.agentDispatcher(message);
+        this.inbox.complete(job.eventKey, this.leaseOwner, job.revision);
+        continue;
+      }
       this.deliveries.set(message.deliveryRef, { message: { ...message }, nextSubmission: 0 });
       try {
         await this.listener(message);
@@ -238,8 +278,10 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
     }
   }
 
-  private async submit(destination: { accountId: string; target: string }, text: string, operationId: string, beforeSubmit: () => boolean, causeEventKey?: string): Promise<SendTextResult> {
-    const address = { accountId: destination.accountId, target: destination.target };
+  private async submit(destination: { accountId: string; target: string; senderAccountId?: string }, text: string, operationId: string, beforeSubmit: () => boolean, causeEventKey?: string): Promise<SendTextResult> {
+    const sender = this.application(destination);
+    if (!sender) return { ok: false, reason: "unavailable", acceptedSegments: 0 };
+    const address = { accountId: destination.accountId, target: destination.target, ...(destination.senderAccountId ? { senderAccountId: destination.senderAccountId } : {}) };
     const points = Array.from(text);
     if (!points.length || points.length > this.maxReplyCodePoints) return { ok: false, reason: "rejected", acceptedSegments: 0 };
     const segments: string[] = [];
@@ -261,7 +303,7 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
         return { ok: false, reason: prepared.state === "rejected" ? "rejected" : "unknown", acceptedSegments: accepted, totalSegments: segments.length };
       }
       let result: Awaited<ReturnType<FeishuTransport["sendText"]>>;
-      try { result = await this.transport.sendText({ chatId, text: segment, uuid: clientId }); }
+      try { result = await sender.transport.sendText({ chatId, text: segment, uuid: clientId }); }
       catch {
         this.effects.settle(attemptId, "unknown");
         this.failure("feishu_send_unknown");
@@ -278,6 +320,15 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
       ids.push(result.data.message_id);
     }
     return { ok: true, acceptedSegments: accepted, totalSegments: segments.length, messageIds: ids };
+  }
+  private application(destination: { target: string; senderAccountId?: string }): { transport: FeishuTransport; ready(): boolean; generation: string } | undefined {
+    if (!destination.senderAccountId) return { transport: this.transport, ready: () => this.ready, generation: this.generation };
+    if (!this.usesAgentDispatch(destination.target)) return undefined;
+    const agent = this.config.dispatch?.agents.find((item) => item.appId === destination.senderAccountId);
+    if (!agent) return undefined;
+    if (agent.appId === this.config.connection.appId) return { transport: this.transport, ready: () => this.ready, generation: this.generation };
+    const sender = this.agentSenders.get(agent.appId);
+    return sender ? { ...sender, generation: hash(JSON.stringify([agent.appId, agent.appSecret])) } : undefined;
   }
   private changed(): void { for (const observer of this.observers) { try { observer(); } catch { /* Observers cannot change admission. */ } } }
   private failure(code: string): void { try { this.report(code); } catch { /* Reporting cannot alter delivery outcomes. */ } }

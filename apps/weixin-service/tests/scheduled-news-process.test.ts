@@ -13,13 +13,14 @@ it("stops a news process on scheduler cancellation before returning and removes 
 fs.writeFileSync(${JSON.stringify(marker)}, JSON.stringify({pid:process.pid,cwd:process.cwd(),args}));
 console.log(JSON.stringify({type:'item.completed',item:{type:'web_search'}}));
 fs.writeFileSync(args[args.indexOf('-o')+1], '{"items":[]}');
-setTimeout(()=>process.exit(0),1500);\n`, { mode: 0o700 });
+setInterval(()=>{},1000);\n`, { mode: 0o700 });
   const controller = new AbortController();
   const request = { prompt: "只读取公开新闻", schema: {}, signal: controller.signal };
-  const pending = createCodexCliNewsRun({ executable })(request);
-  const checked = expect(pending).rejects.toThrow("research_cancelled");
-  await expect.poll(() => fs.existsSync(marker)).toBe(true);
-  const observed = JSON.parse(fs.readFileSync(marker, "utf8")); controller.abort(); await checked;
+  const pending = createCodexCliNewsRun({ executable })(request).then(() => undefined, (error: unknown) => error);
+  try { await expect.poll(() => fs.existsSync(marker), { timeout: 5000 }).toBe(true); }
+  finally { controller.abort(); await pending; }
+  expect(await pending).toEqual(new Error("research_cancelled"));
+  const observed = JSON.parse(fs.readFileSync(marker, "utf8"));
   expect(() => process.kill(observed.pid, 0)).toThrow(); expect(fs.existsSync(observed.cwd)).toBe(false);
   for (const feature of ["shell_tool", "unified_exec", "plugins", "apps", "multi_agent", "browser_use", "computer_use"]) {
     expect(observed.args.some((arg: string, index: number) => arg === "--disable" && observed.args[index + 1] === feature)).toBe(true);

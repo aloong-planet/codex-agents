@@ -1,0 +1,23 @@
+%% title: 执行与汇报：通知状态独立记录，重发通知不重做任务
+%%{init: {'theme':'base','htmlLabels':false,'state':{'htmlLabels':false},'flowchart':{'htmlLabels':false},'themeVariables':{'primaryColor':'#ECECFF','primaryBorderColor':'#D5D5FF','primaryTextColor':'#000000','lineColor':'#757575','textColor':'#212121','edgeLabelBackground':'transparent','noteBkgColor':'#FFF6B8','noteBorderColor':'#E4C800','noteTextColor':'#5C5100','tertiaryColor':'#f5f5f5','background':'#FFFFFF'}}}%%
+stateDiagram-v2
+  direction LR
+  classDef coordinator fill:#eff6ff,stroke:#1d4ed8,color:#1e40af
+  classDef member fill:#faf5ff,stroke:#7e22ce,color:#6b21a8
+  classDef specialist fill:#ecfdf5,stroke:#047857,color:#065f46
+  classDef notification fill:#fff7ed,stroke:#9a3412,color:#9a3412
+  classDef silent fill:#f8fafc,stroke:#475569,color:#334155
+
+  state "已派给一个 Agent" as queued
+  state "Agent 正在处理" as running
+  state "结果等待汇报" as reporting
+  state "本次流程结束" as done
+  state "汇报结果未知" as unknown
+  queued --> running: Agent 接单
+  running --> reporting: 完成 / 失败 / 取消
+  queued --> reporting: 取消
+  reporting --> reporting: 明确发送失败后重试通知
+  reporting --> done: 结果通知送达
+  reporting --> unknown: 结果通知未知
+  class queued,running specialist
+  class reporting,done,unknown notification

@@ -13,7 +13,7 @@ import type {
 } from "./workflow-engine.js";
 
 type TargetResolver = {
-  resolveRunTarget(runId: string): { accountId: string; target: string } | null;
+  resolveRunTarget(runId: string): { accountId: string; target: string; senderAccountId?: string } | null;
 };
 
 type Snapshotter = {
@@ -158,7 +158,7 @@ export class WorkflowFileSendProvider implements WorkflowCapabilityProvider {
 
   private boundManifest(request: WorkflowCapabilityInvocation): {
     handle: string;
-    target: { accountId: string; target: string };
+    target: { accountId: string; target: string; senderAccountId?: string };
     manifest: WorkflowFileSendManifest;
   } | null {
     const target = this.targets.resolveRunTarget(request.runId);

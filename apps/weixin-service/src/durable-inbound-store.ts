@@ -57,6 +57,7 @@ export type QueuedInboundEnvelope = DurableInboundEnvelope & {
 };
 
 export type DurableInboundJob = DurableInboundEnvelope & {
+  mentionedAgentIds?: string[];
   state: "queued" | "leased" | "completed" | "recovery_blocked";
   revision: number;
   attempts: number;
@@ -256,6 +257,7 @@ export class DurableInboundStore {
       ) VALUES (?, ?, ?, ?, 'message', ?, '', ?, ?, 'queued', 0, 0, ?, ?)
     `).run(message.key, message.accountId, message.target, message.messageId,
       JSON.stringify({ source: message.source, text: message.text, admission,
+        ...(message.mentionedAgentIds ? { mentionedAgentIds: message.mentionedAgentIds } : {}),
         ...(message.attachments ? { attachments: message.attachments } : {}), ...(message.quote ? { quote: message.quote } : {}) }),
       message.receivedAt, observedAt, at, at);
     const inserted = Number(result.changes);
@@ -553,6 +555,7 @@ export class DurableInboundStore {
 
   private decodeJob(row: InboxRow): DurableInboundJob {
     const payload = JSON.parse(row.payload_json) as {
+      mentionedAgentIds?: string[];
       admission?: DurableAdmission;
       source: DurableInboundEnvelope["source"];
       text: string;
@@ -563,6 +566,7 @@ export class DurableInboundStore {
     };
     return {
       ...(payload.admission ? { admission: payload.admission } : {}),
+      ...(payload.mentionedAgentIds ? { mentionedAgentIds: payload.mentionedAgentIds } : {}),
       eventKey: row.event_key,
       accountId: row.account_id,
       target: row.target,

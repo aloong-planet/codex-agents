@@ -19,7 +19,7 @@ export class FeishuMediaDelivery implements MediaDeliveryPort {
   constructor(private readonly config: Pick<ChannelStartupConfiguration, "owner" | "binding">, private readonly transport: FeishuMediaTransport,
     private readonly ledger: DurableEffectLedger, private readonly snapshotRoots: readonly string[],
     private readonly ready: () => boolean,
-    private readonly destination = config.owner.conversationAddress()) {
+    private readonly destination: import("./media-delivery.js").MediaDeliveryDestination = config.owner.conversationAddress()) {
     if (config.binding.channel !== "feishu" || !config.owner.admit({ ...config.binding, conversationType: "private" })) {
       throw new Error("feishu_media_binding_invalid");
     }
@@ -41,7 +41,7 @@ export class FeishuMediaDelivery implements MediaDeliveryPort {
   }
 
   private async send(kind: "image" | "file", input: MediaDeliveryInput & { caption?: string; fileName?: string }): Promise<SendTextResult> {
-    if (input.accountId !== this.destination.accountId || input.target !== this.destination.target || !this.ready()) {
+    if (input.accountId !== this.destination.accountId || input.target !== this.destination.target || input.senderAccountId !== this.destination.senderAccountId || !this.ready()) {
       return { ok: false, reason: "unavailable", acceptedSegments: 0 };
     }
     const fileName = input.fileName ?? path.basename(input.filePath);

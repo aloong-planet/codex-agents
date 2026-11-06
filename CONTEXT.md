@@ -5,6 +5,8 @@ This context describes personal Weixin/Feishu conversations, authorized Feishu g
 ## Contents
 
 - Group requester
+- Dispatch Request
+- Sending Agent
 - 模块（Module）
 - 能力（Capability）
 - 工作流模板（Workflow Template）
@@ -62,8 +64,16 @@ This context describes personal Weixin/Feishu conversations, authorized Feishu g
 ## Language（术语）
 
 **Group requester**:
-The member whose authorized mention initiated a group request. This person is distinct from the group sharing discussion and tasks, and from the reply Owner.
+The authorized member whose message initiated a group request, whether by a mention or by enabled automatic dispatch. This person is distinct from the group sharing discussion and tasks, and from the reply Owner.
 _Avoid_: group owner, personal owner
+
+**Dispatch Request**:
+A group business request assigned to one specialist under its original requester's authority. It is distinct from the source platform message, a Workflow Run, a Pending Request and a Scheduled Task.
+_Avoid_: message ID, workflow run, reminder
+
+**Sending Agent**:
+The configured agent whose bot identity speaks for a Dispatch Request and its resulting deliveries. It is distinct from the human Group requester and from the canonical group identity used for shared business memory and tasks.
+_Avoid_: requester, group owner, reply Owner
 
 **模块（Module）**：
 一组可安装或启用的个人助理能力，并声明自己能够操作的资源类型。

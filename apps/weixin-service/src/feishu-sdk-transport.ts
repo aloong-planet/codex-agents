@@ -3,7 +3,7 @@ import type { FeishuTransport } from "./feishu-channel.js";
 import type { FeishuMediaTransport } from "./feishu-media-delivery.js";
 import type { FeishuResourceTransport } from "./feishu-inbound-media.js";
 
-type Connection = { appId: string; appSecret: string };
+type Connection = { appId: string; appSecret: string; mode?: "outbound" };
 type Hooks = { ready(): void; unavailable(): void; error(): void };
 export type FeishuSdkSession = {
   botOpenId?: () => Promise<string>;
@@ -30,7 +30,7 @@ export const createFeishuSdkSession: FeishuSdkSessionFactory = (connection, hook
   }) as unknown as NonNullable<ConstructorParameters<typeof lark.Client>[0]["httpInstance"]>;
   // Axios declares a response wrapper, while this SDK instance's response interceptor returns its decoded body.
   const client = new lark.Client({ ...connection, domain: lark.Domain.Feishu, logger, httpInstance });
-  const socket = new lark.WSClient({ ...connection, domain: lark.Domain.Feishu, logger, httpInstance,
+  const socket = connection.mode === "outbound" ? undefined : new lark.WSClient({ ...connection, domain: lark.Domain.Feishu, logger, httpInstance,
     autoReconnect: true, handshakeTimeoutMs: 15_000,
     onReady: hooks.ready, onReconnected: hooks.ready, onReconnecting: hooks.unavailable, onError: hooks.error });
   return {
@@ -40,9 +40,12 @@ export const createFeishuSdkSession: FeishuSdkSessionFactory = (connection, hook
       if (response.code !== 0 || !id) throw new Error("feishu_bot_identity_unavailable");
       return id;
     },
-    start: (message) => socket.start({ eventDispatcher: new lark.EventDispatcher({ logger }).register({ "im.message.receive_v1": message }) }),
-    close: () => socket.close({ force: true }),
-    getMessage: (messageId) => client.im.message.get({ path: { message_id: messageId } }),
+    start: async (message) => {
+      if (socket) await socket.start({ eventDispatcher: new lark.EventDispatcher({ logger }).register({ "im.message.receive_v1": message }) });
+      else hooks.ready();
+    },
+    close: () => socket?.close({ force: true }),
+    getMessage: (messageId) => client.im.message.get({ path: { message_id: messageId }, params: { user_id_type: "open_id" } }),
     download: async ({ messageId, resourceKey, type }) => {
       const resource = await client.im.messageResource.get({ path: { message_id: messageId, file_key: resourceKey }, params: { type } });
       const stream = resource.getReadableStream();

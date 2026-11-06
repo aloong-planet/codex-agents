@@ -18,7 +18,7 @@ export type AccountMemoryToolBinding = {
   batchId: string;
   evidenceEntryIds: string[];
   evidenceTexts?: Record<string, string>;
-  evidenceOrigins?: Record<string, { eventKey: string; target: string }>;
+  evidenceOrigins?: Record<string, { eventKey: string; target: string; senderAccountId?: string }>;
   evidenceLocalDates?: Record<string, string>;
   reminderContext?: { batchId: string; plans: Array<{ ordinal: number; planId: string; summary: string }> };
   mutationPolicy: MemoryMutationPolicy;
@@ -211,10 +211,12 @@ export class AccountMemoryToolHost implements DynamicToolHost {
         for (const mutation of mutations) {
           if (mutation.op !== "event_add" || mutation.eventKind !== "planned") continue;
           const targets = [...new Set(mutation.evidenceEntryIds.map((id) => trustedBinding.evidenceOrigins?.[id]?.target))];
+          const senders = [...new Set(mutation.evidenceEntryIds.map((id) => trustedBinding.evidenceOrigins?.[id]?.senderAccountId))];
           if (targets.length !== 1) throw new Error("memory_plan_origin_ambiguous");
+          if (senders.length !== 1) throw new Error("memory_plan_origin_ambiguous");
           const destination = targets[0] === undefined
             ? this.notificationRoute.legacyMemoryDestination(trustedBinding.accountId)
-            : this.notificationRoute.captureMemory(trustedBinding.accountId, targets[0]);
+            : this.notificationRoute.captureMemory(trustedBinding.accountId, targets[0], senders[0]);
           if (!destination) throw new Error("memory_plan_origin_unbound");
           planDestinations[mutation.id] = destination;
         }

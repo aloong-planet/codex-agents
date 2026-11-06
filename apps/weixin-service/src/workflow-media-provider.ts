@@ -14,7 +14,7 @@ import type {
 } from "./workflow-engine.js";
 
 export interface WorkflowMediaTargetResolver {
-  resolveRunTarget(runId: string): { accountId: string; target: string } | null;
+  resolveRunTarget(runId: string): { accountId: string; target: string; senderAccountId?: string } | null;
 }
 
 

@@ -1240,6 +1240,33 @@ describe("local_file_mutation_contract_regression", () => {
     } finally { await binding.release(); await tools.close(); }
   });
 
+  it.each(["edit", "write"] as const)("does not repeat a completed dispatch %s using the other mutation form", async (firstKind) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-mutation-form-")); temporaryDirectories.push(root);
+    const directory = path.join(root, "files"); fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, "item.txt"), "x");
+    const tools = editableTools(directory, path.join(root, "spool"), { groupProtectedRoots: [path.join(root, "spool")] });
+    const original = { ...turn("dispatch-edit", "account-a"), target: "feishu.group.test", requesterRef: "ou_owner", dispatchRequestId: "dispatch-request" };
+    let binding = tools.bindTurn(original);
+    const read = async (trusted: TrustedWorkflowTurn) => {
+      const found = await tools.execute({ toolId: "files.find", toolVersion: 2, arguments: {} }, trusted) as { entries: Array<{ fileRef: string; scopeRef: string }> };
+      const file = found.entries[0]!;
+      const content = await tools.execute({ toolId: "files.read", toolVersion: 2, arguments: { fileRef: file.fileRef } }, trusted) as { sha256: string };
+      return { ...file, ...content };
+    };
+    const mutate = (kind: "edit" | "write", file: { fileRef: string; scopeRef: string; sha256: string }, trusted: TrustedWorkflowTurn, content: string) =>
+      tools.execute({ toolId: `files.${kind}`, toolVersion: 1, arguments: kind === "edit"
+        ? { fileRef: file.fileRef, expectedSha256: file.sha256, oldText: "x", newText: content, replaceAll: true }
+        : { scopeRef: file.scopeRef, relativePath: "item.txt", expectedSha256: file.sha256, content, overwrite: true } }, trusted);
+    try {
+      await mutate(firstKind, await read(original), original, "xx");
+      expect(fs.readFileSync(path.join(directory, "item.txt"), "utf8")).toBe("xx");
+      await binding.release();
+      const retry = { ...original, dispatchRetry: true }; binding = tools.bindTurn(retry);
+      await expect(mutate(firstKind === "edit" ? "write" : "edit", await read(retry), retry, "xxxx")).rejects.toThrow("local_file_content_conflict");
+      expect(fs.readFileSync(path.join(directory, "item.txt"), "utf8")).toBe("xx");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
   it("does not reactivate an earlier edit result after a later edit", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-edit-replay-"));
     temporaryDirectories.push(root);
@@ -1590,7 +1617,7 @@ function turn(eventKey: string, accountId: string): TrustedWorkflowTurn {
 function editableTools(
   files: string,
   spool: string,
-  options: { operationDatabasePath?: string; afterMutationDurable?: () => void } = {},
+  options: { operationDatabasePath?: string; afterMutationDurable?: () => void; groupProtectedRoots?: string[] } = {},
 ): LocalFileTools {
   return new LocalFileTools({
     get: () => ({

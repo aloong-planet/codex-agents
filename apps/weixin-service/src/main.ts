@@ -10,6 +10,8 @@ import { FixtureFeishuTransport } from "./fixture-feishu-transport.js";
 import { loadChannelStartupConfiguration } from "./channel-startup-config.js";
 import { FeishuChannel } from "./feishu-channel.js";
 import { FeishuSdkTransport } from "./feishu-sdk-transport.js";
+import { FeishuWebhookTransport } from "./feishu-webhook-transport.js";
+import { FeishuWebhookReceiver } from "./feishu-webhook-receiver.js";
 import { FeishuInboundMedia } from "./feishu-inbound-media.js";
 import { FeishuMediaDelivery } from "./feishu-media-delivery.js";
 import { ConversationService } from "./conversation-service.js";
@@ -64,7 +66,10 @@ import { DirectIlinkChannel } from "./direct-ilink-channel.js";
 import { DurableInboundStore } from "./durable-inbound-store.js";
 import { DurableEffectLedger } from "./durable-effect-ledger.js";
 import { FixturePort } from "./fixture-port.js";
-import { FixtureAppServerTransport } from "./fixture-app-server-transport.js";
+import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
+import { AgentDispatch } from "./agent-dispatch.js";
+import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
+import { CodexDispatchExecutor } from "./agent-dispatch-executor.js";
 import { createDemoServer } from "./http-server.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
@@ -111,6 +116,8 @@ import {
   PENDING_RESPONSE_RUNTIME_PROFILE,
 } from "./workflow-pending-response-router.js";
 import type { PendingResponseRouter } from "./workflow-pending-response-coordinator.js";
+import { pendingRequestTextHash } from "./workflow-pending-response-coordinator.js";
+import { renderWorkflowRun } from "./workflow-reply-renderer.js";
 import { WEIXIN_NOTE_SEARCH_WORKFLOW, WEIXIN_NOTE_SEND_FILE_WORKFLOW } from "./weixin-workflow-router.js";
 import { WeixinWorkflowTriggerAdapter } from "./weixin-workflow-trigger-adapter.js";
 import { createProductionWorkflowToolCatalog } from "./workflow-tool-catalog.js";
@@ -181,7 +188,15 @@ const fixturePort = fixtureMode && (!channelConfiguration || weixinConfiguration
 const fixtureFeishu = fixtureMode && feishuConfiguration !== undefined ? new FixtureFeishuTransport(process.env.WORKFLOW_FIXTURE_FEISHU_START_FAILURE === "1") : undefined;
 const channelPort: WeixinChannel | undefined = directChannel
   ? bindWeixinOwner(directChannel, weixinConfiguration!.owner) : fixturePort;
-const feishuTransport = feishuConfiguration ? fixtureFeishu ?? new FeishuSdkTransport(feishuConfiguration.connection) : undefined;
+const feishuTransport = feishuConfiguration ? (() => {
+  const outbound = fixtureFeishu ?? new FeishuSdkTransport({ ...feishuConfiguration.connection,
+    ...(feishuConfiguration.webhook ? { mode: "outbound" as const } : {}) });
+  if (!feishuConfiguration.webhook) return outbound;
+  if (feishuConfiguration.webhook.port === port) throw new Error("feishu_webhook_admin_port_conflict");
+  return new FeishuWebhookTransport(outbound, new FeishuWebhookReceiver({ ...feishuConfiguration.webhook,
+    appId: feishuConfiguration.connection.appId, databasePath: path.join(path.dirname(privateStatePath), "feishu-callbacks.sqlite") },
+  (code) => process.stderr.write(`${code}\n`)));
+})() : undefined;
 const feishuInboundMedia = feishuConfiguration ? new FeishuInboundMedia(
   path.join(path.dirname(privateStatePath), "media", "inbound", "feishu", feishuConfiguration.owner.contextHash()),
   feishuConfiguration.binding.target, feishuTransport!) : undefined;
@@ -189,6 +204,14 @@ const feishuChannel = feishuConfiguration
   ? new FeishuChannel(feishuConfiguration, feishuTransport!,
       durableInboundStore, durableEffectLedger, (code) => process.stderr.write(`${code}\n`), Date.now, feishuInboundMedia)
   : undefined;
+const dispatchApplications = new Map((feishuConfiguration?.dispatch?.agents.filter(({ id }) => id !== "sam") ?? []).map((agent) => {
+  const transport = fixtureMode ? new FixtureFeishuTransport(false, `ou_fixture${agent.id}`)
+    : new FeishuSdkTransport({ appId: agent.appId, appSecret: agent.appSecret, mode: "outbound" });
+  const application = { agentId: agent.id, transport, ready: false };
+  return [agent.appId, application] as const;
+}));
+fixtureFeishu?.bindApplications(new Map([...dispatchApplications.values()].flatMap(({ agentId, transport }) =>
+  transport instanceof FixtureFeishuTransport ? [[agentId, transport]] : [])));
 const activeChannels = [
   ...(channelPort ? [{ name: "weixin" as const, port: channelPort, owner: weixinConfiguration?.owner }] : []),
   ...(feishuChannel ? [{ name: "feishu" as const, port: feishuChannel, owner: feishuConfiguration!.owner }] : []),
@@ -297,13 +320,17 @@ const weixinMediaDelivery = directChannel ? ((): MediaDeliveryPort => {
     reconcile: (operationId) => delivery.reconcile(operationId),
   };
 })() : undefined;
-const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().map((destination) => ({
-  destination,
-  delivery: new FeishuMediaDelivery(feishuConfiguration, feishuTransport, durableEffectLedger,
+const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().flatMap((address) => {
+  const destinations = [address, ...(feishuChannel!.usesAgentDispatch(address.target) ? feishuConfiguration.dispatch!.agents.map(({ appId }) => ({ ...address, senderAccountId: appId })) : [])];
+  return destinations.map((destination: import("./media-delivery.js").MediaDeliveryDestination) => ({
+    destination,
+    delivery: new FeishuMediaDelivery(feishuConfiguration, destination.senderAccountId && destination.senderAccountId !== feishuConfiguration.connection.appId
+      ? dispatchApplications.get(destination.senderAccountId)!.transport : feishuTransport, durableEffectLedger,
     [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
       feishuInboundMedia!.readableRoot(feishuConfiguration.owner.deliveryTarget(destination.accountId, destination.target)!)],
     () => startedChannels.has("feishu") && feishuChannel!.state({ ...destination, channel: "feishu" }).enabled, destination),
-})) : [];
+  }));
+}) : [];
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
   groupProtectedRoots: [path.dirname(privateStatePath), diagnosticDirectory, process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
     path.join(os.homedir(), ".agents"), path.join(os.homedir(), ".openclaw"),
@@ -430,7 +457,7 @@ const workflowEngine = new WorkflowEngine(
         onRunAccepted: ({ runId, trigger }) => {
           if (trigger.accountRef === undefined && trigger.targetRef === undefined) return;
           if (!trigger.accountRef || !trigger.targetRef) throw new Error("workflow_run_target_incomplete");
-          workflowRunTargets.bind(runId, trigger.accountRef, trigger.targetRef);
+          workflowRunTargets.bind(runId, trigger.accountRef, trigger.targetRef, trigger.senderAccountId);
         },
       }
     : {
@@ -462,7 +489,7 @@ const workflowEngine = new WorkflowEngine(
         onRunAccepted: ({ runId, trigger }) => {
           if (trigger.accountRef === undefined && trigger.targetRef === undefined) return;
           if (!trigger.accountRef || !trigger.targetRef) throw new Error("workflow_run_target_incomplete");
-          workflowRunTargets.bind(runId, trigger.accountRef, trigger.targetRef);
+          workflowRunTargets.bind(runId, trigger.accountRef, trigger.targetRef, trigger.senderAccountId);
         },
       },
 );
@@ -602,7 +629,7 @@ const workflowToolControl = new WorkflowToolProductionControl(
   localFileTools,
 );
 const fixtureModelRequests: Array<{ threadId: string; input: unknown }> = [];
-const fixtureThreadQueues = new Map<string, FixturePort | FixtureFeishuTransport>();
+const fixtureThreadQueues = new Map<string, FixtureModelToolCallQueue>();
 const codexAgent: CodexAgent = new CodexConversation(
   () => fixtureMode && !fixtureLiveMainModel
     ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => (channelConfiguration ? fixtureThreadQueues.get(threadId!) : fixturePort)?.takeFixtureModelToolCall() }, undefined, (request) => {
@@ -627,7 +654,8 @@ const isolatedConversation = (scope: string, options: ConstructorParameters<type
     ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
   const agent = new CodexConversation(
     () => fixtureMode && !fixtureLiveMainModel && main
-      ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall() }, undefined, (request) => {
+      ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
+          takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           fixtureModelRequests.push(request); if (fixtureModelRequests.length > 20) fixtureModelRequests.shift();
         })
       : spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
@@ -765,6 +793,93 @@ const codexService = conversationRouter ? new ConversationService(
   diagnostics,
   weixinConfiguration?.owner,
 );
+const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
+  const configuration = feishuConfiguration, channel = feishuChannel;
+  const agents = configuration.dispatch!.agents.map(({ id, name, responsibility, appId }) => ({ id, name, responsibility, senderAccountId: appId }));
+  const authorized = (event: import("./channel-contract.js").InboundContent) => channel.usesAgentDispatch(event.target) &&
+    configuration.owner.accepts(event) && codexService.getPublicState().enabledTargets.some(({ accountId, target }) => accountId === event.accountId && target === event.target);
+  const model = () => {
+    const selected = codexService.getPublicState().models?.accounts.find(({ accountId }) => accountId === configuration.owner.conversationAddress().accountId)?.resolved;
+    if (!selected?.available) throw new Error("dispatch_model_unavailable");
+    return { model: selected.model, effort: selected.effort };
+  };
+  const memory = (event: import("./channel-contract.js").InboundContent) => accountMemory.recall(configuration.owner.memoryScope(event.accountId, event.target), event.text);
+  const classifier = fixtureMode && !fixtureLiveMainModel
+    ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
+    : (() => {
+      const runtime = isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
+      return new CodexDispatchClassifier(runtime.agent, runtime.cwd, model);
+    })();
+  const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
+    agents, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
+    contextRevision: () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); },
+    memory: (job) => memory(job.event),
+    existingResult: (job) => {
+      const event = job.executionEvent ?? job.event;
+      const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
+      if (!run) return undefined;
+      const destination = workflowRunTargets.resolveRunTarget(run.runId);
+      if (destination?.senderAccountId !== job.senderAccountId) throw new Error("dispatch_authorization_changed");
+      const rendered = renderWorkflowRun(run, workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId));
+      if (!rendered.handled) throw new Error("dispatch_workflow_result_unavailable");
+      return { status: rendered.outcome === "succeeded" ? "completed" : rendered.outcome === "needs_input" ? "waiting" : "failed",
+        message: rendered.reply, runRef: run.runId };
+    },
+    createRuntime: (job, scope) => {
+      const chatId = configuration.owner.deliveryTarget(job.event.accountId, job.event.target);
+      if (!chatId) throw new Error("dispatch_group_unbound");
+      const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
+      fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
+      return isolatedConversation(scope, { serviceName: `feishu_agent_${job.agentId}`, webSearch: "live", structuredOutputSupported: appServerCapabilities.structuredOutputSupported, automaticRecovery: true }, [mediaRoot], true);
+    },
+    prepareThread: (job, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId)); },
+    capture: async (job, reply) => {
+      const event = job.executionEvent ?? job.event;
+      await accountMemory.captureTurn({ accountId: configuration.owner.memoryScope(job.event.accountId, job.event.target), target: job.event.target,
+        userEntry: { source: { eventKey: event.key, target: event.target, senderAccountId: job.senderAccountId }, id: `${job.id}:user:${job.attempt}`, text: event.text, createdAt: event.receivedAt, status: "completed" },
+        assistantEntry: { id: `${job.id}:assistant:${job.attempt}`, text: reply, createdAt: Date.now(), status: "completed" } });
+    },
+  });
+  const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized,
+    bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory,
+    completedWork: (job) => {
+      const files = localFileTools.dispatchEvidence(job.id);
+      const schedules = scheduledTasks.dispatchEvidence(job.id);
+      const event = job.executionEvent ?? job.event;
+      const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
+      const accepted = run?.effects?.filter((effect) => effect.state === "accepted").length ?? 0;
+      const unknown = run?.effects?.filter((effect) => effect.state === "unknown" || effect.state === "prepared").length ?? 0;
+      return `${files.completed ? `已确认完成 ${files.completed} 次本地文件修改。` : ""}${files.unknown ? `另有 ${files.unknown} 次文件操作结果尚未确认，不会自动重复。` : ""}` +
+        `${accepted ? `已确认提交 ${accepted} 个文件或媒体附件。` : ""}${unknown ? `有 ${unknown} 个附件的发送结果无法确认，不会重复提交。` : ""}` +
+        `${schedules ? `已确认完成 ${schedules} 次定时任务操作。` : ""}`;
+    },
+    presentation: (event, runRef) => {
+      const request = workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId).find((item) => item.runId === runRef && item.expiresAt > Date.now());
+      return request ? { accountRef: event.accountId, targetRef: event.target, ...(event.senderId ? { requesterRef: event.senderId } : {}), runId: runRef,
+        signalRef: request.signalRef, revision: request.revision, expiresAt: request.expiresAt, requestTextHash: pendingRequestTextHash(event.text) } : undefined;
+    },
+    presented: (presentation) => {
+      const current = workflowEngine.listPendingSignals(presentation.accountRef, presentation.targetRef, presentation.requesterRef)
+        .some((item) => item.signalRef === presentation.signalRef && item.revision === presentation.revision && item.expiresAt > Date.now());
+      if (current) workflowPendingPresentations.put(presentation);
+    },
+    pending: async (event) => {
+      const requests = workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId).filter((request) => request.expiresAt > Date.now());
+      if (requests.length === 0) return { handled: false };
+      if (requests.length > 1) return { handled: true, result: { status: "waiting", message: "有多个工作流等待选择，请带上提示中的引用。" } };
+      const request = requests[0]!, destination = workflowRunTargets.resolveRunTarget(request.runId);
+      if (!destination || !channel.state({ ...destination, channel: "feishu" }).enabled) return { handled: true,
+        result: { status: "failed", message: "原接单机器人当前不可用，尚未继续操作。请恢复后再试。" } };
+      const result = await groupWorkflowAdapter.tryHandlePending(event);
+      const cancelled = workflowEngine.get(request.runId)?.status === "cancelled";
+      if (!result.handled) return { handled: false, ...(cancelled ? { cancelledRunRef: request.runId } : {}) };
+      return { handled: true, ...destination, runRef: request.runId,
+        result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
+    },
+    delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
+  channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])));
+  return dispatch;
+})() : undefined;
 const workflowModulePermissionSettings = new WorkflowModulePermissionSettings(
   workflowModulePermissions,
   [{
@@ -811,7 +926,11 @@ const service = channelPort ? new DemoService(channelPort, (url) =>
   workflowEngine,
   workflowModulePermissionSettings,
 ) : undefined;
-const channelState = () => ({ ...(fixtureMode ? { fixtureModelRequests: structuredClone(fixtureModelRequests) } : {}), ...(fixturePort ? { weixinFixtureReplies: fixturePort.getFixtureReplies() } : {}), channels: {
+const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
+  agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
+    [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
+} : {}) } : {};
+const channelState = () => ({ ...dispatchState(), ...(fixtureMode ? { fixtureModelRequests: structuredClone(fixtureModelRequests) } : {}), ...(fixturePort ? { weixinFixtureReplies: fixturePort.getFixtureReplies() } : {}), channels: {
   weixin: { enabled: Boolean(channelPort), ready: startedChannels.has("weixin") && channelPort!.getSnapshot().accounts.some((account) => account.credentialStatus === "usable") },
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
@@ -892,6 +1011,17 @@ const startup = (async () => {
           }
         }
       }
+      if (!stopping && name === "feishu" && agentDispatch) {
+        await Promise.all([...dispatchApplications.values()].map(async (application) => {
+          try {
+            await application.transport.start({ message: async () => {}, ready: () => { application.ready = true; }, unavailable: () => { application.ready = false; } });
+            const botId = await application.transport.botOpenId();
+            if (!botId || !/^ou_[A-Za-z0-9]+$/.test(botId)) throw new Error("agent_identity_unavailable");
+            application.ready = true;
+          } catch { application.ready = false; process.stderr.write("dispatch_application_unavailable\n"); }
+        }));
+        await agentDispatch.start();
+      }
       if (!stopping) {
         startedChannels.add(name);
         channelReady = true;
@@ -917,6 +1047,8 @@ function shutdown(): Promise<void> {
   const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
   shuttingDown = (async () => {
   try { await settleCleanup([
+    () => agentDispatch?.close(),
+    ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),
     () => pendingResponseAgent?.close(),
     () => groupPendingResponseAgent?.close(),

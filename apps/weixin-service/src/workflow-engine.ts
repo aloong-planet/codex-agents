@@ -12,6 +12,7 @@ export type WorkflowTrigger = {
   accountRef?: string;
   targetRef?: string;
   requesterRef?: string;
+  senderAccountId?: string;
   scheduleRef?: string;
   inputRefs?: Record<string, string>;
 };
@@ -482,6 +483,9 @@ export class WorkflowEngine {
     if (!runColumns.some((column) => column.name === "target_ref")) {
       this.database.exec("ALTER TABLE workflow_run ADD COLUMN target_ref TEXT");
     }
+    if (!runColumns.some((column) => column.name === "sender_account_id")) {
+      this.database.exec("ALTER TABLE workflow_run ADD COLUMN sender_account_id TEXT");
+    }
     for (const table of ["workflow_run", "workflow_signal", "workflow_pending_cancellation"]) {
       const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
       if (!columns.some((column) => column.name === "requester_ref")) {
@@ -564,10 +568,10 @@ export class WorkflowEngine {
     try {
       const result = this.database.prepare(`
         INSERT OR IGNORE INTO workflow_run(
-          run_id, source, trigger_id, requested_workflow_id, account_ref, target_ref, requester_ref,
+          run_id, source, trigger_id, requested_workflow_id, account_ref, target_ref, requester_ref, sender_account_id,
           trigger_input_refs_json, occurred_at,
           status, revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'accepted', 0, ?, ?)
       `).run(
         runId,
         trigger.source,
@@ -576,6 +580,7 @@ export class WorkflowEngine {
         trigger.accountRef ?? null,
         trigger.targetRef ?? null,
         trigger.requesterRef ?? null,
+        trigger.senderAccountId ?? null,
         canonicalJson(trigger.inputRefs ?? {}),
         trigger.occurredAt,
         at,
@@ -879,6 +884,13 @@ export class WorkflowEngine {
       : undefined;
   }
 
+  getTriggeredRun(source: WorkflowTrigger["source"], triggerId: string, accountRef: string, targetRef: string, requesterRef?: string): WorkflowRunView | undefined {
+    const row = this.database.prepare(`SELECT run_id FROM workflow_run
+      WHERE source = ? AND trigger_id = ? AND account_ref = ? AND target_ref = ? AND requester_ref IS ?`)
+      .get(source, triggerId, accountRef, targetRef, requesterRef ?? null);
+    return row ? this.get(String(row.run_id)) : undefined;
+  }
+
   listPendingSignals(accountRef: string, targetRef: string, requesterRef?: string): WorkflowPendingSignal[] {
     if (!isBoundedIdentifier(accountRef) || !isBoundedIdentifier(targetRef) ||
         (requesterRef !== undefined && !isBoundedIdentifier(requesterRef))) {
@@ -1036,7 +1048,7 @@ export class WorkflowEngine {
 
   private readRunBinding(runId: string): WorkflowRunBindingRow | undefined {
     return this.database.prepare(`
-      SELECT run_id, account_ref, target_ref, requester_ref, status, revision
+      SELECT run_id, account_ref, target_ref, requester_ref, sender_account_id, status, revision
       FROM workflow_run WHERE run_id = ?
     `).get(runId) as WorkflowRunBindingRow | undefined;
   }
@@ -1159,7 +1171,7 @@ export class WorkflowEngine {
     const binding = this.readRunBinding(existing.runId);
     const sourceBindingConflict = trigger.source !== "scheduler" && (
       binding?.account_ref !== (trigger.accountRef ?? null) || binding?.target_ref !== (trigger.targetRef ?? null) ||
-      binding?.requester_ref !== (trigger.requesterRef ?? null)
+      binding?.requester_ref !== (trigger.requesterRef ?? null) || binding?.sender_account_id !== (trigger.senderAccountId ?? null)
     );
     if (existing.occurredAt !== trigger.occurredAt || existing.requestedWorkflowId !== trigger.requestedWorkflowId ||
         sourceBindingConflict ||
@@ -2213,6 +2225,7 @@ type WorkflowRunBindingRow = {
   account_ref: string | null;
   target_ref: string | null;
   requester_ref: string | null;
+  sender_account_id: string | null;
   status: WorkflowRunStatus;
   revision: number;
 };
@@ -2313,6 +2326,9 @@ function validateTrigger(trigger: WorkflowTrigger): void {
   }
   if (trigger.scheduleRef !== undefined && !isBoundedIdentifier(trigger.scheduleRef)) {
     throw new Error("workflow_schedule_ref_invalid");
+  }
+  if (trigger.senderAccountId !== undefined && (!isBoundedIdentifier(trigger.senderAccountId) || !trigger.targetRef?.startsWith("feishu.group."))) {
+    throw new Error("workflow_sender_ref_invalid");
   }
   if ((trigger.requesterRef !== undefined && !isBoundedIdentifier(trigger.requesterRef)) ||
       (trigger.source !== "scheduler" && trigger.targetRef?.startsWith("feishu.group.") && !trigger.requesterRef)) {

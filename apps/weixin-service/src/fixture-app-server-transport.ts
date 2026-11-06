@@ -10,6 +10,7 @@ export type FixtureModelToolCall = {
 
 export interface FixtureModelToolCallQueue {
   takeFixtureModelToolCall(threadId?: string): FixtureModelToolCall | undefined;
+  takeFixtureModelCompletion?(threadId?: string): Promise<string> | undefined;
 }
 
 type FixtureTurn = {
@@ -19,6 +20,7 @@ type FixtureTurn = {
   calls: FixtureModelToolCall[];
   results: unknown[];
   callIndex: number;
+  completion?: Promise<string>;
 };
 
 /** Explicit fixture mode only: replaces the external protocol peer, never tool execution. */
@@ -103,9 +105,11 @@ export class FixtureAppServerTransport implements AppServerTransport {
       const calls: FixtureModelToolCall[] = [];
       let call = this.toolCalls.takeFixtureModelToolCall(String(params.threadId));
       while (call) { calls.push(call); call = this.toolCalls.takeFixtureModelToolCall(String(params.threadId)); }
+      const completion = this.toolCalls.takeFixtureModelCompletion?.(String(params.threadId));
       const turn: FixtureTurn = {
         threadId: String(params.threadId), turnId: `${this.turnIdPrefix}-${++this.turnSequence}`,
         input: params.input as CodexUserInput[], calls, results: [], callIndex: 0,
+        ...(completion ? { completion } : {}),
       };
       this.turns.set(turn.turnId, turn);
       this.emit({ id, result: { turn: { id: turn.turnId } } });
@@ -145,7 +149,16 @@ export class FixtureAppServerTransport implements AppServerTransport {
         callId: item.id, namespace: call.namespace, tool: call.tool, arguments: item.arguments } });
       return;
     }
-    const text = this.finalResponse(structuredClone(turn.results));
+    if (turn.completion) {
+      void turn.completion.then((text) => this.finish(turn, text), (error) => { this.close(); this.exitListener(error); });
+      return;
+    }
+    this.finish(turn, this.finalResponse(structuredClone(turn.results)));
+  }
+
+  private finish(turn: FixtureTurn, text: string | Error): void {
+    if (!this.turns.has(turn.turnId)) return;
+    const identity = { threadId: turn.threadId, turnId: turn.turnId };
     if (text instanceof Error) {
       this.close();
       this.exitListener(text);

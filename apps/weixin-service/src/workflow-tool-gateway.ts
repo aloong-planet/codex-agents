@@ -93,6 +93,7 @@ export class WorkflowToolGateway implements WorkflowToolGatewayPort {
       requestedWorkflowId,
       accountRef: trusted.accountId,
       targetRef: trusted.target,
+      ...(trusted.senderAccountId ? { senderAccountId: trusted.senderAccountId } : {}),
       ...(trusted.requesterRef ? { requesterRef: trusted.requesterRef } : {}),
       inputRefs: structuredClone(inputRefs),
     });
