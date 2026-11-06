@@ -32,7 +32,7 @@
     if (TERMINAL.has(s.status)) return deny('本次流程已结束，不重复处理；新的明确请求另建任务');
     if (a.type === 'duplicate') return deny('同一条原消息已登记，不重复派单或执行');
     if (a.type === 'other_confirm') return deny('待办建议需要原消息作者确认');
-    if (a.type === 'other_cancel') return deny('演示采用待确认方案：仅原发起人可取消');
+    if (a.type === 'other_cancel') return deny('仅原发起人可取消');
     if (a.type === 'restart') return ok({});
     if (['deliver', 'uncertain', 'reject_send'].includes(a.type)) {
       const index = s.outbox.findIndex(item => item.delivery === 'queued');

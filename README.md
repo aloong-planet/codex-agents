@@ -2,6 +2,8 @@
 
 A local personal assistant using Codex App Server, with independently enabled Weixin iLink and Feishu channels, including allowlisted Feishu group conversations. Private chats share owner memory while each group has its own shared context, memory and tasks. Group and member access is configured locally and takes effect on restart.
 
+Selected groups can enable automatic task dispatch: Sam interprets authorized members' ordinary messages and coordinates Alice (commerce), Bill (daily life) and Jack (development). Each specialist accepts and reports work using its own bot identity. Inferred tasks wait for their author's confirmation. See [dispatch setup and acceptance](docs/ops/feishu-agent-dispatch.md) for the required applications, authenticated callbacks and deployment checks.
+
 ## 目录
 
 - `apps/weixin-service`：本地微信直连、Codex 转发、媒体、Vault、统一管理的日报、一次性与周期提醒及网页研究服务。

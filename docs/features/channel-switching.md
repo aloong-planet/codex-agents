@@ -9,13 +9,13 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 ## Capabilities
 
 - A local pairing guide accepts hidden application credentials, discovers the owner's Feishu private conversation from a one-time message and asks for confirmation before saving. Pairing enables Feishu while preserving already enabled Weixin access; cancellation, timeout or failed saving retains the original configuration and personal data.
-- Only the bound owner uses private chats. In explicitly enabled groups, only listed members who genuinely mention this bot can invoke it; joining a group never enables it automatically.
-- Feishu supports text, images, files, supported rich text and text reminders. It replies directly without an automatic processing acknowledgement; Weixin retains its typing indication and fallback acknowledgement.
+- Only the bound owner uses private chats. In explicitly enabled groups, only listed members can invoke the assistant; joining a group never enables it automatically. The default mode requires a genuine bot mention; selected groups can use [automatic task dispatch](agent-dispatch.md).
+- Feishu supports text, images, files, supported rich text and text reminders. Private chats and mention-only groups reply directly without an automatic processing acknowledgement; dispatch specialists announce the accepted task. Weixin retains its typing indication and fallback acknowledgement.
 - Current, quoted and recent images and authorized local files can be selected and sent. Replies, errors and media return to the conversation that requested them.
-- Saved choices resume in their original conversation after restart subject to current permissions. In a group, only the original requester can choose, clarify or cancel after mentioning the bot again; another member's request can coexist.
+- Saved choices resume in their original conversation after restart subject to current permissions. In a group, only the original requester can choose, clarify or cancel; mention-only groups require another bot mention. Another member's request can coexist.
 - Private chats share curated personal memory. Each group recalls and saves only its own memory, including plans, independently of private chats and other groups.
 - Members share their group's discussion history; private chats and different groups have separate contexts and message order. Other conversations can accept work while one is busy.
-- Ordinary messages from all human members in an enabled group can inform a later answer, with their authors retained. They do not themselves trigger replies or operations, including when an unlisted member mentions the bot.
+- Ordinary messages from all human members in an enabled group can inform a later answer, with their authors retained. In mention-only groups they do not themselves trigger replies or operations. Unlisted members cannot initiate work in either mode.
 - Authorized group members use the owner's existing business-file grants. They gain no additional directories and cannot read service-private state or personal model memory through those grants.
 - New tasks and plan reminders return to their creation conversation. Private tasks can be edited from either private chat; group tasks are managed by authorized members of that group. Editing does not move delivery.
 - Private task lists default to the current notification conversation and can include both private channels on explicit request. Group lists, history and direct task references stay within that group, even when asking for all tasks.
@@ -26,7 +26,7 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 ## Boundaries and non-goals
 
 - Group and member lists are maintained locally and apply on restart. Groups require Feishu permission to deliver mentions and ordinary group discussion; unseen messages cannot be used as context.
-- A typed bot name, another bot's mention, a quoted reply or @all alone does not invoke the assistant. Ordinary context is limited to recent discussion; it is not a complete group archive.
+- In mention-only groups, a typed bot name, another bot's mention, a quoted reply or @all alone does not invoke the assistant. Ordinary context is limited to recent discussion; it is not a complete group archive.
 - Group invocation does not inherit personal model integrations or personal memory. Business-file access remains subject to current grants and protected internal-state exclusions.
 - Recovery retains file-query allowances and does not repeat completed changes or accepted/uncertain sends. Changed permissions, missing context, uncertain operations or exhausted limits produce a failure notice. Service restarts do not resume interrupted ordinary requests.
 - After a completed change, recovery can reuse the confirmed result; a new or changed mutation needs a fresh request. Native operations whose effects cannot be reconciled stop continuation.

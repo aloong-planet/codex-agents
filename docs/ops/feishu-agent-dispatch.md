@@ -1,0 +1,91 @@
+# Feishu agent dispatch setup and acceptance
+
+This procedure enables [automatic group dispatch](../features/agent-dispatch.md) on the existing local service. Keep the current owner bindings, memory identity, task scope, state directory and business-file grants. All examples use synthetic values; never commit real identifiers, credentials or state.
+
+## Applications and event intake
+
+Create and publish separate application bots for Alice, Bill and Jack, and add all four bots to the intended group. Sam remains the canonical account: member open IDs in the allowlist belong to Sam's application. Do not substitute a specialist's member identifiers or create a second owner binding for it.
+
+Only Sam subscribes to `im.message.receive_v1`. For Sam, enable the private/group message and message-resource permissions required by the existing [group setup](../../apps/weixin-service/README.md#feishu-group-configuration), including delivery of ordinary group discussion. It must also be able to read a message to resolve genuine cross-application bot mentions. Specialists need `im:message:send_as_bot` (send as an app) and `im:resource` (read and upload images/files); they do not subscribe to inbound events. Confirm each application's approved permissions, publication, visibility and group membership in the tenant before enabling dispatch. A role name does not enable website accounts, publishing, booking or shell execution.
+
+Platform references: [event subscription configuration](https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case), [message reception](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive), and [message retrieval](https://open.feishu.cn/document/server-docs/im-v1/message/get). Tenant approval and real delivery must be checked independently of local tests.
+
+## Local configuration
+
+Use the existing private `channel.json` or `CHANNEL_CONFIG_PATH`. Merge this fragment into its `feishu` object, retaining Sam's actual `appId` and `appSecret`. The callback token and encryption key must match Sam's event configuration. Both are required; plaintext callbacks are rejected.
+
+```json
+{
+  "receiveMode": "webhook",
+  "webhook": {
+    "port": 4318,
+    "path": "/feishu/events",
+    "verificationToken": "REPLACE_WITH_PRIVATE_TOKEN",
+    "encryptKey": "REPLACE_WITH_PRIVATE_ENCRYPT_KEY"
+  },
+  "groups": [
+    { "chatId": "oc_EXAMPLEGROUP", "allowedSenderIds": ["ou_EXAMPLEOWNER"] }
+  ],
+  "dispatch": {
+    "groupChatIds": ["oc_EXAMPLEGROUP"],
+    "agents": [
+      { "id": "sam" },
+      { "id": "alice", "appId": "cli_aaaaaaaaaaaaaaaa", "appSecret": "REPLACE_WITH_ALICE_SECRET" },
+      { "id": "bill", "appId": "cli_bbbbbbbbbbbbbbbb", "appSecret": "REPLACE_WITH_BILL_SECRET" },
+      { "id": "jack", "appId": "cli_cccccccccccccccc", "appSecret": "REPLACE_WITH_JACK_SECRET" }
+    ]
+  }
+}
+```
+
+The four required role IDs have built-in names and responsibilities. Additional roles may supply an explicit `name` and `responsibility`, plus a unique application; the roster accepts 4–16 entries. Sam inherits the canonical credentials and must not specify them again. Dispatch groups must be a nonempty subset of the existing group allowlist. Preserve unrelated groups when merging configuration. Configuration is read at startup and malformed values stop startup.
+
+## Public ingress and cutover
+
+1. Prepare the reviewed release and locked dependencies using the repository-pinned Node 26.7.0 runtime. Complete automatic checks before changing production.
+2. Prepare a stable HTTPS hostname and a tunnel/reverse proxy whose sole upstream is `127.0.0.1:4318`. The receiver itself binds only loopback. Expose only the configured callback path; never expose administration port 4317 or `/api/state`. The ingress must preserve request bodies and Feishu signature headers and must not insert an interactive login challenge.
+3. Stop the existing service, confirm its listener has closed, and make an owner-only backup of the complete private state directory and launcher configuration. Include SQLite WAL/SHM files and retained migration markers. Do not run two service instances against the same state.
+4. Merge the configuration, preserve file permissions (`0700` directory and `0600` secrets), and point the launcher at the prepared release. Start the service and ingress. Verify local channel readiness, then configure Sam to send encrypted events to `https://YOUR_HOST/feishu/events` and complete authenticated URL verification. Publish required platform changes.
+5. Check that an unrelated public path and administrative path are unavailable. A callback challenge, healthy process or local readiness alone does not establish message delivery. Follow the acceptance sequence below in the actual group and both existing private chats.
+
+The computer and ingress must stay available. Admission is durable before acknowledgement, but there is no separate cloud queue. Local stores include `feishu-callbacks.sqlite`, `agent-dispatch.sqlite` and `agent-sessions.sqlite`, alongside existing workflow and task state. Keep the entire state directory when changing releases. A credential change may invalidate queued callback or dispatch authority; do not expect it to migrate work to another identity.
+
+### Cloudflare Tunnel routing
+
+Install the official `cloudflared` client and create a tunnel in the domain's Cloudflare account. Map the selected public hostname to the callback receiver using an exact path rule and a catch-all rejection. For a locally managed tunnel, the ingress portion is:
+
+```yaml
+ingress:
+  - hostname: agents.example.com
+    path: ^/feishu/events$
+    service: http://127.0.0.1:4318
+  - service: http_status:404
+```
+
+Replace the example hostname and supply the tunnel's private credentials separately. The path is preserved when forwarding. Validate the configuration with `cloudflared tunnel --config <config-path> ingress validate`, then use `ingress rule <url>` for the callback, `/api/state`, `/`, and a longer callback-like path. Only the exact callback should match the local service; the others must match `http_status:404`. These offline checks do not establish DNS, connector health or live Feishu verification. Follow [Cloudflare's setup](https://developers.cloudflare.com/tunnel/get-started/) and [configuration reference](https://developers.cloudflare.com/tunnel/features/locally-managed-tunnels/configuration-file/) for the selected tunnel management mode.
+
+## Acceptance sequence
+
+Use one test group, the owner's existing allowlist entry and harmless files in an already authorized directory. Record the deployed commit/release, exact incoming messages, visible bot identity, actual replies, received files, task outcomes and human confirmation. Automated fixture delivery is separate evidence.
+
+| Scenario | Group action | Required observation |
+| --- | --- | --- |
+| Explicit work | Without @, ask Alice's domain: “帮我根据这些已知事实写闲鱼商品文案：二手桌灯，黑色，正常使用，灯座有划痕，售价 50 元；未知信息标为待补，不要发布。” | Alice announces the listing task, then returns the result. Missing facts are not invented; no website publication occurs. |
+| Bill artifact | “请规划南京一人一天行程：从南京站出发，预算 300 元，日期为我接下来指定的日期。交通、开放安排和天气请注明来源，估算单列；保存并发给本群，不要预约。” Supply the actual date when asked. | Bill accepts, obtains missing essential inputs, saves and delivers the plan. Inspect stations, date/source freshness, budget, estimates and alternatives inside the file. |
+| Jack artifact | Supply an authorized test-project path and reproducible problem: “价格减优惠后不能为负数。请读取 discount.ts，交付补丁与测试用例，不要修改原项目，也不要声称运行了测试。” | Jack reads that source and sends a reviewable patch/test artifact with accurate unexecuted-test status. Check the source remains unchanged. |
+| Inferred task | Discuss a possible trip without requesting action. If Sam proposes help, add two conditions, then confirm as the original author. | No specialist execution before confirmation; both conditions and the confirmation constraints affect the accepted task. Another member cannot confirm it. |
+| Genuine wrong-role mention | Use Feishu's actual @ selector to mention Bill for a code problem. | Bill explains the mismatch, Sam reassigns, and Jack alone executes. A typed name alone does not confer mention priority. |
+| Ownership and interruption | During a safe request, send a supplement, then cancel as its author. Repeat another member's attempted control only after explicitly adding that member for testing. | Author controls are received while work is active; other members cannot take over. Completed actions are reported, not described as undone. |
+| File choice | Ask for an ambiguous harmless file selection; answer as the original author, including after a coordinated restart. | The selected file arrives through the original specialist in the original group; another member's short answer cannot select it. |
+| Reminder and memory | Ask a specialist for a short one-time reminder and save a harmless group fact. Restart before it is due; later ask another specialist for that fact. | Reminder retains the creating bot/group; curated group facts can be shared across roles. Private/other-group facts remain inaccessible. |
+| Legacy channels | Use an existing private Weixin command and Feishu private chat, plus an enabled group outside dispatch. | Existing destinations, file grants and mention-only behavior remain intact. Confirm actual receipt separately from channel acceptance. |
+
+Natural-language routing can clarify instead of dispatching when information is missing. Preserve the actual response rather than replacing it with an expected script. Do not force real failures that risk duplicate actions; deterministic restart, revocation, unknown-delivery and rejected-report tests cover those mechanics, while a real unknown send must be inspected in the original group before any further action.
+
+## Rollback and diagnosis
+
+For operational rollback, first stop intake and inspect existing in-flight work. Remove `feishu.dispatch` to restore mention-only handling on the current binary, keeping the same state. If returning Sam to long connection, remove `webhook`, set `receiveMode` to `websocket` (or omit it), restore that mode in Sam's platform console, and restart once. Specialist-owned reminders still need their original application route; disabling dispatch does not transfer them to Sam. Reconcile those tasks before removing their configuration.
+
+Retain new state and delivery evidence. Do not restore a pre-cutover database over later accepted or uncertain sends, or downgrade the binary without checking compatibility. Re-enabling a prior identity can make retained eligible work available again; inspect the queue before resuming.
+
+Inspect local `/api/state` for dispatch outcomes and the normal private diagnostics for error codes. Never post raw state, callback bodies or credentials to an issue. A failed acceptance notification prevents that attempt from starting; a rejected final report can be explicitly retried by the author without repeating business work. Unknown delivery cannot be treated as rejected.

@@ -1,8 +1,8 @@
 # Agent dispatch
 
-> Status: confirmed specification; implementation and production acceptance are pending.
+> Status: local implementation and independent review complete; production provisioning and acceptance are pending.
 > Related: [channel boundaries](channel-switching.md), [ADR-0024](../adr/0024-coordinate-independent-group-agents.md).
-> Pending: authorized ordinary group messages can initiate dispatch to multiple independently identified agents, with a task-specific acceptance message and a completion report in the originating group.
+> Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
 
 ## Problem Statement
 
@@ -54,7 +54,7 @@ The following role descriptions are the confirmed dispatch responsibilities, not
 - agent-dispatch::REQ-002/AC-03: Bill handles everyday-life affairs, including food, clothing, housing, travel planning and arrangements.
 - agent-dispatch::REQ-002/AC-04: Jack handles technical affairs and development-related requirements.
 
-Sam already has a Feishu application. Alice, Bill and Jack need applications created. This is onboarding context; application creation does not itself demonstrate task capability or delivery acceptance. No further exclusions for the three specialists were supplied.
+Sam has the existing Feishu application. Alice, Bill and Jack have separate published applications with Bot capability and the approved message-send and resource permissions, currently available to the owner only. Group membership and actual delivery remain deployment acceptance. Application creation does not itself demonstrate task capability or delivery acceptance. No further exclusions for the three specialists were supplied.
 
 ### agent-dispatch::REQ-003 One specialist per request (direct acceptance)
 
@@ -149,9 +149,9 @@ Use Feishu application event callbacks, with a loopback-only receiver exposed th
 
 Keep the canonical Sam application/group authority, memory and scheduled-task scope. Attach a separately trusted execution role and immutable outbound application identity to a dispatch request, workflow delivery and scheduled occurrence. Agent identity never replaces the human requester. Role-specific sessions share only the existing curated group memory; Sam's coordinator has no business tool catalog. Genuine cross-application bot mentions are resolved through platform application IDs, not display names or equality assumptions about application-scoped open IDs. See ADR-0024.
 
-Dispatch requests have durable proposed, queued, running, waiting, completed, failed and cancelled outcomes; notification state remains independent. Confirming a proposal queues it; execution accepts a queued request once; completion/failure/cancellation terminates that attempt. Waiting preserves an unresolved clarification or file choice. An interruption becomes failed unless existing safe recovery evidence authorizes continuation. Explicit retries retain the prior attempt and completed-effect context. Original-requester controls are admitted independently of specialist execution. Existing requester-bound file choice handling precedes fresh task recognition. Completion and promotion of a queued supplement are recorded atomically, including completion through a pending file choice; restart preserves both the previous result notice and the next turn.
+Dispatch requests have durable proposed, queued, running, waiting, completed, failed and cancelled outcomes; notification state remains independent. Confirming a proposal queues it and retains both its accumulated supplements and any new confirmation conditions as the active authorized source; background discussion alone cannot authorize a tool operation. Execution accepts a queued request once; completion/failure/cancellation terminates that attempt. Waiting preserves an unresolved clarification or file choice. An interruption becomes failed unless existing safe recovery evidence authorizes continuation. Explicit retries retain the prior attempt and completed-effect context. Original-requester controls are admitted independently of specialist execution. Existing requester-bound file choice handling precedes fresh task recognition. Completion and promotion of a queued supplement are recorded atomically, including completion through a pending file choice; restart preserves both the previous result notice and the next turn.
 
-Deployment and local acceptance use the Node version pinned in the repository's CI configuration, matching the existing service runtime. A runtime upgrade must first verify real permission-worker writes and recovery; a successful model response does not establish filesystem compatibility. Full task briefs use a separate bounded capture from the legacy short file-search input.
+Deployment and local acceptance use the Node version pinned in the repository's CI configuration, matching the existing service runtime. A runtime upgrade must first verify real permission-worker writes and recovery; a successful model response does not establish filesystem compatibility. Full task briefs use a separate 64-KiB capture from the legacy short file-search input. Oversized captures fail rather than silently dropping author conditions.
 
 The approved interaction presents task-specific acceptance, inferred-work proposal with original-author confirmation, named-agent mismatch followed by Sam reassignment, and separate failure/cancellation/result messages. Application credentials and member lists remain local restart-applied configuration. No management screen is introduced.
 
@@ -161,7 +161,7 @@ Legacy mention-only admission remains the default; enabling this feature changes
 
 Use the existing real-main fixture-only ingress and authenticated transport fakes as the highest behavioral seam. Drive platform-shaped messages through production admission and observe classifier selection, requester control, replies, files, scheduled deliveries and durable outcomes after restart. Do not substitute Provider calls or fabricated Run state for that route. A real local HTTP receiver test covers authentication, URL verification, fast durable admission and retry/restart behavior at the transport boundary. Existing workflow, memory, permission and model-protocol public-boundary tests supplement these composition tests.
 
-Fixtures take envelope and mention shapes from official Feishu examples and the installed SDK; classifier fakes substitute only the external model response. Real model selection, application permissions, stable ingress and group receipt require live acceptance separately from fixtures. The approved logic prototype defines interaction decisions, not production durability or platform delivery evidence.
+Fixtures take envelope and mention shapes from official Feishu examples and the installed SDK. Real-main dispatch cases inject already-decoded classifier decisions and exercise production parsing and dispatch effects. Separate public classifier tests keep the production wrapper and substitute only the external runtime response, covering tool-free invocation, JSON decoding, ownership/size rejection and thread release. Neither fixture establishes live semantic accuracy. Real model selection, application permissions, stable ingress and group receipt require live acceptance separately from fixtures. The approved logic prototype defines interaction decisions, not production durability or platform delivery evidence.
 
 ## Out of Scope
 
