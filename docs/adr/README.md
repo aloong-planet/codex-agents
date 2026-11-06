@@ -28,3 +28,4 @@
 | ADR-0022 | [Schedule file-query batches](0022-schedule-file-query-batches.md) | Accepted (2026-11-01) |
 | ADR-0023 | [Separate group authority from shared discussion](0023-isolate-feishu-group-authority.md) | Accepted (2026-11-05) |
 | ADR-0024 | [Coordinate independent group agents without changing group authority](0024-coordinate-independent-group-agents.md) | Proposed |
+| ADR-0025 | [Isolate private financial authority from assistant memory](0025-isolate-private-financial-authority.md) | Accepted (2026-11-07) |

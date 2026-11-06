@@ -1,7 +1,7 @@
 # Penny private bookkeeping
 
-> In progress: text bookkeeping, private Feishu intake and screenshot previews are connected in the development branch. Review, delivery checks and live provisioning remain pending. Statement import profiles remain unavailable until their final source-sample validation.
-> Related: [personal and group boundaries](channel-switching.md), [existing agent dispatch](agent-dispatch.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md).
+> Implemented: text bookkeeping, private Feishu intake and screenshot previews. Live application provisioning and owner-observed acceptance remain pending. Statement import profiles remain unavailable until their final source-sample validation.
+> Related: [personal and group boundaries](channel-switching.md), [existing agent dispatch](agent-dispatch.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md).
 
 ## Problem Statement
 
@@ -9,7 +9,7 @@ The owner wants an assistant that records personal and business receipts and pay
 
 ## Solution
 
-Penny is an independently identified Feishu bot for the owner alone. It maintains separate personal and business books in CNY, understands explicit text instructions, previews payment screenshots and supported WeChat Pay/Alipay statements, and commits those previews only after confirmation. It answers bookkeeping questions from persisted records and exact calculations. Financial state and private execution context are separate from Sam's group coordination and the other specialists.
+Penny is an independently identified Feishu bot for the owner alone. It maintains separate personal and business books in CNY, understands explicit text instructions, previews payment screenshots, and commits those previews only after confirmation. WeChat Pay/Alipay statement profiles remain the later, source-validated part of the confirmed scope and are currently unavailable. It answers bookkeeping questions from persisted records and exact calculations. Financial state and private execution context are separate from Sam's group coordination and the other specialists.
 
 ## User Stories
 
@@ -135,7 +135,7 @@ Use the existing Codex runtime with an isolated financial session and host-contr
 
 The owner explicitly sequenced implementation on 2026-11-06: finish text bookkeeping, private Feishu conversation and screenshot previews first, and perform statement-source sample validation last. Missing statement samples do not block those independent capabilities. Statement compatibility remains unverified until the source-profile acceptance conditions are met; it must not be advertised as available in the meantime.
 
-Financial records are a dedicated durable domain store, not curated chat memory. Store exact amounts, event dates, source identities, revisions and durable operation outcomes. Queries and confirmations operate on trusted owner-bound references. Model interpretation proposes typed financial actions; deterministic host validation, authorization, calculation and persistence decide the actual effect.
+The private financial authority and memory boundary are defined by [ADR-0025](../adr/0025-isolate-private-financial-authority.md). Financial records are a dedicated durable domain store, not curated chat memory. Store exact amounts, event dates, source identities, revisions and durable operation outcomes. Queries and confirmations operate on trusted owner-bound references. Model interpretation proposes typed financial actions; deterministic host validation, authorization, calculation and persistence decide the actual effect.
 
 The ledger represents cents as decimal strings at storage/model boundaries and uses integer arithmetic internally. A single positive amount supports at most 16 integer digits and two fractional digits; aggregate totals retain exact cents beyond that per-record bound. Missing categories remain unclassified. A refund may reference an existing corresponding record or retain the owner's clarification that the original transaction was not recorded; the latter does not fabricate an original payment.
 
@@ -147,7 +147,7 @@ Preview confirmations name the current preview and revision explicitly, such as 
 
 The service uses `PENNY_CONFIG_PATH` for its separate private configuration, excluding that file from group file access even when it is outside the state directory. Financial storage, media and model histories stay under the protected private state root. Operational state contains only configuration/readiness/error status; synthetic outboxes exist only in explicit fixture mode. The model receives bounded recent financial context plus any records/previews explicitly named by the owner.
 
-Statements are normalized using observed source profiles. Screenshots are interpreted as evidence with explicit uncertainty and confirmation. Neither parser success nor a confident model phrase is proof that money moved. Source-format fixtures and live application verification remain distinct from synthetic service tests.
+Future statement adapters must normalize only observed source profiles. Until those profiles are validated, every statement-file upload receives an explicit unavailable response without downloading or parsing it. Screenshots are interpreted as evidence with explicit uncertainty and confirmation. Neither parser success nor a confident model phrase is proof that money moved. Source-format fixtures and live application verification remain distinct from synthetic service tests.
 
 The confirmed prototype establishes clear-text posting, preview/confirmation, correction, withdrawal, summary and private-boundary flows. Refund and transfer answers further define the accounting rules; they do not create a new management interface.
 
