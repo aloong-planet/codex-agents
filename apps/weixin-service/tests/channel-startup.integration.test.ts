@@ -15,6 +15,7 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
 // Cancel uses a canned fixture Router decision; this verifies host effects, not live-model semantics.
+// Production coordinator JSON decoding and tool-free invocation are covered in agent-dispatch-classifier.test.ts.
 type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
   workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
@@ -1114,6 +1115,45 @@ it("accepts requester-only cancel and supplements while a specialist is still ru
     expect(JSON.stringify(done.fixtureModelRequests![2]!.input)).toContain("补充：预算 300 元");
     // Another person's control text can be inert discussion, but never the active request.
     expect(JSON.stringify(done.fixtureModelRequests![2]!.input)).not.toContain("用户消息：\\n改为无限预算");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("clarifies ambiguous controls across two proposals and cancels only an explicitly selected request", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-ambiguous-control-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, text: string, dispatchDecision: unknown) => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } }, dispatchDecision,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await send("om_propose_alice", "商品文案可能要整理一下", { kind: "propose", agentId: "alice", requestId: null, summary: "整理商品文案", message: "" });
+    await send("om_propose_bill", "周末可能想出去玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
+    const proposed = await running.until((state) => state.fixtureTextOutbox?.length === 2);
+    expect(proposed.agentDispatch?.jobs.map(({ agentId, status }) => ({ agentId, status })).sort((a, b) => a.agentId.localeCompare(b.agentId))).toEqual([
+      { agentId: "alice", status: "proposed" }, { agentId: "bill", status: "proposed" },
+    ]);
+    const aliceId = proposed.agentDispatch!.jobs.find(({ agentId }) => agentId === "alice")!.id;
+    for (const [index, kind, text] of [[0, "cancel", "取消"], [1, "confirm", "确认"]] as const) {
+      await send(`om_ambiguous_${kind}`, text, { kind, agentId: null, requestId: null, summary: "", message: "" });
+      const clarified = await running.until((state) => state.fixtureTextOutbox?.length === 3 + index);
+      expect(clarified.fixtureTextOutbox?.at(-1)?.message).toBe("我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。");
+      expect(clarified.agentDispatch?.jobs.map(({ agentId, status }) => ({ agentId, status })).sort((a, b) => a.agentId.localeCompare(b.agentId))).toEqual([
+        { agentId: "alice", status: "proposed" }, { agentId: "bill", status: "proposed" },
+      ]);
+      expect(clarified.fixtureModelRequests).toEqual([]);
+      expect(clarified.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+      expect(clarified.workflows?.runs.map(({ workflowId }) => workflowId)).toEqual(["fixture.status-check"]);
+      expect(clarified.workflows?.runs.flatMap(({ effects }) => effects)).toEqual([]);
+    }
+    await send("om_specific_cancel", "取消整理商品文案", { kind: "cancel", agentId: null, requestId: aliceId, summary: "", message: "" });
+    const cancelled = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 1);
+    expect(cancelled.agentDispatch?.jobs.map(({ agentId, status }) => ({ agentId, status })).sort((a, b) => a.agentId.localeCompare(b.agentId))).toEqual([
+      { agentId: "alice", status: "cancelled" }, { agentId: "bill", status: "proposed" },
+    ]);
+    expect(cancelled.agentFixtureOutboxes?.alice?.text[0]).toMatchObject({ chatId: "oc_alpha", message: "已停止继续处理。已经完成的操作不会自动撤销。" });
+    expect(cancelled.agentFixtureOutboxes?.bill).toEqual({ text: [], media: [] });
+    expect(cancelled.fixtureModelRequests).toEqual([]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 

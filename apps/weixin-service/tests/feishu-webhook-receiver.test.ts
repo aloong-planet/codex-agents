@@ -1,5 +1,6 @@
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -152,6 +153,42 @@ it("rejects invalid authentication, malformed and oversized bodies without admit
     expect(accepted.status).toBe(200);
     await delivered.promise;
     expect(messages).toHaveLength(1);
+  } finally { await receiver.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+it("rejects an oversized chunked body without Content-Length before admitting its otherwise valid event", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "feishu-webhook-chunked-"));
+  const receiver = new FeishuWebhookReceiver({ ...credentials, port: 0, path: "/events", databasePath: join(directory, "callbacks.sqlite") });
+  const messages: string[] = [], barrier = deferred<void>();
+  try {
+    await receiver.start(async (event) => {
+      const messageId = (event as { message: { message_id: string } }).message.message_id;
+      messages.push(messageId);
+      if (messageId === "om_after_chunked") barrier.resolve();
+    });
+    const url = `http://127.0.0.1:${receiver.port}/events`;
+    const body = encrypted(envelope("om_oversized_chunked")).padEnd(1024 * 1024 + 1, " ");
+    const response = await new Promise<{ status: number | undefined; body: string }>((resolve, reject) => {
+      const outgoing = request(url, { method: "POST", headers: { ...headers(body), "transfer-encoding": "chunked" } }, (incoming) => {
+        let text = "";
+        incoming.setEncoding("utf8");
+        incoming.on("data", (chunk: string) => { text += chunk; });
+        incoming.on("error", reject);
+        incoming.on("end", () => resolve({ status: incoming.statusCode, body: text }));
+      });
+      outgoing.on("error", reject);
+      outgoing.setTimeout(2000, () => outgoing.destroy(new Error("chunked_response_timeout")));
+      expect(outgoing.hasHeader("content-length")).toBe(false);
+      for (let offset = 0; offset < body.length; offset += 64 * 1024) outgoing.write(body.slice(offset, offset + 64 * 1024));
+      outgoing.end();
+    });
+    expect(response).toEqual({ status: 413, body: "{}" });
+    const validBody = encrypted(envelope("om_after_chunked"));
+    const accepted = await fetch(url, { method: "POST", headers: headers(validBody), body: validBody, signal: AbortSignal.timeout(2000) });
+    expect(accepted.status).toBe(200);
+    await accepted.text();
+    await barrier.promise;
+    expect(messages).toEqual(["om_after_chunked"]);
   } finally { await receiver.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
