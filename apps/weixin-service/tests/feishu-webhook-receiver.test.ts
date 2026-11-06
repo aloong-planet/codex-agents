@@ -31,6 +31,27 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+it("binds an optional private receiver to the authenticated header tenant", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "feishu-private-tenant-"));
+  const receiver = new FeishuWebhookReceiver({ ...credentials, tenantKey: "fixture-tenant", port: 0, path: "/penny/events", databasePath: join(directory, "callbacks.sqlite") });
+  const received = deferred<unknown>(), messages: unknown[] = [];
+  try {
+    await receiver.start(async (event) => { messages.push(event); received.resolve(event); });
+    const url = `http://127.0.0.1:${receiver.port}/penny/events`;
+    for (const tenant of [undefined, "wrong-tenant"]) {
+      const value = envelope();
+      const body = encrypted({ ...value, header: { ...value.header, tenant_key: tenant } });
+      const response = await fetch(url, { method: "POST", body, headers: headers(body) });
+      expect(response.status).toBe(401); await response.text();
+    }
+    const value = envelope("om_owner");
+    const body = encrypted({ ...value, event: { ...value.event, tenant_key: "untrusted-nested-tenant" } });
+    const response = await fetch(url, { method: "POST", body, headers: headers(body) });
+    expect(response.status).toBe(200); await response.text();
+    expect(await received.promise).toMatchObject({ app_id: "cli_0123456789abcdef", tenant_key: "fixture-tenant", message: { message_id: "om_owner" } });
+    expect(messages).toHaveLength(1);
+  } finally { await receiver.close(); rmSync(directory, { recursive: true, force: true }); }
+});
 it("answers encrypted verification and acknowledges durable messages while the consumer is blocked", async () => {
   const directory = mkdtempSync(join(tmpdir(), "feishu-webhook-"));
   const receiver = new FeishuWebhookReceiver({ ...credentials, port: 0, path: "/events", databasePath: join(directory, "callbacks.sqlite") });

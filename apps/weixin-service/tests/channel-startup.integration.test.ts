@@ -19,6 +19,8 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 // DISPATCH_RESULT_SCOPE_LIVE=1 opts into real model goal-scope checks; all channel sends remain fixtures.
 type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
+  penny?: { configured: boolean; ready: boolean; error?: string };
+  pennyFixtureTextOutbox?: { chatId: string; message: string }[];
   workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
   workflowModulePermissions?: { modules: { moduleId: string; revision: number; scopes: { scopeId: string }[] }[] };
   fixtureTextOutbox?: { message: string }[] };
@@ -80,6 +82,80 @@ async function start(directory: string, extraEnv: Record<string, string> = {}) {
       expect(response.status, await response.clone().text()).toBe(200);
     } };
 }
+
+it("keeps Penny bookkeeping private while existing Weixin and group dispatch remain usable", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "penny-main-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory, true);
+    const webhook = { port: await freePort(), path: "/feishu/penny/events", verificationToken: "penny-token", encryptKey: "penny-key" };
+    const penny = { appId: "cli_eeeeeeeeeeeeeeee", appSecret: "penny-secret", tenantKey: "penny-tenant", ownerOpenId: "ou_pennyowner", privateChatId: "oc_pennyprivate", webhook };
+    const configPath = join(directory, "penny.json"); writeFileSync(configPath, JSON.stringify(penny), { mode: 0o600 });
+    const text = "午饭 35.27 元 PENNY_PRIVATE_FACT";
+    const commands = { [text]: { kind: "record", evidence: text, book: "personal", entries: [{ date: "2026-11-06", kind: "expense", amount: "35.27", currency: "CNY",
+      description: "PENNY_PRIVATE_FACT", category: "餐饮", selfTransferConfirmed: false, originalRef: null, unrecordedOriginal: null, status: "settled", issue: null }] },
+      本月汇总: { kind: "query", book: "personal", from: "2026-11-01", to: "2026-11-30", category: null } };
+    const env = { PENNY_CONFIG_PATH: configPath, WORKFLOW_FIXTURE_FINANCE_COMMANDS: JSON.stringify(commands) };
+    running = await start(directory, env);
+    await running.until((state) => state.penny?.ready === true && state.channels?.feishu?.ready === true);
+    await running.post("/api/fixture/feishu/inbound", { applicationControl: { agentId: "penny", textOutcomes: ["held"] } });
+    const event = { schema: "2.0", header: { event_id: "penny_main", event_type: "im.message.receive_v1", app_id: penny.appId, tenant_key: penny.tenantKey, token: webhook.verificationToken },
+      event: { sender: { sender_type: "user", sender_id: { open_id: penny.ownerOpenId } }, message: { message_id: "om_penny_main", chat_id: penny.privateChatId, chat_type: "p2p",
+        create_time: String(Date.now()), message_type: "text", content: JSON.stringify({ text }) } } };
+    const postPenny = async (messageId: string, messageText: string) => {
+      event.event.message.message_id = messageId; event.event.message.content = JSON.stringify({ text: messageText });
+      const iv = randomBytes(16), cipher = createCipheriv("aes-256-cbc", createHash("sha256").update(webhook.encryptKey).digest(), iv);
+      const body = JSON.stringify({ encrypt: Buffer.concat([iv, cipher.update(JSON.stringify(event)), cipher.final()]).toString("base64") });
+      const timestamp = "1608725989", nonce = "penny-main";
+      const response = await fetch(`http://127.0.0.1:${webhook.port}${webhook.path}`, { method: "POST", body, headers: {
+        "x-lark-request-timestamp": timestamp, "x-lark-request-nonce": nonce,
+        "x-lark-signature": createHash("sha256").update(timestamp + nonce + webhook.encryptKey + body).digest("hex"),
+      } });
+      expect(response.status).toBe(200); await response.text();
+    };
+    await postPenny("om_penny_main", text); await postPenny("om_penny_main", text);
+    const recorded = await running.until((state) => state.pennyFixtureTextOutbox?.length === 1);
+    expect(recorded.pennyFixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_pennyprivate", message: expect.stringContaining("F00000001（版本 1）\n个人账 · 2026-11-06 · 支出 ¥35.27 · PENNY_PRIVATE_FACT") })]);
+    await running.post("/api/fixture/workflow/inbound", { text: "微信独立消息" });
+    await running.post("/api/fixture/feishu/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: "om_penny_group_regression", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text", mentions: [], content: '{"text":"帮我整理闲鱼商品描述"}' } },
+      dispatchDecision: { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理闲鱼商品描述", message: "" },
+    });
+    const result = await running.until((state) => state.weixinFixtureReplies?.length === 2 && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(result.weixinFixtureReplies?.map((reply) => reply.message)).toEqual(["已收到，正在处理。", "这是 fixture Codex 回复。"]);
+    expect(result.agentFixtureOutboxes?.alice?.text.map((reply) => reply.message)).toEqual(["我准备处理：整理闲鱼商品描述。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
+    const { pennyFixtureTextOutbox, ...operational } = result;
+    expect(pennyFixtureTextOutbox).toHaveLength(1);
+    expect(JSON.stringify(operational)).not.toMatch(/PENNY_PRIVATE_FACT|35\.27|F00000001/u);
+    expect(result.fixtureModelRequests).toHaveLength(2);
+    console.log(JSON.stringify({ kind: "penny_main_acceptance", pennyReply: pennyFixtureTextOutbox, weixinCommand: "微信独立消息", weixinReplies: result.weixinFixtureReplies,
+      runs: result.codex.runs, workflows: result.workflows, outbox: result.fixtureOutbox, groupReplies: result.agentFixtureOutboxes?.alice?.text }));
+    await running.crash(); running = undefined;
+    running = await start(directory, env);
+    await running.until((state) => state.penny?.ready === true);
+    await postPenny("om_penny_query_after_crash", "本月汇总");
+    const recovered = await running.until((state) => state.pennyFixtureTextOutbox?.at(-1)?.message.includes("净支出") === true);
+    expect(recovered.pennyFixtureTextOutbox).toHaveLength(1);
+    expect(recovered.pennyFixtureTextOutbox![0]!.message).toContain("净支出 ¥35.27");
+    expect(recovered.pennyFixtureTextOutbox![0]!.message.match(/F\d{8}/gu)).toEqual(["F00000001"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("contains an invalid Penny configuration without blocking existing private messages", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "penny-unavailable-main-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    writeFileSync(join(directory, "penny.json"), '{"appSecret":"MUST_NOT_LEAK"}', { mode: 0o600 });
+    running = await start(directory, { PENNY_CONFIG_PATH: join(directory, "penny.json") });
+    await running.post("/api/fixture/workflow/inbound", { text: "Penny 暂不可用时继续微信对话" });
+    const result = await running.until((state) => state.weixinFixtureReplies?.length === 2);
+    expect(result.penny).toEqual({ configured: true, ready: false, error: "penny_configuration_unavailable" });
+    expect(result.weixinFixtureReplies?.map((reply) => reply.message)).toEqual(["已收到，正在处理。", "这是 fixture Codex 回复。"]);
+    expect(JSON.stringify(result)).not.toContain("MUST_NOT_LEAK");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
 
 it("receives signed webhook events through real main and replies once through the configured Feishu sender", async () => {
   const directory = mkdtempSync(join(tmpdir(), "channel-webhook-main-"));
@@ -627,16 +703,18 @@ it("protects main-owned state and configuration under broad grants and rechecks 
   const vault = join(business, "demo-vault"), directory = join(vault, "state");
   const ownerHome = join(vault, "owner-home"), futureHome = join(vault, "future-home");
   const channelPath = join(vault, "Boundary C.json");
+  const pennyPath = join(vault, "Boundary D.json");
   for (const folder of [directory, ownerHome, futureHome, join(vault, ".obsidian")]) mkdirSync(folder, { recursive: true });
   writeFileSync(join(directory, "Boundary A.md"), "PRIVATE_STATE_SENTINEL");
   writeFileSync(join(ownerHome, "Boundary B.md"), "PRIVATE_CODEX_SENTINEL");
   writeFileSync(join(vault, "Boundary Z.md"), "PUBLIC_BUSINESS_SENTINEL");
+  writeFileSync(pennyPath, '{"appSecret":"PRIVATE_PENNY_CONFIG_SENTINEL"}', { mode: 0o600 });
   writeFileSync(join(futureHome, "Candidate A.md"), "PREVIOUSLY_ALLOWED_CANDIDATE");
   writeFileSync(join(vault, "Candidate Z.md"), "BUSINESS_CANDIDATE");
   const configuration = config("weixin");
   writeFileSync(channelPath, JSON.stringify({ ...configuration, channel: undefined, enabledChannels: ["weixin", "feishu"],
     feishu: { ...configuration.feishu, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_alice"] }] } }));
-  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business, CHANNEL_CONFIG_PATH: channelPath, CODEX_HOME: ownerHome };
+  const env = { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business, CHANNEL_CONFIG_PATH: channelPath, PENNY_CONFIG_PATH: pennyPath, CODEX_HOME: ownerHome };
   let running: Awaited<ReturnType<typeof start>> | undefined;
   const send = (id: string, text: string, modelToolCalls?: unknown[], privateChat = false) => running!.post("/api/fixture/feishu/inbound", {
     event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: privateChat ? "ou_owner" : "ou_alice" } },
@@ -667,7 +745,7 @@ it("protects main-owned state and configuration under broad grants and rechecks 
     await send("om_group_boundary", "读取第一个 Boundary 文件并发回", copyAndSend("group-result.txt"));
     const group = await running.until((s) => s.feishuFixtureMediaOutbox?.length === 2 && s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
     expect(group.feishuFixtureMediaOutbox?.[1]).toMatchObject({ chatId: "oc_alpha", bytesBase64: Buffer.from("PUBLIC_BUSINESS_SENTINEL").toString("base64") });
-    for (const [index, relativePath] of ["state/blocked.md", "owner-home/blocked.md", "Boundary C.json"].entries()) {
+    for (const [index, relativePath] of ["state/blocked.md", "owner-home/blocked.md", "Boundary C.json", "Boundary D.json"].entries()) {
       await send(`om_protected_write${index}`, "尝试写入受保护位置并返回结果", [
         { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath, content: "blocked", overwrite: false } },
         { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: `denied-${index}.txt`, content: result(0, ["error", "code"]), overwrite: false } },

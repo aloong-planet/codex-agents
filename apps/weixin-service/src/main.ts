@@ -1,4 +1,7 @@
 import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "./isolated-model-runtime.js";
+import { loadFinanceConfiguration } from "./finance-config.js";
+import { FinanceService } from "./finance-service.js";
+import { CodexFinanceInterpreter, parseFinanceCommand, type FinanceInterpreter } from "./finance-interpreter.js";
 import { MediaDeliveryRouter } from "./media-delivery-router.js";
 import { ConversationChannelRouter } from "./conversation-channel-router.js";
 import { PersonalOwnerDirectory } from "./personal-owner-identity.js";
@@ -334,7 +337,8 @@ const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfigu
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
   groupProtectedRoots: [path.dirname(privateStatePath), diagnosticDirectory, process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
     path.join(os.homedir(), ".agents"), path.join(os.homedir(), ".openclaw"),
-    process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json")],
+    process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json"),
+    ...(process.env.PENNY_CONFIG_PATH ? [path.resolve(process.env.PENNY_CONFIG_PATH)] : [])],
   ...(fixtureMode && process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT
     ? { budget: { maxScannedFiles: Number(process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT) } } : {}),
   diagnostics,
@@ -926,11 +930,57 @@ const service = channelPort ? new DemoService(channelPort, (url) =>
   workflowEngine,
   workflowModulePermissionSettings,
 ) : undefined;
+let penny: FinanceService | undefined;
+let pennyFixture: FixtureFeishuTransport | undefined;
+let pennyError: string | undefined;
+const pennyConfigured = Boolean(process.env.PENNY_CONFIG_PATH);
+if (pennyConfigured) {
+  let interpreter: FinanceInterpreter | undefined;
+  let transport: FeishuWebhookTransport | undefined;
+  try {
+    const configuration = loadFinanceConfiguration(process.env.PENNY_CONFIG_PATH!, {
+      apps: [...(feishuConfiguration ? [feishuConfiguration.connection.appId] : []), ...dispatchApplications.keys()],
+      ports: [port, ...(feishuConfiguration?.webhook ? [feishuConfiguration.webhook.port] : [])],
+    });
+    const root = path.join(path.dirname(privateStatePath), "penny");
+    const mediaRoot = path.join(root, "media"); fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
+    if (fixtureMode && !fixtureLiveMainModel) {
+      const commands = JSON.parse(process.env.WORKFLOW_FIXTURE_FINANCE_COMMANDS ?? "{}");
+      interpreter = { interpret: async (input) => parseFinanceCommand({ command: commands[input.text] }, input), close: async () => {} };
+    } else {
+      if (!appServerCapabilities.namedPermissionsSupported || !appServerCapabilities.structuredOutputSupported) throw new Error("penny_runtime_unavailable");
+      const runtime = createIsolatedModelRuntime({ root: path.join(root, "model-runtimes"), scope: "penny", readableRoots: [mediaRoot] });
+      const conversation = new CodexConversation(() => spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
+        600_000, undefined, undefined, 300_000, { serviceName: "penny", permissionProfile: runtime.permissionProfile,
+          structuredOutputSupported: true, automaticRecovery: true, webSearch: "disabled" });
+      interpreter = new CodexFinanceInterpreter(conversation, runtime.cwd, () => {
+        const accountId = channelConfiguration?.entries[0]?.owner.conversationAddress().accountId;
+        const selected = codexService.getPublicState().models?.accounts.find((account) => account.accountId === accountId)?.resolved;
+        if (!selected?.available) throw new Error("penny_model_unavailable");
+        return { model: selected.model, effort: selected.effort };
+      });
+    }
+    pennyFixture = fixtureMode ? new FixtureFeishuTransport(false, "ou_fixturepenny") : undefined;
+    const outbound = pennyFixture ?? new FeishuSdkTransport({ appId: configuration.appId, appSecret: configuration.appSecret, mode: "outbound" });
+    transport = new FeishuWebhookTransport(outbound, new FeishuWebhookReceiver({ ...configuration.webhook, appId: configuration.appId,
+      tenantKey: configuration.tenantKey, databasePath: path.join(root, "callbacks.sqlite") }, () => { pennyError = "penny_callback_unavailable"; }));
+    penny = new FinanceService({ root, config: configuration, transport, interpreter });
+    if (fixtureFeishu && pennyFixture) fixtureFeishu.bindApplications(new Map([
+      ...[...dispatchApplications.values()].flatMap(({ agentId, transport }) => transport instanceof FixtureFeishuTransport ? [[agentId, transport] as const] : []),
+      ["penny", pennyFixture],
+    ]));
+  } catch {
+    pennyError = "penny_configuration_unavailable";
+    await settleCleanup([() => transport?.close(), () => interpreter?.close()]).catch(() => {});
+  }
+}
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
     [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
 } : {}) } : {};
-const channelState = () => ({ ...dispatchState(), ...(fixtureMode ? { fixtureModelRequests: structuredClone(fixtureModelRequests) } : {}), ...(fixturePort ? { weixinFixtureReplies: fixturePort.getFixtureReplies() } : {}), channels: {
+const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConfigured, ...(penny?.state() ?? { ready: false }), ...(pennyError ? { error: pennyError } : {}) },
+  ...(fixtureMode && pennyFixture ? { pennyFixtureTextOutbox: pennyFixture.getTextOutbox() } : {}),
+  ...(fixtureMode ? { fixtureModelRequests: structuredClone(fixtureModelRequests) } : {}), ...(fixturePort ? { weixinFixtureReplies: fixturePort.getFixtureReplies() } : {}), channels: {
   weixin: { enabled: Boolean(channelPort), ready: startedChannels.has("weixin") && channelPort!.getSnapshot().accounts.some((account) => account.credentialStatus === "usable") },
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
@@ -948,6 +998,7 @@ await new Promise<void>((resolve, reject) => {
 process.stdout.write(`${feishuChannel ? "飞书服务状态" : "个人微信直连 iLink Demo"}: http://${host}:${port}${feishuChannel ? "/api/state" : ""}\n`);
 if (fixtureMode) process.stdout.write("当前为 fixture 测试模式，不会连接真实渠道或发送真实消息。\n");
 let stopping = false;
+const pennyStartup = penny?.start().catch(() => { pennyError = "penny_startup_unavailable"; });
 const startup = (async () => {
   let workflowReady = false;
   try {
@@ -1047,6 +1098,8 @@ function shutdown(): Promise<void> {
   const httpClosed = new Promise<void>((resolve) => server.close(() => resolve()));
   shuttingDown = (async () => {
   try { await settleCleanup([
+    () => pennyStartup,
+    () => penny?.close(),
     () => agentDispatch?.close(),
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),

@@ -54,3 +54,5 @@ window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"dual-active"
 window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"group-access",name:"Feishu group admission and ownership",path:"channel-switching/group-access/index.html"});
 
 window.PROTOTYPES.push({module:"agent-dispatch",type:"logic",id:"dispatch",name:"Agent dispatch and group reports",path:"agent-dispatch/dispatch/index.html"});
+
+window.PROTOTYPES.push({module:"finance-assistant",type:"logic",id:"private-ledger",name:"Penny private bookkeeping and confirmation",path:"finance-assistant/private-ledger/index.html"});

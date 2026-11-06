@@ -28,7 +28,7 @@ export class FeishuWebhookReceiver {
   private started = false;
   private readonly generation: string;
 
-  constructor(private readonly options: FeishuWebhookConfiguration & { appId: string; databasePath: string },
+  constructor(private readonly options: FeishuWebhookConfiguration & { appId: string; databasePath: string; tenantKey?: string },
     private readonly report: (code: string) => void = () => {}) {
     mkdirSync(dirname(options.databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(options.databasePath);
@@ -42,7 +42,8 @@ export class FeishuWebhookReceiver {
     if (!this.database.prepare("PRAGMA table_info(feishu_callbacks)").all().some((column) => column.name === "retry_at")) {
       this.database.exec("ALTER TABLE feishu_callbacks ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0");
     }
-    this.generation = createHash("sha256").update(JSON.stringify([options.appId, options.verificationToken, options.encryptKey])).digest("hex");
+    this.generation = createHash("sha256").update(JSON.stringify([options.appId, options.verificationToken, options.encryptKey,
+      ...(options.tenantKey ? [options.tenantKey] : [])])).digest("hex");
     this.database.prepare("UPDATE feishu_callbacks SET state = 'blocked', payload = NULL WHERE state = 'queued' AND generation <> ?").run(this.generation);
     this.server.requestTimeout = 3000;
     this.server.headersTimeout = 3000;
@@ -120,6 +121,7 @@ export class FeishuWebhookReceiver {
     if (!same(request.headers["x-lark-signature"], signature)) { reply(401); return; }
     const header = record(payload.header), event = record(payload.event);
     if (payload.schema !== "2.0" || !header || !same(header.token, this.options.verificationToken) || header.app_id !== this.options.appId) { reply(401); return; }
+    if (this.options.tenantKey && header.tenant_key !== this.options.tenantKey) { reply(401); return; }
     if (header.event_type !== "im.message.receive_v1") { reply(200); return; }
     const message = record(event?.message), sender = record(event?.sender);
     if (!message || !sender || !bounded(message.message_id) || !bounded(message.chat_id) ||
@@ -128,7 +130,7 @@ export class FeishuWebhookReceiver {
     if (sender.sender_type !== "user") { reply(200); return; }
     if (!bounded(record(sender.sender_id)?.open_id, 200)) { reply(400); return; }
     // Store only the SDK-equivalent message projection, never the verification token or arbitrary header overrides.
-    const normalized = { app_id: this.options.appId, sender, message };
+    const normalized = { app_id: this.options.appId, ...(this.options.tenantKey ? { tenant_key: this.options.tenantKey } : {}), sender, message };
     try {
       this.database.prepare("INSERT OR IGNORE INTO feishu_callbacks(app_id, message_id, generation, payload) VALUES (?, ?, ?, ?)")
         .run(this.options.appId, message.message_id, this.generation, JSON.stringify(normalized));
