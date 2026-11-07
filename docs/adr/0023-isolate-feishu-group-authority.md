@@ -37,3 +37,7 @@ Group model sessions use isolated configuration, disable inherited host memory a
 ## Dispatch-mode extension
 
 [ADR-0024](0024-coordinate-independent-group-agents.md) adds recognition of authorized ordinary messages in explicitly enabled dispatch groups, with original-author confirmation for inferred work. The private/group, requester, file and task boundaries above continue to apply; mention-only groups retain the original admission rule.
+
+## Team-mode extension
+
+[ADR-0026](0026-coordinate-group-work-through-isolated-teams.md) divides a dispatch group's agents into a Coordinator, Team Leaders and task-created Executors. Within such a group, the curated group memory above is visible only to the Coordinator. Every other agent sees only the brief it is handed plus its own memory scope, and the owner's private conversations with the Coordinator or Team Leaders never write to group memory. [ADR-0027](0027-bind-host-enforced-agent-profiles.md) (proposed) lets owner-configured, per-agent MCP servers and skills enter that agent's isolated runtime, while inherited host plugins and skill discovery stay disabled. The conversation, requester, file, task and revocation boundaries above are unchanged.

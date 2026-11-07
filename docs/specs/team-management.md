@@ -1,0 +1,155 @@
+# Team management
+
+> Status: specified; not implemented.
+> Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
+> Pending: teams, Team Leader applications and responsibilities are restart-applied local configuration that must contain the four default roles, and every dispatch group shares the same roster.
+> Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
+
+## Problem Statement
+
+Adding, changing or removing an Agent Team means editing local files and restarting the service, and every dispatch group gets the same four roles. The owner wants to build a group's roster from the console, onboard a new Team Leader's Feishu identity without the developer console, and give each team its own instructions, tools, MCP servers and skills. The Coordinator and the other Team Leaders must follow those changes without interrupting work in progress.
+
+## Solution
+
+A team-management page in the local console lists every Agent Team beside an editor for the selected team. A team is defined once and bound to dispatch groups. The editor covers the team's basic information and Feishu onboarding, its responsibility and instructions, its Executor Agent Profiles, its groups and its deletion. A QR scan creates the Team Leader's Feishu application. Saving applies to new requests. Binding a team to a group or removing it makes the Coordinator announce the change in that group and updates the Team Directory there. A removed team drains: it takes no new work, finishes what is active and is then unbound.
+
+## User Stories
+
+### team-management::US-001 Define a team once and bind it to groups
+
+As the owner, I want to define a team once and choose the groups where it works, so that one team serves several groups without separate configurations or Feishu applications.
+
+- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state, its bound groups, its number of Executor profiles and its active Assignments.
+- team-management::US-001/AC-02: "新增团队" adds an unnamed team to the list and opens it in the editor.
+- team-management::US-001/AC-03: The groups section has a checkbox for each dispatch group. Each group shows a preview of the teams the Coordinator can dispatch to there. A team appears in the preview only when it accepts work in that group under team-management::REQ-003.
+- team-management::US-001/AC-04: Links lead from the page to the team overview, the MCP management page and the skill management page.
+
+### team-management::US-002 Onboard a Team Leader's Feishu identity
+
+As the owner, I want to create the Team Leader's Feishu application by scanning a QR code, so that a new team can speak in groups without manual developer-console work.
+
+- team-management::US-002/AC-01: QR creation shows a QR code. Scanning it in Feishu and confirming creates a new agent application; it never selects an existing one. The credentials fill in automatically; afterwards the section shows the App ID, and the secret is saved and never displayed.
+- team-management::US-002/AC-02: The owner can instead enter an existing application: an App ID and an App Secret that can only be written or replaced. Progress then starts at the credential check.
+- team-management::US-002/AC-03: A progress list shows one line per step, each with one of the statuses not started, in progress, awaiting review, needs action and done. QR creation has six steps:
+  1. Create the application by scan.
+  2. Configure its permissions and bot capability.
+  3. Publish a version; this awaits admin review unless review exemption is enabled.
+  4. Check the credentials and read the bot information.
+  5. The Coordinator adds the bot to each bound group.
+  6. Send a test message, after the owner confirms it.
+- team-management::US-002/AC-04: When a group lets only its owner or admins add members, that group's joining step shows needs action with this reason. An expired QR code or a failed scan shows the creation step as needs action and offers a new QR code.
+- team-management::US-002/AC-05: The Coordinator's entry shows its existing application with every step done and no actions.
+
+### team-management::US-003 Edit a team's responsibility, instructions and Executor profiles
+
+As the owner, I want to set each team's responsibility, its Team Leader's instructions and its Executor profiles, so that each domain gets exactly the instructions and capabilities it needs.
+
+- team-management::US-003/AC-01: The responsibility text becomes the team's entry in the Coordinator's dispatch list and in every Team Directory of its groups. The Team Leader's instructions go only to that Team Leader.
+- team-management::US-003/AC-02: Each Executor profile has its own instructions, host-tool allowlist, MCP servers and skills. The page shows the effective tools: the checked tools intersected with module permissions.
+- team-management::US-003/AC-03: "绑定 MCP" lists the enabled servers of the [MCP Catalog](mcp-catalog.md) that the profile does not yet attach, with their transport, state and usable tool count. Choosing one shows a confirmation card that names the team and profile, the `mcp__<server>__…` tools they gain and the exact command or address. The card states that the service holds the connection and Executors never see the credentials. Only confirming the card attaches the server.
+- team-management::US-003/AC-04: Each attached server can be unbound. Unbinding is a revocation under [agent-dispatch::REQ-017/AC-02](agent-dispatch.md).
+- team-management::US-003/AC-05: Skills are checked from the [Skill Library](skill-library.md). Links lead to MCP management for registering a server and to skill management for importing a skill.
+- team-management::US-003/AC-06: A save bar shows unsaved, saved and clean states. A saved change applies under [agent-dispatch::REQ-017](agent-dispatch.md).
+
+### team-management::US-004 Remove a team from a group, or delete it
+
+As the owner, I want to take a team out of a group, or delete it, without cancelling work in progress or losing its history.
+
+- team-management::US-004/AC-01: Unchecking a group and saving removes the team from that group. Deleting the team asks for confirmation and then removes it from all its groups. In either case the team stops accepting work in the affected groups immediately and shows as draining there.
+- team-management::US-004/AC-02: Active Assignments of the team in the affected groups finish, and its Team Leader closes them. The removal then completes: the team is unbound from those groups and, when deleted, leaves the team list, with a note in the editor that the deletion is complete. History keeps the team's identity and records.
+- team-management::US-004/AC-03: Scheduled tasks that send with the team's identity in an affected group are listed with the removal. Each must be moved to another team that accepts work in that group, or deleted, before the removal completes.
+- team-management::US-004/AC-04: Requests with Assignments of the team that wait for their requester keep waiting, and the removal stays pending. The page lists those requests with links to their records. The owner can confirm or cancel the ones the owner requested; the others wait for their own requester ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)).
+- team-management::US-004/AC-05: An unchecked group is marked as removed after saving; once saved, it shows as draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
+
+## Functional Requirements
+
+### team-management::REQ-001 Fixed Coordinator, editable teams
+
+- team-management::REQ-001/AC-01: Sam is the Coordinator of every dispatch group. Only its responsibility text and instructions are editable. It has no Executor profiles and cannot be deleted or unbound.
+- team-management::REQ-001/AC-02: Alice, Bill and Jack are ordinary teams that can be edited, unbound and deleted.
+- team-management::REQ-001/AC-03: The first start of console management imports the existing local configuration: the Coordinator, the three teams with their applications and responsibilities, and their bindings to the current dispatch groups. Each imported team gets one Executor profile whose instructions and tools reproduce its current behavior.
+
+### team-management::REQ-002 Valid team definitions (direct acceptance)
+
+A save is refused when a team lacks a leader name or team name, has no Executor profile, has two profiles with the same name, or uses a Feishu application that the Coordinator or another team already uses; the save bar then shows 「无法保存」 with the reasons. A save based on an outdated version of the team is also refused; the save action becomes 「重新载入」, and the owner reloads before editing again.
+
+### team-management::REQ-003 When a team accepts work in a group (direct acceptance)
+
+A bound team accepts work in a group once all of these hold: its credentials have been verified, its version is published, its bot has joined that group, and it is not draining there. The test message is offered but does not gate acceptance. Until then the team receives no Assignments there ([agent-dispatch::REQ-015/AC-01](agent-dispatch.md)).
+
+### team-management::REQ-004 Announcements and Team Directory updates
+
+- team-management::REQ-004/AC-01: When a team starts accepting work in a group, the Coordinator announces that it has joined. When a removal starts, the Coordinator announces that the team has left. Both follow [agent-dispatch::REQ-015/AC-03](agent-dispatch.md).
+- team-management::REQ-004/AC-02: The Team Directory of a group lists exactly the teams accepting work there, with their names and responsibilities.
+
+### team-management::REQ-005 Moving a scheduled task to another team (direct acceptance)
+
+Moving a scheduled task changes only its sending identity to the chosen team's Team Leader. Its schedule, content, group and history are unchanged, and it keeps the group's existing scheduled-task authority ([channel-switching](channel-switching.md)). Only teams that accept work in the task's group can be chosen.
+
+## Constraints
+
+### team-management::CON-001 Write-only application secrets (direct acceptance)
+
+Applies to: App Secrets entered by hand or filled in by QR creation. They are stored locally, never displayed, never returned by any console API and never written to logs, diagnostics or the audit ([agent-console::REQ-004](agent-console.md)).
+
+## Failure modes and boundaries
+
+| User sequence | Required outcome / defining coverage unit |
+| --- | --- |
+| Owner adds a team, fills it in and saves before onboarding | Saved; the group preview omits it under team-management::US-001/AC-03 and team-management::REQ-003 |
+| Owner scans, but the QR code has expired or the scan fails | Creation step needs action; a new QR code is offered under team-management::US-002/AC-04 |
+| Version awaits admin review | Step shows awaiting review; the team accepts no work under team-management::REQ-003 |
+| A bound group allows only owners or admins to add members | That group's joining step needs action; other groups continue under team-management::US-002/AC-04 |
+| Owner enters an existing application whose secret is wrong | Credential check fails; the team accepts no work under team-management::US-002/AC-02 and team-management::REQ-003 |
+| Owner enters the Coordinator's or another team's application | Save refused under team-management::REQ-002 |
+| Owner removes the last Executor profile, or gives two profiles one name | Save refused under team-management::REQ-002 |
+| Two browser tabs edit the same team; the second saves later | Second save refused; owner reloads under team-management::REQ-002 |
+| Owner edits responsibility or instructions while a request runs | The running request keeps its definitions under [agent-dispatch::REQ-017/AC-01](agent-dispatch.md) |
+| Owner attaches an MCP server, closes the card without confirming | Nothing is attached under team-management::US-003/AC-03 |
+| Owner unbinds an MCP server while an Executor uses it | The next call is refused under team-management::US-003/AC-04 |
+| Owner unchecks a group where the team has running Assignments | Team drains in that group only under team-management::US-004/AC-01 and team-management::US-004/AC-02 |
+| Owner deletes a team that owns scheduled tasks | Removal waits until each task is moved or deleted under team-management::US-004/AC-03 |
+| Owner tries to move a task to a team that is not accepting work in that group | Not offered under team-management::REQ-005 |
+| A draining team has an Assignment waiting for another member's confirmation | Removal stays pending; the request is listed under team-management::US-004/AC-04 |
+| Coordinator's announcement fails to send | Binding change still holds; the announcement keeps its own delivery state under [agent-dispatch::REQ-015/AC-03](agent-dispatch.md) |
+| Owner tries to delete or unbind Sam | No such action under team-management::REQ-001/AC-01 |
+| Service restarts during a drain or onboarding | Drain and onboarding states resume from the stored registry; no step reruns without its recorded outcome |
+| Response or log could reveal an App Secret | Never returned or logged under team-management::CON-001 |
+
+## Implementation Decisions
+
+**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded once from the existing local configuration; after that, the console is its only editor.
+
+**Binding states.** Each team-group binding moves through these states:
+
+- onboarding, until team-management::REQ-003 holds;
+- accepting;
+- draining, from the start of a removal until active Assignments, waiting requests and scheduled tasks are cleared;
+- removed.
+
+The Team Directory and the Coordinator's roster are derived from bindings in the accepting state. Announcements are durable outbound messages with their own delivery state.
+
+**Onboarding.** QR creation uses the pinned Feishu SDK's application registration in create-only mode. Configuration, publishing, credential checks, bot information, group joining and the test message use platform APIs. Each step records its outcome so that a restart resumes without repeating completed steps.
+
+**Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task.
+
+**Console API.** Team management is served by the local console under [agent-console::CON-001](agent-console.md), and every saved change is audited under [agent-console::REQ-004](agent-console.md).
+
+## Testing Decisions
+
+- **Registry.** Tested at its public interface: versioned saves, stale-save refusal, validation, derived rosters and Team Directories, binding states and drain completion.
+- **Onboarding.** Tested against a fake of the SDK registration and platform APIs: success, expiry, review waiting, group-membership refusal and restart resumption. The fake does not establish real-tenant behavior; that remains live acceptance.
+- **Console.** HTTP-boundary tests of the management API with an authorized browser. Playwright end-to-end tests drive the page: create, onboard (with the fake), bind, attach an MCP server with confirmation, save, drain and delete.
+- **Announcements.** The real-main fixture route verifies that binding and removal produce the Coordinator's announcement and an updated Team Directory in the next Team Leader turn.
+
+## Out of Scope
+
+- Defining a team separately in each group.
+- Editing the Coordinator's application, or adding a second Coordinator.
+- Feishu hosted agents (aily), which cannot receive group events for this service.
+- Per-profile MCP credentials.
+- Restoring a deleted team; history keeps its records only.
+
+## Further Notes
+
+The onboarding steps come from official Feishu documentation read on 2026-11-07; the research notes are kept in `~/research/codex-weixin-agent-team/feishu-onboarding.md`. Admin review and group membership settings can still require manual action in Feishu.

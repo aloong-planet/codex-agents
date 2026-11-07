@@ -1,12 +1,12 @@
 # Documentation layout
 
-This repository uses one root `CONTEXT.md` across its workspace packages.
+This repository uses one `docs/CONTEXT.md` across its workspace packages.
 
 ## Authoritative documents
 
 | Location | Purpose |
 | --- | --- |
-| `CONTEXT.md` | Domain terminology and invariants |
+| `docs/CONTEXT.md` | Domain terminology and invariants |
 | `docs/adr/` | Architectural decisions and their rationale |
 | `docs/specs/<slug>.md` | Agreed requirements, boundaries, and exclusions |
 | `docs/features/<slug>.md` | Current user-visible behavior |
@@ -41,6 +41,6 @@ duplicate research copy in this repository unless explicitly requested.
 
 ## Before making changes
 
-Read `CONTEXT.md` and the relevant specifications, feature documents,
+Read `docs/CONTEXT.md` and the relevant specifications, feature documents,
 and ADRs. Use the established domain vocabulary. Explicitly identify
 conflicts with existing decisions instead of silently overriding them.
