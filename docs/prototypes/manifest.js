@@ -56,3 +56,13 @@ window.PROTOTYPES.push({module:"channel-switching",type:"logic",id:"group-access
 window.PROTOTYPES.push({module:"agent-dispatch",type:"logic",id:"dispatch",name:"Agent dispatch and group reports",path:"agent-dispatch/dispatch/index.html"});
 
 window.PROTOTYPES.push({module:"finance-assistant",type:"logic",id:"private-ledger",name:"Penny private bookkeeping and confirmation",path:"finance-assistant/private-ledger/index.html"});
+
+window.PROTOTYPES.push({module:"agent-console",type:"ui",id:"overview",name:"Agent relationships and processing history",path:"agent-console/prototype-overview.html"});
+
+window.PROTOTYPES.push({module:"agent-console",type:"ui",id:"team-structures",name:"Team organization and private conversations",path:"agent-console/prototype-team-structures.html"});
+
+window.PROTOTYPES.push({module:"agent-console",type:"ui",id:"team-management",name:"Team management",path:"agent-console/prototype-team-management.html"});
+
+window.PROTOTYPES.push({module:"agent-console",type:"ui",id:"mcp-catalog",name:"MCP management",path:"agent-console/prototype-mcp-catalog.html"});
+
+window.PROTOTYPES.push({module:"agent-console",type:"ui",id:"skill-library",name:"Skill management",path:"agent-console/prototype-skill-library.html"});
