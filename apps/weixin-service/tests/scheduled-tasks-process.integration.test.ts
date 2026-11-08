@@ -7,6 +7,8 @@ import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { ScheduledTasks } from "../src/scheduled-tasks.js";
+// Waits for a worker process's output are process waits.
+import { processWaitLimitMs } from "./support/process-wait.js";
 
 // Separate OS processes use current TypeScript source, real SQLite and a file-backed channel boundary.
 const cleanup: Array<() => void> = [];
@@ -65,7 +67,7 @@ describe("scheduled reminder process ownership", () => {
   it("a killed submitting process becomes unknown after fencing and is never replayed", async () => {
     const { store, outboxPath, start, setNow } = await fixture();
     const child = await start("hang"); const submitted = once(child, "message"); child.send("wake"); await submitted;
-    await vi.waitFor(() => expect(fs.readFileSync(outboxPath, "utf8")).toContain("给花浇水"));
+    await vi.waitFor(() => expect(fs.readFileSync(outboxPath, "utf8")).toContain("给花浇水"), { timeout: processWaitLimitMs });
     const exited = once(child, "exit"); child.kill("SIGKILL"); await exited;
     setNow("2026-10-14T07:01:01Z"); await store.tick(); await store.tick();
     expect(await store.execute({ toolId: "schedules.inspect", toolVersion: 1, arguments: { reference: "浇水" } }, turn)).toMatchObject({ history: [{ execution: "succeeded", delivery: "unknown", reason: "submission_interrupted", totalAttempts: 1 }] });
