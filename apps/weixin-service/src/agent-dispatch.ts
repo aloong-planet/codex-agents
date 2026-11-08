@@ -145,7 +145,8 @@ export class AgentDispatch {
           const agent = this.options.agents.find((candidate) => candidate.id === decision.agentId)!;
           const named = this.options.agents.find(({ id }) => id === event.mentionedAgentIds?.[0]);
           if (decision.kind === "dispatch" && named && named.id !== COORDINATOR_ID && named.id !== agent.id) {
-            const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 Sam 重新分派，由他独立处理。`;
+            const coordinator = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
+            const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 ${coordinator.name} 重新分派，由他独立处理。`;
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation });
             if (!informed.ok) { this.finishInput(event.key); continue; }
             const reassigned = await this.coordinate(event, bindingHash, `已将这项需求转派给 ${agent.name}。`);

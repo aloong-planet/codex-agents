@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+import { ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
+import type { TeamDefinitions } from "../src/team-registry.js";
+import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
+import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } from "../src/workflow-tool-host.js";
+import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
+
+// Resolution and host-tool boundary seams. The shared host is the real WorkflowToolHost over the production catalog,
+// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts;
+// main's Coordinator wiring is a recorded gap there.
+const definitions: TeamDefinitions = {
+  coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: "cli_0123456789abcdef",
+    profile: { instructions: "协调规则", hostTools: ["files.read"] } },
+  dispatchGroups: ["oc_alpha"],
+  teams: [{ id: "bill", teamName: "生活团队", responsibility: "生活", leader: { name: "Bill", appId: "cli_2222222222222222", profile: { instructions: "", hostTools: [] } },
+    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] }],
+    bindings: [{ chatId: "oc_alpha", state: "accepting" }] }],
+};
+const trusted: TrustedWorkflowTurn = { eventKey: "event-1", accountId: "account-1", target: "target-1", occurredAt: 1_788_200_000_000, originalTextRef: "text-ref-1", attachmentRefs: [] };
+function sharedHost() {
+  const reached: string[] = [];
+  const catalog = createProductionWorkflowToolCatalog({ files: false, media: true, directFiles: true, delivery: true, schedules: true });
+  const host = new WorkflowToolHost(catalog, { submit: async () => { throw new Error("gateway_not_expected"); } },
+    { execute: async (request: WorkflowToolRequest) => { reached.push(request.toolId); return { entries: [] }; } });
+  return { catalog, host, reached };
+}
+const offered = (tools: ProfileToolHost) => tools.definitions().flatMap((namespace) => "tools" in namespace ? namespace.tools.map(({ name }) => `${namespace.name}.${name}`) : []);
+
+describe("agent profile resolution", () => {
+  it.each([
+    ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
+      { instructions: "协调规则", hostTools: [], memoryScope: "group" }],
+    ["an Executor's host tools as its allowlist intersected with the catalog", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
+      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: "group" }],
+  ])("resolves %s", (_case, agent, catalog, expected) => {
+    expect(resolveAgentProfile(definitions, agent, catalog)).toEqual(expected);
+  });
+
+  it.each([["an unknown team", "nobody", "executor-1"], ["an unknown Executor profile", "bill", "missing"]])("refuses %s", (_case, teamId, profileId) => {
+    expect(() => resolveAgentProfile(definitions, { role: "executor", teamId, profileId }, PRODUCTION_TOOL_IDS)).toThrow(/^agent_profile_unknown$/);
+  });
+});
+
+describe("profile tool host", () => {
+  it("offers only the allowed tools and refuses another call before the shared host", async () => {
+    const { catalog, host, reached } = sharedHost();
+    const tools = new ProfileToolHost(host, catalog, ["files.find", "schedules.list"]);
+    expect(offered(tools)).toEqual(["files.find", "schedules.list"]);
+    const binding = host.bind("profile-thread", trusted);
+    try {
+      const refused = await tools.execute("read", { fileRef: "file-ref" }, { threadId: "profile-thread", turnId: "turn", namespace: "files" });
+      expect(JSON.parse(refused.contentItems[0]!.text)).toEqual({ ok: false, error: { code: "agent_profile_tool_refused", retryable: false, action: "stop" } });
+      expect(reached).toEqual([]);
+      await tools.execute("find", { kind: "file", limit: 1 }, { threadId: "profile-thread", turnId: "turn", namespace: "files" });
+      expect(reached).toEqual(["files.find"]);
+    } finally { await binding.release(); }
+  });
+
+  it("keeps the shared contract hash when every tool is allowed and changes it when narrowed", () => {
+    const { catalog, host } = sharedHost();
+    expect(new ProfileToolHost(host, catalog, PRODUCTION_TOOL_IDS).contractHash()).toBe(host.contractHash());
+    expect(new ProfileToolHost(host, catalog, PRODUCTION_TOOL_IDS.filter((id) => id !== "files.edit")).contractHash()).not.toBe(host.contractHash());
+  });
+});
