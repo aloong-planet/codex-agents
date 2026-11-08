@@ -753,8 +753,9 @@ const personalMemoryCurator: AccountMemoryCurator = fixtureMode
       accountMemoryCuratorCwd,
     );
 let groupMemoryCurator: AccountMemoryCurator | undefined;
-// Team Leader and Executor memories share the isolated group curator's runtime. Their tool host has no notification route and
-// no reminder ownership, so a planned event there never becomes a second reminder of a group's message (agent-dispatch::REQ-012).
+// Team Leader and Executor memories share the isolated group curator's runtime, which only the group curator closes. Their tool
+// host has no notification route and no reminder ownership, so a planned event there gets neither a delivery destination nor a
+// reminder intent; group reminders stay with the group memory (agent-dispatch::REQ-012).
 let dispatchMemoryCurator: AccountMemoryCurator | undefined;
 // Fixture mode only: what each fixture curator was asked to curate, so whole-app cases can see which memory a turn reached.
 const fixtureMemoryCurations: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }> = [];
@@ -772,7 +773,10 @@ if (feishuConfiguration?.owner.hasGroups) {
     try {
       const runtime = isolatedConversation("groupMemoryCurator");
       groupMemoryCurator = new CodexAccountMemoryCurator(runtime.agent, accountMemoryTools, runtime.cwd);
-      if (feishuConfiguration.dispatch) dispatchMemoryCurator = new CodexAccountMemoryCurator(runtime.agent, new AccountMemoryToolHost(accountMemoryStore, accountMemorySearch), runtime.cwd);
+      if (feishuConfiguration.dispatch) {
+        const curator = new CodexAccountMemoryCurator(runtime.agent, new AccountMemoryToolHost(accountMemoryStore, accountMemorySearch), runtime.cwd);
+        dispatchMemoryCurator = { curate: (input) => curator.curate(input), cancelAccount: (accountId) => curator.cancelAccount(accountId), close: () => {} };
+      }
     } catch { process.stderr.write("group_memory_runtime_unavailable\n"); }
   }
 }

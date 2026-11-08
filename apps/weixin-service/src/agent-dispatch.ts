@@ -453,17 +453,19 @@ export class AgentDispatch {
    */
   private async rememberRequest(notice: Notice): Promise<void> {
     if (!notice.requestId || !notice.memory) return;
-    const job = this.job(notice.requestId);
-    if (!job) return;
-    let posts: string[] = [];
-    this.transaction(() => {
-      posts = this.database.prepare("SELECT payload FROM dispatch_notice WHERE request_id = ? AND state = 'accepted' AND captured IS NULL ORDER BY accepted_at, sequence")
-        .all(notice.requestId!).map((row) => (JSON.parse(String(row.payload)) as Notice).text);
-      this.database.prepare("UPDATE dispatch_notice SET captured = 1 WHERE request_id = ? AND state = 'accepted' AND captured IS NULL").run(notice.requestId!);
-    });
-    // The attempt's own message: a promoted supplement may already have replaced the request's current one.
-    const { attempt, event } = notice.memory;
+    const requestId = notice.requestId;
+    // The delivery outcome is already recorded; a memory failure never changes it.
     try {
+      const job = this.job(requestId);
+      if (!job) return;
+      let posts: string[] = [];
+      this.transaction(() => {
+        posts = this.database.prepare("SELECT payload FROM dispatch_notice WHERE request_id = ? AND state = 'accepted' AND captured IS NULL ORDER BY accepted_at, sequence")
+          .all(requestId).map((row) => (JSON.parse(String(row.payload)) as Notice).text);
+        this.database.prepare("UPDATE dispatch_notice SET captured = 1 WHERE request_id = ? AND state = 'accepted' AND captured IS NULL").run(requestId);
+      });
+      // The attempt's own message: a promoted supplement may already have replaced the request's current one.
+      const { attempt, event } = notice.memory;
       await this.options.memory.capture(this.options.memoryScope, { event, senderAccountId: job.senderAccountId,
         userId: `${job.id}:user:${attempt}`, userText: event.text, assistantId: `${job.id}:assistant:${attempt}`, assistantText: posts.join("\n") });
     } catch { this.failure("dispatch_group_memory_failed"); }
