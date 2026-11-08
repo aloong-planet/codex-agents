@@ -90,6 +90,26 @@ describe("console control channel", () => {
     await expect(exchangeLoginLink(String(right.url))).resolves.toMatch(/^codex_console_\d+=[0-9a-f]{64}$/);
   });
 
+  it("rotates its token on every start, so a token from an earlier start stops working", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "console-control-"));
+    cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+    const stateDirectory = path.join(root, "state");
+    const access = new ConsoleAccess({ directory: stateDirectory });
+    const controlFile = path.join(stateDirectory, "console-control.json");
+    const first = await ConsoleControlServer.start({ stateDirectory, access, port: 4317 });
+    const firstToken = (JSON.parse(fs.readFileSync(controlFile, "utf8")) as { token: string }).token;
+    await first.close();
+
+    const second = await ConsoleControlServer.start({ stateDirectory, access, port: 4317 });
+    cleanups.push(() => second.close());
+    const connection = JSON.parse(fs.readFileSync(controlFile, "utf8")) as { socket: string; token: string };
+    expect(connection.token).toMatch(/^[0-9a-f]{64}$/);
+    expect(connection.token).not.toBe(firstToken);
+    expect(await sendRaw(connection.socket, `${JSON.stringify({ token: firstToken, command: "login-link" })}\n`))
+      .toEqual({ ok: false, error: "控制令牌无效" });
+    expect((await sendRaw(connection.socket, `${JSON.stringify({ token: connection.token, command: "login-link" })}\n`)).ok).toBe(true);
+  });
+
   it("issues links, lists browsers and revokes one or all for the local command", async () => {
     const { stateDirectory, state } = await start();
     const login = async () => exchangeLoginLink(String((await requestConsoleControl(stateDirectory, { command: "login-link" })).url));

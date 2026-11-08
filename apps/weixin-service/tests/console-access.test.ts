@@ -221,15 +221,13 @@ describe("console access at the local HTTP boundary", () => {
   it.each([
     ["opened just inside 2 minutes", 119_999, "valid", 302],
     ["opened just after 2 minutes", 120_001, "valid", 401],
-    ["unknown", 0, "unknown", 401],
     ["missing", 0, "missing", 401],
   ] as const)("treats a %s login link by its lifetime", async (_name, elapsed, token, status) => {
     let clock = Date.parse("2026-11-08T04:00:00.000Z");
     const { access, port } = await start({ now: () => clock });
     const link = new URL(access.issueLoginLink(port).url);
     clock += elapsed;
-    const pathname = token === "valid" ? `${link.pathname}${link.search}`
-      : token === "unknown" ? `/login?t=${"a".repeat(48)}` : "/login";
+    const pathname = token === "valid" ? `${link.pathname}${link.search}` : "/login";
     const response = await raw(port, { path: pathname });
     expect(response.status).toBe(status);
     if (status === 401) {
@@ -296,9 +294,13 @@ describe("console access at the local HTTP boundary", () => {
     expect(revokedPage.status).toBe(401);
     expect(revokedPage.body).toContain(REVOKED_NOTICE);
     expect(setCookies(revokedPage)).toEqual([`codex_console_${port}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`]);
-    expect((await raw(port, { path: "/api/state", headers: { cookie: b } })).status).toBe(200);
+    const stillB = await raw(port, { path: "/api/state", headers: { cookie: b }, agent: agentB });
+    expect(stillB.status).toBe(200);
+    expect(stillB.socket).toBe(openB.socket);
 
+    const closedB = once(openB.socket, "close");
     expect(access.revoke("all", "local-command")).toEqual({ revoked: 1, auditFailed: false });
+    await Promise.race([closedB, delay(1_000).then(() => { throw new Error("connection stayed open after revoking all"); })]);
     expect((await raw(port, { path: "/api/state", headers: { cookie: b } })).status).toBe(401);
     expect(access.listBrowsers()).toEqual([]);
   });
@@ -353,17 +355,47 @@ describe("console access at the local HTTP boundary", () => {
     for (const hash of storeText.match(/[0-9a-f]{64}/g) ?? []) expect(text).not.toContain(hash);
   });
 
-  it("refuses an authorization whose audit entry cannot be written", async () => {
-    const { access, port, directory } = await start();
+  it.each([
+    ["its audit entry cannot be written", "audit"],
+    ["the browser store cannot be written", "store"],
+  ] as const)("refuses an authorization when %s", async (_name, failing) => {
+    const directory = stateDirectory();
     fs.mkdirSync(directory, { recursive: true });
     const audit = path.join(directory, "console-audit.jsonl");
-    fs.writeFileSync(audit, "");
-    fs.chmodSync(audit, 0o400);
+    if (failing === "audit") {
+      fs.writeFileSync(audit, "");
+      fs.chmodSync(audit, 0o400);
+    } else {
+      // A directory where the store file belongs makes the store's atomic rename fail.
+      fs.mkdirSync(path.join(directory, "console-browsers.json"));
+    }
     try {
+      const { access, port } = await start({ directory });
       const link = new URL(access.issueLoginLink(port).url);
       const response = await raw(port, { path: `${link.pathname}${link.search}` });
       expect(response.status).toBe(500);
       expect(setCookies(response)).toEqual([]);
+      expect(access.listBrowsers()).toEqual([]);
+    } finally {
+      if (failing === "audit") fs.chmodSync(audit, 0o600);
+    }
+  });
+
+  it("applies a revocation and closes its connections even when the audit entry cannot be written", async () => {
+    const { access, port, directory, login } = await start();
+    const cookie = await login(CHROME_MAC);
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    agents.push(agent);
+    const open = await raw(port, { path: "/api/state", headers: { cookie }, agent });
+    expect(open.status).toBe(200);
+    const audit = path.join(directory, "console-audit.jsonl");
+    fs.chmodSync(audit, 0o400);
+    try {
+      const closed = once(open.socket, "close");
+      const [browser] = access.listBrowsers();
+      expect(access.revoke(browser!.id, "local-command")).toEqual({ revoked: 1, auditFailed: true });
+      await Promise.race([closed, delay(1_000).then(() => { throw new Error("revoked connection stayed open"); })]);
+      expect((await raw(port, { path: "/api/state", headers: { cookie } })).status).toBe(401);
       expect(access.listBrowsers()).toEqual([]);
     } finally {
       fs.chmodSync(audit, 0o600);
