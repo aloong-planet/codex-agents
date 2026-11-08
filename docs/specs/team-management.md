@@ -1,8 +1,8 @@
 # Team management
 
-> Status: specified; not implemented.
+> Status: specified. The team registry is implemented and seeded from the local configuration; the console pages are not implemented.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: teams, Team Leader applications and responsibilities are restart-applied local configuration that must contain the four default roles, and every dispatch group shares the same roster.
+> Pending: teams, Team Leader applications and responsibilities are still edited in the restart-applied local configuration, which must contain the four default roles and which the registry imports at each start. Every dispatch group still shares the same roster.
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
 
 ## Problem Statement
@@ -118,7 +118,7 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 
 ## Implementation Decisions
 
-**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded once from the existing local configuration; after that, the console is its only editor.
+**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded from the existing local configuration. Until the console saves its first change, each start imports that configuration again and records a new definitions version only when the import differs; after the first console save, the console is its only editor. Application secrets are stored beside the versions, never inside one.
 
 **Binding states.** Each team-group binding moves through these states:
 
