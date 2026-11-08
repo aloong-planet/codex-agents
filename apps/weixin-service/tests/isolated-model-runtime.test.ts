@@ -12,7 +12,7 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MEMORY_CURATOR_RUNTIME_PROFILE } from "../src/codex-account-memory-curator.js";
 import { CodexConversation, type CodexConversationOptions } from "../src/codex-conversation.js";
-import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "../src/isolated-model-runtime.js";
+import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES, type IsolatedModelRuntime } from "../src/isolated-model-runtime.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
 import { resolveCodexExecutable, spawnStdioAppServer } from "../src/stdio-app-server-transport.js";
 import { PENDING_RESPONSE_RUNTIME_PROFILE } from "../src/workflow-pending-response-router.js";
@@ -88,6 +88,15 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     plantSkill(path.join(runtimeRoot, "home", ".agents", "skills"), "own-home-probe", marker.ownHome);
     return { runtime, own, runtimeRoot };
   }
+  /** Starts a runtime once with the configuration used before the fix (bundled skills on). Like every runtime root that
+   * ran before the fix, its own codex-home then holds the bundled skills. Returns the real path of that copy. */
+  async function runAsBeforeTheFix(runtime: IsolatedModelRuntime, runtimeRoot: string): Promise<string> {
+    const session = await AppServerSession.open(model.route({ ...runtime, configOverrides: [...runtime.configOverrides, "skills.bundled.enabled=true"] }));
+    try { await session.listSkills(runtime.cwd); } finally { session.close(); }
+    const installed = path.join(runtimeRoot, "codex-home", "skills", ".system", bundled.name, "SKILL.md");
+    expect(fs.existsSync(installed), installed).toBe(true);
+    return fs.realpathSync(installed);
+  }
   const media = (name: string) => { const directory = path.join(work, "media", name); fs.mkdirSync(directory, { recursive: true }); return [directory]; };
   const expectOnlyOwnSkills = (input: string) => {
     expect(input).toContain(marker.own);
@@ -112,6 +121,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       { serviceName: "penny", structuredOutputSupported: true, automaticRecovery: true, webSearch: "disabled" }],
   ])("%s runtime offers only skills from its own home", async (_kind, root, scope, readableRoots, options) => {
     const { runtime, runtimeRoot } = runtimeWithOwnSkills(root, scope, readableRoots());
+    await runAsBeforeTheFix(runtime, runtimeRoot);
     const session = await AppServerSession.open(model.route(runtime));
     try {
       const listed = await session.listSkills(runtime.cwd);
@@ -136,7 +146,8 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
   }, 60_000);
 
   it("a skill input item cannot load a host or bundled skill", async () => {
-    const { runtime, own } = runtimeWithOwnSkills("group-model-runtimes", "feishu.group.skill-item", media("skill-item"));
+    const { runtime, own, runtimeRoot } = runtimeWithOwnSkills("group-model-runtimes", "feishu.group.skill-item", media("skill-item"));
+    const ownBundled = await runAsBeforeTheFix(runtime, runtimeRoot);
     model.respondWith(() => [assistantMessage("fake-model-reply")]);
     const session = await AppServerSession.open(model.route(runtime));
     try {
@@ -145,7 +156,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       const from = model.requests.length;
       // The App Server matches a skill item by the exact path skills/list reports (the real path); an alias is ignored.
       expect(await session.turn(thread.thread.id, [{ type: "text", text: "use these" },
-        { type: "skill", name: "host-probe", path: fs.realpathSync(hostSkill) }, { type: "skill", name: bundled.name, path: fs.realpathSync(bundled.path) },
+        { type: "skill", name: "host-probe", path: fs.realpathSync(hostSkill) }, { type: "skill", name: bundled.name, path: ownBundled },
         { type: "skill", name: "own-probe", path: fs.realpathSync(own) }])).toBe("completed");
       const input = modelInputText(model.modelRequestsSince(from).at(-1)!);
       expect(input).toContain(marker.own);
@@ -155,7 +166,8 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
   }, 60_000);
 
   it("group research through codex exec offers only its own skills", async () => {
-    const { runtime } = runtimeWithOwnSkills("group-model-runtimes", "research-feishu.group.probe");
+    const { runtime, runtimeRoot } = runtimeWithOwnSkills("group-model-runtimes", "research-feishu.group.probe");
+    await runAsBeforeTheFix(runtime, runtimeRoot);
     model.respondWith(() => [assistantMessage(JSON.stringify({ body: "Fake report.", sources: [{ title: "Example", url: "https://example.com/" }] }))]);
     const research = createScheduledResearch({ executable: resolveCodexExecutable(process.env), timeoutMs: 60_000, groupRuntime: () => model.route(runtime) });
     const from = model.requests.length;
