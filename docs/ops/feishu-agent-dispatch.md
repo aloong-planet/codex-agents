@@ -40,6 +40,8 @@ Use the existing private `channel.json` or `CHANNEL_CONFIG_PATH`. Merge this fra
 
 The four required role IDs have built-in names and responsibilities. Additional roles may supply an explicit `name` and `responsibility`, plus a unique application; the roster accepts 4–16 entries. Sam inherits the canonical credentials and must not specify them again. Dispatch groups must be a nonempty subset of the existing group allowlist. Preserve unrelated groups when merging configuration. Configuration is read at startup and malformed values stop startup.
 
+At startup the service imports `feishu.dispatch` into its team registry (`team-registry.sqlite` in the state directory), and dispatch reads the roster only from there. Until the agent console saves its first change, each start imports the file again and records a new registry version when it differs, so editing this fragment and restarting still changes the roster. After the console's first save, this fragment no longer changes the roster. The registry stores Alice, Bill and Jack's App Secrets beside its versions with owner-only file permissions, never inside a version; Sam's secret stays in `feishu.appSecret`.
+
 ## Public ingress and cutover
 
 1. Prepare the reviewed release and locked dependencies using the repository-pinned Node 26.7.0 runtime. Complete automatic checks before changing production.
@@ -48,7 +50,7 @@ The four required role IDs have built-in names and responsibilities. Additional 
 4. Merge the configuration, preserve file permissions (`0700` directory and `0600` secrets), and point the launcher at the prepared release. Start the service and ingress. Verify local channel readiness, then configure Sam to send encrypted events to `https://YOUR_HOST/feishu/events` and complete authenticated URL verification. Publish required platform changes.
 5. Check that an unrelated public path and administrative path are unavailable. A callback challenge, healthy process or local readiness alone does not establish message delivery. Follow the acceptance sequence below in the actual group and both existing private chats.
 
-The computer and ingress must stay available. Admission is durable before acknowledgement, but there is no separate cloud queue. Local stores include `feishu-callbacks.sqlite`, `agent-dispatch.sqlite` and `agent-sessions.sqlite`, alongside existing workflow and task state. Keep the entire state directory when changing releases. A credential change may invalidate queued callback or dispatch authority; do not expect it to migrate work to another identity.
+The computer and ingress must stay available. Admission is durable before acknowledgement, but there is no separate cloud queue. Local stores include `feishu-callbacks.sqlite`, `team-registry.sqlite`, `agent-dispatch.sqlite` and `agent-sessions.sqlite`, alongside existing workflow and task state. Keep the entire state directory when changing releases. A credential change may invalidate queued callback or dispatch authority; do not expect it to migrate work to another identity.
 
 ### Cloudflare Tunnel routing
 

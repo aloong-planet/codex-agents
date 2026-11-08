@@ -8,6 +8,7 @@ import { MAIN_REPLY_OUTPUT_SCHEMA, parseMainReply } from "./main-reply-result.js
 import { AppServerTurnFailure } from "./app-server-turn-driver.js";
 import type { WorkflowHandoffReceipt } from "./workflow-tool-host.js";
 import type { DispatchAgent, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
+import { COORDINATOR_ID, INITIAL_EXECUTOR_INSTRUCTIONS } from "./team-registry.js";
 
 type Runtime = { agent: CodexConversation; cwd: string };
 
@@ -34,7 +35,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   }
   async run(job: DispatchJob, signal: AbortSignal): Promise<DispatchExecutionResult> {
     const role = this.options.agents.find(({ id }) => id === job.agentId);
-    if (!role || role.id === "sam" || role.senderAccountId !== job.senderAccountId) throw new Error("dispatch_role_invalid");
+    if (!role || role.id === COORDINATOR_ID || role.senderAccountId !== job.senderAccountId) throw new Error("dispatch_role_invalid");
     const revision = this.options.contextRevision(job);
     const eligible = () => !this.closing && !signal.aborted && this.options.authorized(job) && this.options.contextRevision(job) === revision;
     if (!eligible()) throw new Error("dispatch_authorization_changed");
@@ -56,8 +57,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
       const turn = await runtime.agent.runTurn(threadId, new ChannelTurnAdapter(threadId, event, {
         accountMemory: this.options.memory(job), outboundRoots: [], channelLabel: "飞书", outboundDelivery: true,
         workflowTools: this.options.tools, isClosing: () => !eligible(), recoveryAllowed: eligible,
-        roleInstructions: `你是 ${role.name}。你的职责：${role.responsibility}。你独立完成本次分派的事务：${job.summary}。不要冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` +
-          "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核其事实与来源是否相符、预算和时间安排是否自洽。",
+        roleInstructions: `你是 ${role.name}。你的职责：${role.responsibility}。你独立完成本次分派的事务：${job.summary}。不要冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` + INITIAL_EXECUTOR_INSTRUCTIONS,
       }), undefined, (progress) => { if (signal.aborted && progress.kind === "turn_accepted") interrupt(); },
       { ...this.options.model(job), outputSchema: MAIN_REPLY_OUTPUT_SCHEMA });
       if (turn.owner === "workflow_owned") result = this.receipt(turn.receipt);
