@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { requestConsoleControl } from "../src/console-control.js";
+import { signalProcessGroup } from "../tests/support/process-group.js";
 import { authorizeLocalService } from "./console-session.js";
 
 let telemetryBuilt = false;
@@ -62,10 +63,7 @@ export async function startFixtureServer(
     if (closed) return;
     closed = true;
     const signalGroup = (signal: NodeJS.Signals) => {
-      if (!child.pid) return;
-      try { process.kill(-child.pid, signal); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
+      if (child.pid) signalProcessGroup(child.pid, signal);
     };
     signalGroup("SIGTERM");
     const until = Date.now() + 2_000;
