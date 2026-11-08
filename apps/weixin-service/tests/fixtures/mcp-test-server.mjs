@@ -11,6 +11,7 @@
 // Fixed tools: `env` (the process environment and working directory), `whoami` (pid and argv), `read_file` and
 // `write_file` (for the sandbox case).
 import fs from "node:fs";
+import process from "node:process";
 
 import { Server } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";

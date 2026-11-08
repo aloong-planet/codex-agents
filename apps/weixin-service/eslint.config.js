@@ -9,9 +9,16 @@ export default tseslint.config(
     files: ["src/public/**/*.js"],
     languageOptions: {
       globals: {
+        addEventListener: "readonly",
+        clearTimeout: "readonly",
         document: "readonly",
         fetch: "readonly",
+        innerHeight: "readonly",
+        innerWidth: "readonly",
+        location: "readonly",
         setInterval: "readonly",
+        setTimeout: "readonly",
+        window: "readonly",
       },
     },
   },

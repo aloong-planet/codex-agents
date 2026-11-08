@@ -78,6 +78,9 @@ import { CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT
 import { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID, TeamRegistry } from "./team-registry.js";
 import { createDemoServer } from "./http-server.js";
+import { ConsoleAudit } from "./console-audit.js";
+import { createConsoleRoutes } from "./console-routes.js";
+import { McpCatalog } from "./mcp-catalog.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
 import { PrivateStateStore } from "./private-state-store.js";
@@ -1002,12 +1005,17 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
 // Every page and API of the local service requires an owner-authorized browser (agent-console::CON-001).
 const consoleStateDirectory = path.dirname(privateStatePath);
-const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory });
-const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
+const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
+const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
+// The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
+const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
+const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog });
+const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),
   fixtureFeishu,
   consoleAccess,
+  consoleRoutes,
 );
 
 // Binding the exclusive listener precedes any news handoff or activation.
@@ -1017,6 +1025,7 @@ await new Promise<void>((resolve, reject) => {
 });
 process.stdout.write(`${feishuChannel ? "飞书服务状态" : "个人微信直连 iLink Demo"}: http://${host}:${port}${feishuChannel ? "/api/state" : ""}\n`);
 if (fixtureMode) process.stdout.write("当前为 fixture 测试模式，不会连接真实渠道或发送真实消息。\n");
+mcpCatalog.start();
 // The login command reaches the running service through this owner-only channel; without it the service still runs.
 const consoleControl = await ConsoleControlServer.start({ stateDirectory: consoleStateDirectory, access: consoleAccess, port }).catch((error: unknown) => {
   process.stderr.write(`console_control_unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
@@ -1137,6 +1146,7 @@ function shutdown(): Promise<void> {
     () => httpClosed,
     () => consoleControl?.close(),
     () => consoleAccess.close(),
+    () => mcpCatalog.close(),
     () => workflowEngine.close(),
     () => localFileTools.close(),
     () => workflowModulePermissions.close(),

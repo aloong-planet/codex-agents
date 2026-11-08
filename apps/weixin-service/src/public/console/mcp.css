@@ -1,0 +1,27 @@
+/* MCP 管理 page rules, from the owner-confirmed MCP catalog prototype. Spacing that the prototype wrote inline sits
+   in the amc-gap classes, because the console's content security policy refuses inline styles. */
+.amc-actions{display:flex;gap:8px;align-items:center;flex:none}
+.amc-body{padding:14px 0 4px}
+.amc-sub{display:block;font-size:10px;color:var(--acv-muted);margin-top:3px;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.amc-mono{font:10px/1.6 ui-monospace,SFMono-Regular,monospace}
+.amc-kv{display:grid;grid-template-columns:86px minmax(0,1fr);gap:6px 10px;font-size:11px;line-height:1.6}
+.amc-kv dt{color:var(--acv-muted)}
+.amc-kv dd{margin:0;color:var(--acv-ink);overflow-wrap:anywhere}
+.amc-out{margin:8px 0 0;font-size:11px}
+.amc-out summary{cursor:pointer;color:var(--acv-muted)}
+.amc-out pre{margin:6px 0 0;padding:8px;border-radius:6px;background:var(--acv-soft);font:10px/1.6 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--acv-ink)}
+.amc-tools{display:flex;flex-direction:column;gap:6px}
+.amc-tool{display:grid;grid-template-columns:16px minmax(0,1fr) auto;gap:8px;align-items:start;padding:7px 9px;border:1px solid var(--acv-line);border-radius:7px;font-size:11px}
+.amc-tool input{margin:2px 0 0}
+.amc-tool b{font:600 11px/1.5 ui-monospace,SFMono-Regular,monospace;margin-right:6px}
+.amc-tool small{display:block;color:var(--acv-muted);font-size:10px;margin-top:2px;line-height:1.6}
+.amc-tool .acv2-badge{margin-right:4px}
+.amc-tool .acv2-button{min-height:24px;padding:2px 7px;font-size:10px}
+.amc-head-row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.amc-head-row h3{margin:0}
+.amc-head-row .acv2-button{min-height:24px;padding:2px 8px;font-size:10px}
+.amc-pairs{width:100%;min-height:54px;resize:vertical;border:1px solid var(--acv-line);border-radius:6px;padding:7px 8px;background:var(--acv-paper);color:var(--acv-ink);font:10.5px/1.6 ui-monospace,SFMono-Regular,monospace}
+.amc-pairs:focus-visible{outline:2px solid var(--acv-brand);outline-offset:-2px}
+.amc-gap{margin-top:10px}
+.amc-gap-sm{margin-top:8px}
+.amc-flush{margin:0}
