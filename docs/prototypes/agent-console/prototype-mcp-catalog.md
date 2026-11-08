@@ -49,6 +49,8 @@ The table has these columns:
 - tool count, with the usable count and pending reviews;
 - attached profiles.
 
+With no server registered, the table shows a single row: 「还没有 MCP 服务器。」 and 「点「添加服务器」登记本机程序。」.
+
 "返回团队管理" leads to `prototype-team-management.html`. The team page links here from its heading and from each profile's MCP list.
 
 ### Drawer for a server
@@ -65,7 +67,7 @@ The subtitle shows the transport, the state and the tool counts. The drawer cont
 4. **Configuration.**
    - **Name.** Fixed after creation, and part of every tool name.
    - **Transport.**
-     - Local program (stdio): command, arguments one per line, working directory, environment variables. An optional macOS sandbox adds allowed domains and writable directories.
+     - Local program (stdio): command, arguments one per line, working directory, environment variables. An optional macOS sandbox adds allowed domains, readable directories and writable directories.
      - URL (Streamable HTTP): headers, a DPoP option, and OAuth client_credentials fields.
    - **Other settings.** Timeout, trusted and enabled.
    - **Field tags.** As in agent-link, field labels carry required and optional tags, and their explanations are info tips.
@@ -90,6 +92,7 @@ The console shell, buttons, inputs, badges, form sections, confirmation cards, c
 
 - **Simulation marker.** The floating `Demo ·` bar only marks the simulation.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
+- **服务器列表.** 示例数据 / 空; in the product, whether any server is registered decides it.
 - **Fake actions.** Add, import, check, save, reconnect, tool confirmation, tool switches and delete give visual feedback only. The import check returns a fixed result whatever is pasted. A refresh restores the mock data.
 - **No side effects.** The page runs no command and connects to no address.
 

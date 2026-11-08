@@ -1,0 +1,8 @@
+{
+  "name": "mcp-local-npx-test-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A dependency-free stdio MCP server that npx can run from a local folder, for the MCP catalog's sandbox test.",
+  "type": "module",
+  "bin": { "mcp-local-npx-test-server": "server.mjs" }
+}

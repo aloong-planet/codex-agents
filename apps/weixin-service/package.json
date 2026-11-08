@@ -37,8 +37,10 @@
     "console": "tsx src/console-cli.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81",
     "@huggingface/transformers": "3.8.1",
     "@larksuiteoapi/node-sdk": "1.76.0",
+    "@modelcontextprotocol/client": "2.4.0",
     "@mozilla/readability": "0.6.0",
     "@opentelemetry/api": "1.9.0",
     "@opentelemetry/context-async-hooks": "2.11.0",
@@ -58,6 +60,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",
+    "@modelcontextprotocol/server": "2.4.0",
     "@playwright/test": "^1.55.0",
     "@types/node": "^22.0.0",
     "@types/qrcode": "^1.5.5",

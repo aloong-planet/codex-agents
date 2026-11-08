@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP 管理</title>
+<link rel="stylesheet" href="/console/console.css">
+<link rel="stylesheet" href="/console/mcp.css">
+</head>
+<body>
+<div class="acv2-app">
+<header class="acv2-header"><div class="acv2-brand">Agent 工作台 <small>工作空间 / MCP 管理</small></div><div class="acv2-local"><span class="acv2-dot"></span>本机工作空间</div></header>
+<main class="acv2-main">
+<div class="acv2-heading"><div class="acv-tip-row"><h1>MCP 管理</h1><span data-console-tip="服务器由本机服务连接；执行者只拿到所绑定服务器的 mcp__ 代理工具，拿不到凭证。
+· 登记后在团队管理里绑定到执行者能力档，绑定时需要确认。
+· 不逐次确认工具调用：新增或变化的工具待复核，需人工确认的工具不提供。"></span></div><div class="amc-actions"><button class="acv2-button acv2-primary" type="button" id="amc-new">添加服务器</button></div></div>
+<div class="acv2-workspace"><section class="acv5-panel"><div class="acv5-panel-head">MCP 服务器<small id="amc-count"></small></div><div class="acv5-scroll"><table class="acv5-table"><thead><tr><th>名称</th><th>连接方式</th><th>状态</th><th>工具</th><th>绑定的能力档</th></tr></thead><tbody id="amc-rows"></tbody></table></div></section>
+<aside class="acv2-drawer" id="amc-drawer" aria-label="MCP 服务器" hidden><div class="acv2-drawer-head"><div><div class="acv2-eyebrow" id="amc-kind"></div><h2 id="amc-title"></h2></div><div class="acv2-drawer-actions"><button class="acv3-icon-close" id="amc-close" type="button" aria-label="关闭抽屉"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></div></div><div class="acv2-drawer-scroll"><div class="amc-body"><div id="amc-status"></div><div id="amc-tools"></div><div id="amc-used"></div><div id="amc-form"></div><div id="amc-danger"></div></div></div></aside><div class="acv2-mask"></div></div>
+</main></div>
+<script src="/console/console-shell.js"></script>
+<script src="/console/mcp.js"></script>
+</body>
+</html>

@@ -1,8 +1,9 @@
 # MCP catalog
 
-> Status: specified; not implemented.
-> Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: no agent can use an MCP server; group runtimes disable every inherited integration, and no MCP Catalog exists.
+> Status: local programs implemented; URL servers, JSON import, attachment to profiles and proxy tools specified, not implemented.
+> Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0029](../adr/0029-keep-service-state-outside-every-file-grant.md).
+> Pending: only local programs (stdio) can be registered; URL servers (mcp-catalog::US-001/AC-04) and JSON import (mcp-catalog::US-002) do not exist yet.
+> Pending: no profile can attach a server, so no agent receives proxy tools, the table and drawer always show no attached profile, and delete is never disabled (mcp-catalog::US-003/AC-03, US-005/AC-01, REQ-002 attached-server wording, REQ-003/AC-02, AC-03, AC-05).
 
 ## Problem Statement
 
@@ -61,7 +62,7 @@ As the owner, I want to delete servers I no longer use, without silently taking 
 
 ### mcp-catalog::REQ-001 Write-only secrets (direct acceptance)
 
-Environment values, header values and OAuth secrets can only be written. Saved values show as `••••••`, and an unchanged field keeps its value. Secrets appear as `***` in errors and in program output, and no console API returns them.
+Environment values, header values and OAuth secrets can only be written. Saved values show as `••••••`, whatever their length, and an unchanged field keeps its value. Secrets of 6 characters or more appear as `***` in errors and in program output; shorter values are not masked there, because they cannot be told apart from ordinary text. No console API returns a secret.
 
 ### mcp-catalog::REQ-002 Confirm what a server runs (direct acceptance)
 
@@ -91,6 +92,11 @@ Applies to: every agent. Capability beyond module permissions reaches an agent o
 | Timeout set to 0 or 601 | Refused under mcp-catalog::US-001/AC-05 |
 | Owner edits a server and leaves secret fields untouched | Secrets kept under mcp-catalog::REQ-001 |
 | Program prints its token, or an error contains a header value | Masked as `***` under mcp-catalog::REQ-001 |
+| A sandboxed `npx` server without `registry.npmjs.org` among its allowed domains | Fails to start; its error and output tail show npm's network error under mcp-catalog::US-003/AC-01 |
+| A sandboxed server needs a cache of another package tool (uv, pip and others) | Not provided; the program cannot use the home directory's caches and must work without them or get a writable directory from the owner |
+| Owner names a file as an argument of a sandboxed server | Only that file is readable, not its directory or siblings, under the sandbox decision |
+| Owner sets a sandboxed server's working directory to the home or the state directory | Refused like a readable directory, under mcp-catalog::US-001/AC-03 |
+| A secret shorter than 6 characters appears in program output or an error | Shown unmasked there; still shown as `••••••` in the configuration, under mcp-catalog::REQ-001 |
 | Owner changes the command of an attached server | Confirmation card states it affects running requests under mcp-catalog::REQ-002 |
 | Server fails to start or its URL is unreachable | State shows the error and the next retry under mcp-catalog::US-003/AC-01 and mcp-catalog::REQ-003/AC-04 |
 | Server adds a tool or changes a definition while running | Tool waits for review and is not provided under mcp-catalog::US-004/AC-03 |
@@ -106,11 +112,13 @@ Applies to: every agent. Capability beyond module permissions reaches an agent o
 
 ## Implementation Decisions
 
-**Configuration shape.** The catalog follows the owner's agent-link configuration: name, transport (stdio command, arguments, working directory and environment; or Streamable HTTP URL with headers or OAuth client_credentials and optional DPoP), optional macOS sandbox, timeout, trusted and enabled, plus per-tool disable flags and pinned tool definitions. Secrets are stored apart from the readable configuration.
+**Configuration shape.** The catalog follows the owner's agent-link configuration: name, transport (stdio command, arguments, working directory and environment; or Streamable HTTP URL with headers or OAuth client_credentials and optional DPoP), optional macOS sandbox, timeout, trusted and enabled, plus per-tool disable flags and pinned tool definitions. Secrets are stored apart from the readable configuration: two owner-only files in the service's state directory, each replaced atomically, so that after a deletion no state file holds the server's secrets.
 
-**Connection manager.** One host-side manager owns all connections. It connects enabled servers, retries after failures, refreshes tool lists, compares them with pinned definitions, and executes proxy calls. A proxy call is checked against the caller's request snapshot and the current configuration before it is forwarded.
+**Confirmation is enforced by the host.** A new server, and a change of its command or arguments, carry the exact launch line the confirmation card showed; the host recomputes the line and refuses a mismatch, so a skipped or stale card stores and starts nothing. The card's line comes from the host, quoted as a POSIX shell reads it.
 
-**Sandbox.** A stdio server with a sandbox runs under the macOS sandbox with only its allowed domains and directories. A server without a sandbox runs with the service's user rights.
+**Connection manager.** One host-side manager owns all connections. It connects enabled servers, retries after failures, refreshes tool lists, compares them with pinned definitions, and executes proxy calls. A proxy call is checked against the caller's request snapshot and the current configuration before it is forwarded. Following agent-link: a connection attempt times out after 30 seconds; retries start after 30 seconds and double up to 10 minutes; servers that do not announce tool-list changes are listed again every 10 minutes; a server's first tool listing is pinned as a whole, and pins survive a change of command; the requires-human-interaction mark is `_meta["anthropic/requiresUserInteraction"] = true`; a program's environment is its own variables plus the basic ones (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `SHELL`, `TMPDIR`, `XDG_*`, `NODE_EXTRA_CA_CERTS`); the output tail keeps the last 4,000 characters.
+
+**Sandbox.** A stdio server with a sandbox runs under the macOS sandbox and reads only what the owner typed plus the minimum the service supplies. A server without a sandbox runs with the service's user rights. A sandboxed program may read: the Node.js installation the service runs on; each command path or absolute argument that is an existing file, that file alone and never its directory; the working directory; the readable and writable directories; and its own npm cache. The home and state directories are otherwise unreadable. It may write only to the writable directories, the temporary directory and its own npm cache; readable directories and named files stay read-only even inside the temporary directory. The working directory and the Node.js installation pass the same checks as readable directories (not the home, `/` or an ancestor of the home, nothing in or around the state directory); a Node.js installation that fails them refuses the start instead of widening the sandbox. No grant reaches the state directory ([ADR-0029](../adr/0029-keep-service-state-outside-every-file-grant.md)): a named file inside it is not granted. Each sandboxed server gets its own npm cache, owner-only and outside the state and temporary directories, and an empty npm user configuration, so `~/.npm` and `~/.npmrc` are never used; the service sets `npm_config_cache` and `npm_config_userconfig`, and these win over owner-entered variables of the same names. Deleting the server removes its cache. The registry domain is not allowed automatically: an `npx` server needs `registry.npmjs.org` among its allowed domains.
 
 **Console API.** The page is served by the local console under [agent-console::CON-001](agent-console.md), and every change is audited under [agent-console::REQ-004](agent-console.md).
 
