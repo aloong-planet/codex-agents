@@ -14,6 +14,8 @@ import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-ho
 // as in agent-dispatch-classifier.test.ts. Its reply follows MAIN_REPLY_OUTPUT_SCHEMA.
 // Gap: main.ts passes the defaults asserted below to the one dispatch pool; no fixture case fills 16 slots or lives
 // 5 minutes, so that wiring is exercised only by a live run or a fixture case that fills the pool.
+// Gap: home compaction's `compaction_failed` (session store unreadable) and `dispatch_executor_homes_unreadable` (runtimes
+// root unreadable) diagnostics have no case; both only report and remove nothing.
 
 function job(id: string): DispatchJob {
   return { id, bindingHash: "binding-alpha", agentId: "alice", senderAccountId: "cli_alice", summary: "整理商品文案", status: "running", attempt: 0,

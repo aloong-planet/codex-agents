@@ -61,6 +61,23 @@ it("keeps the records when a removal fails, and finishes on the next run", () =>
   expect(sha256(join(home, rollout!))).toBe(hash);
 });
 
+it.each([
+  ["the home is a link to a home elsewhere", "linked-home", { status: "kept", reason: "home_invalid" }],
+  ["its Codex home is a link outside the home", "linked-codex-home", { status: "kept", reason: "home_invalid" }],
+  ["it has no Codex home", "no-codex-home", { status: "kept", reason: "rollout_missing" }],
+] as const)("removes nothing when %s", (_label, shape, outcome) => {
+  const directory = scratch(), elsewhere = join(directory, "elsewhere"), home = join(directory, "dispatch-home");
+  if (shape === "linked-home") { seedExecutorHome(elsewhere, [{ threadId: THREAD }]); symlinkSync(elsewhere, home); }
+  else if (shape === "linked-codex-home") {
+    seedExecutorHome(elsewhere, [{ threadId: THREAD }]);
+    mkdirSync(join(home, "workspace"), { recursive: true });
+    symlinkSync(join(elsewhere, "codex-home"), join(home, "codex-home"));
+  } else { seedExecutorHome(home, [{ threadId: THREAD }]); rmSync(join(home, "codex-home"), { recursive: true }); mkdirSync(elsewhere); }
+  const before = { home: homeListing(home), elsewhere: homeListing(elsewhere) };
+  expect(compactRuntimeHome(home, THREAD)).toEqual(outcome);
+  expect({ home: homeListing(home), elsewhere: homeListing(elsewhere) }).toEqual(before);
+});
+
 it("lists only real directories named like an Executor home, keyed by their 64-hex scope", () => {
   const root = scratch(), scope = "a1".repeat(32);
   for (const name of [`dispatch-${scope}`, "dispatch-coordinator", `dispatch-leader-${"b2".repeat(32)}`, "feishu.group.oc_alpha", "research-feishu.group.oc_alpha",

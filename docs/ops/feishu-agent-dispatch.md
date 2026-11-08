@@ -108,7 +108,7 @@ When the service cannot confirm a home's records, it keeps the whole home and wr
 - `home_invalid`: the home or its `codex-home` is not a real directory;
 - `compaction_failed`: the session store could not be read.
 
-`dispatch_executor_home_deferred:process_running:dispatch-<64 hex>` means a released runtime's App Server had not exited within 10 seconds; the next start compacts that home. A kept home is reported again at every start. Inspect it; do not delete its rollouts.
+`dispatch_executor_home_deferred:process_running:dispatch-<64 hex>` means a released runtime's App Server had not exited within 10 seconds; the next start compacts that home. `dispatch_executor_homes_unreadable` means the start could not list `group-model-runtimes/`, so it compacted no home. A kept home is reported again at every start. Inspect it; do not delete its rollouts.
 
 ## Rollback and diagnosis
 
