@@ -13,7 +13,7 @@ The local service's pages and settings are meant for the owner alone, yet any we
 - The command lists the authorized browsers with their browser and system, authorization time and last use, and revokes one of them or all. A revoked browser's open pages disconnect at once and turn into the login card with a revoked notice.
 - A browser without authorization, including one opening an expired or used link, sees only a card explaining how to obtain a link. No data is shown and nothing can be changed.
 - The existing settings pages and local status require the same login.
-- The Codex plugin authorizes itself through the same local channel and appears in the list as one entry, 「Codex 插件」, which can be revoked like a browser; it authorizes again when it next starts or is refused.
+- The Codex plugin authorizes itself through the same local channel. However many plugin processes run, they appear in the list as one entry, 「Codex 插件」, which can be revoked like a browser; after a revocation they come back as one new entry.
 - Every authorization and revocation is recorded in a local audit file that the owner reads from the command line; it never contains a link or credential.
 
 ## Boundaries and non-goals

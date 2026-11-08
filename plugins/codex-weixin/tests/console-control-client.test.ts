@@ -67,6 +67,23 @@ describe("shared plugin credential", () => {
     expect(pluginEntries()[0]!.id).not.toBe(entry!.id);
   });
 
+  it("releases its lock when an authorization fails, so the next attempt proceeds at once", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-credential-"));
+    cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }));
+    const stateDirectory = path.join(root, "state");
+    fs.mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+    const credentials = sharedPluginCredentials(stateDirectory);
+    await expect(credentials.current()).rejects.toThrow("微信 Demo 未运行");
+
+    const access = new ConsoleAccess({ directory: stateDirectory });
+    const control = await ConsoleControlServer.start({ stateDirectory, access, port: 4317 });
+    cleanups.push(() => control.close());
+    const started = Date.now();
+    await expect(credentials.current()).resolves.toMatch(/^codex_console_4317=[0-9a-f]{64}$/);
+    // A lock left behind would only be taken over once it is 10 s old.
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
   it("takes over a lock left by a process that died while authorizing", async () => {
     const { stateDirectory, pluginEntries } = await startService();
     const lock = path.join(stateDirectory, "console-plugin-credential.lock");

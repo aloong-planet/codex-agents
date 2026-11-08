@@ -10,8 +10,9 @@ MCP Apps 内嵌面板。用户在 Codex 对话中打开面板后，可以查看�
 完成标准：
 
 1. Plugin 有有效 `.codex-plugin/plugin.json`、`skills/` 和 bundled `.mcp.json`。
-2. MCP Server 仅连接 `http://127.0.0.1:4317`，不读取 Demo 私有状态文件；唯一例外是本机控制通道的连接文件
-   `console-control.json`（套接字路径与每次启动轮换的令牌），用于取得本机授权。
+2. MCP Server 仅连接 `http://127.0.0.1:4317`，不读取 Demo 私有状态文件；唯一例外是本机授权：读取本机控制通道的
+   连接文件 `console-control.json`（套接字路径与每次启动轮换的令牌），并读写插件共用的凭据文件
+   `console-plugin-credential.json`。
 3. `show_weixin_panel` 返回 `text/html;profile=mcp-app` 资源并在 Codex 对话内渲染。
 4. 面板动作通过 MCP `tools/call` 进入服务端代理；组件不直接请求 Demo HTTP API。
 5. 模型可读结果只包含脱敏状态；二维码图片只进入组件私有的工具结果元数据。
@@ -46,9 +47,11 @@ Codex Plugin
 
 本机服务的每个页面和 API 都要求本机授权。插件不是浏览器，因此和工作台登录命令一样走本机控制通道：
 读取状态目录（`WEIXIN_DEMO_STATE_DIR`，默认 `~/Library/Application Support/weixin-ilink-direct-demo`）
-里的 `console-control.json`，经仅本人可用的 Unix 套接字发送 `authorize-plugin`，得到只保存在内存里的
-cookie。服务端只保留一个「Codex 插件」授权，每次授权都替换上一个，并像浏览器授权一样写入审计、可以收回。
-请求被拒（HTTP 401）时插件重新授权一次再重试；仍被拒就把错误返回给调用方。
+里的 `console-control.json`，经仅本人可用的 Unix 套接字发送 `authorize-plugin`，得到 cookie。所有插件进程共用
+一份凭据，保存在同一状态目录的 `console-plugin-credential.json`（`0600`），所以服务端只有一个「Codex 插件」授权，
+像浏览器授权一样写入审计、可以收回。进程启动时直接用这份凭据，文件不存在才授权；请求被拒（HTTP 401）时先
+重读文件，文件里已是别的进程换来的新凭据就直接用，否则才重新授权并原子替换文件。授权这一步用锁文件互斥，
+几个进程同时启动也只产生一个授权；授权中途退出留下的过期锁会被接管。换来的凭据仍被拒就把错误返回给调用方。
 
 Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 `apps/weixin-service/`。MCP server 使用构建后的单文件 Node 入口，`.mcp.json`
@@ -123,7 +126,7 @@ Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 
 - MCP server 只允许固定 loopback base URL；环境覆盖也必须通过 loopback 校验。
 - POST 带与 Demo 完全相同的 `Origin`，但不向其他域发送。
-- 本机授权 cookie 只在内存中，只发往配置的 loopback 地址；控制令牌只用于本机套接字，不进入工具结果或日志。
+- 本机授权 cookie 保存在状态目录下仅本人可读写的凭据文件中，只发往配置的 loopback 地址；控制令牌只用于本机套接字。两者都不进入工具结果或日志。能读控制令牌的本人进程本来就能换取凭据，共用凭据文件不增加权限。
 - 不返回 token、context token、QR 源 URL、账号秘密、日志或入站正文。
 - `qrDataUrl` 只能是 `data:image/png`；其他 scheme 拒绝进入 UI 元数据。
 - 工具安全注解区分只读、可逆本地状态和外部发送。

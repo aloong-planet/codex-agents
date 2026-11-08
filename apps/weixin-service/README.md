@@ -43,7 +43,7 @@ pnpm --filter @aloong-planet/codex-weixin-service console revoke <id>      # or 
 
 The link is valid for 2 minutes and can be used once. It sets an HttpOnly, SameSite=Strict cookie valid for 400 days and renewed whenever a page opens, so a restart does not require a new login. A revoked browser's open pages disconnect and show the login card. If the service is not running, the command says so.
 
-The command reaches the running service through `console-control.json` and an owner-only Unix socket in the state directory; the token in that file changes on every start. Authorizations are kept in `console-browsers.json`, which stores only a hash of each cookie. The Codex plugin authorizes through the same channel and appears as one entry, 「Codex 插件」.
+The command reaches the running service through `console-control.json` and an owner-only Unix socket in the state directory; the token in that file changes on every start. Authorizations are kept in `console-browsers.json`, which stores only a hash of each cookie. The Codex plugin authorizes through the same channel and appears as one entry, 「Codex 插件」: all plugin processes share one credential kept in `console-plugin-credential.json` (`0600`) in the state directory. Revoking that entry ends every plugin process's access; they authorize again as one new entry.
 
 Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command` or `codex-plugin`), the event and the browser's ID and label; it never contains a cookie, link token or hash. Read it with standard tools, for example:
 
