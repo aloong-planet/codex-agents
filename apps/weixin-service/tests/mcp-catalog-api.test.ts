@@ -16,7 +16,8 @@ import { createConsoleRoutes } from "../src/console-routes.js";
 import { DemoService, type ChannelSnapshot, type WeixinChannel } from "../src/demo-service.js";
 import { createDemoServer } from "../src/http-server.js";
 import { McpCatalog } from "../src/mcp-catalog.js";
-import { SECRET_SENTINEL, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
+import { startAuthorizationServer, startHttpTestServer } from "./fixtures/mcp-http-test-server.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 
 const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
 const WAIT = { timeout: 10_000, interval: 50 };
@@ -108,6 +109,47 @@ describe("MCP catalog API", () => {
     expect((await request("/api/mcp/servers/secretive/delete", {})).body).toEqual({ deleted: "secretive" });
     expect(bodies.length).toBeGreaterThanOrEqual(12);
     for (const body of bodies) expect(body).not.toContain(SECRET_SENTINEL);
+  });
+
+  it("no console response contains a header value or a client secret", async () => {
+    const { request, bodies } = await start("status");
+    const as = await startAuthorizationServer({ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL });
+    const remote = await startHttpTestServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL }, authorizationServer: as });
+    cleanup.push(as.close, remote.close);
+    const server = { name: "remote", transport: "http", url: remote.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read" } };
+
+    const preview = await request("/api/mcp/preview", { server });
+    expect(preview.body).toEqual({ launchLine: remote.url, needsConfirmation: true });
+    expect((await request("/api/mcp/servers", { server, confirmed: remote.url })).status).toBe(200);
+    await vi.waitFor(async () => expect((await request("/api/mcp/servers")).body.servers[0].state).toBe("connected"), WAIT);
+    const kept = { ...server, headers: { "X-Api-Key": "••••••" }, oauth: { ...server.oauth, clientSecret: "••••••" } };
+    expect((await request("/api/mcp/servers/remote", { server: kept })).status).toBe(200);
+    expect((await request("/api/mcp/servers/remote/reconnect", {})).status).toBe(200);
+    await vi.waitFor(async () => expect((await request("/api/mcp/servers")).body.servers[0].state).toBe("connected"), WAIT);
+    // The edit kept the saved secret: the reconnection asked for a second token with it.
+    expect(as.tokenRequests.length).toBeGreaterThanOrEqual(2);
+    for (const item of as.tokenRequests) expect(item).toMatchObject({ clientSecret: CLIENT_SECRET_SENTINEL, granted: true });
+    expect((await request("/api/mcp/servers")).body.servers[0]).toMatchObject({
+      transport: "http",
+      headers: { "X-Api-Key": "••••••" },
+      oauth: { issuer: as.issuer, clientId: "agent-console", scope: "docs:read", clientSecret: "••••••" },
+    });
+
+    const text = JSON.stringify({ mcpServers: { imported: { type: "http", url: remote.url, headers: { "X-Api-Key": HEADER_SENTINEL } }, local: { command: "npx", args: ["x"], env: { TOKEN: CLIENT_SECRET_SENTINEL } } } });
+    const checked = await request("/api/mcp/import/check", { text });
+    expect(checked.body.entries).toEqual([
+      { name: "imported", ok: true, transport: "http", line: remote.url, fill: [], enabled: true },
+      { name: "local", ok: true, transport: "stdio", line: "npx x", fill: [], enabled: true },
+    ]);
+    const confirmed = checked.body.entries.map((entry: { name: string; line: string }) => ({ name: entry.name, line: entry.line }));
+    expect((await request("/api/mcp/import", { text, confirmed })).body.servers.map((item: { name: string }) => item.name)).toEqual(["imported", "local"]);
+    expect((await request("/api/mcp/import/check", { text: '{"mcpServers": ' })).body).toEqual({ error: "不是有效的 JSON" });
+
+    expect(bodies.length).toBeGreaterThanOrEqual(10);
+    for (const body of bodies) {
+      expect(body).not.toContain(HEADER_SENTINEL);
+      expect(body).not.toContain(CLIENT_SECRET_SENTINEL);
+    }
   });
 
   it("audit entries name the browser that made the change", async () => {
