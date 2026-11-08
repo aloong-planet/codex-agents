@@ -4,7 +4,7 @@
 
 ## Context
 
-ADR-0026 requires the Coordinator, each Team Leader and each Executor to have its own instructions, tools, MCP servers, skills, memory and context, while Executors are created per Assignment. Today all specialists share one host tool control, one group memory scope and a prompt tail written in code; roles differ only by one configured responsibility text. Group runtimes disable inherited plugins, skill search and host skill discovery (ADR-0023), so per-agent MCP servers and skills need an explicit, controlled source.
+ADR-0026 requires the Coordinator, each Team Leader and each Executor to have its own instructions, tools, MCP servers, skills, memory and context, while Executors are created per Assignment. Today all specialists share one host tool control, one group memory scope and a prompt tail written in code; roles differ only by one configured responsibility text. Group runtimes disable inherited plugins, skill search and host skill discovery (ADR-0023), so per-agent MCP servers and skills need an explicit, controlled source. On the pinned Codex App Server, skipping host skill discovery does not keep host skills out of a runtime: it still lists the skills under its HOME's `.agents/skills` and Codex's bundled system skills (evidence (a) under Sources).
 
 ## Options
 
@@ -56,12 +56,12 @@ Memory scopes:
   - Adding a kind of Executor, or changing one, becomes configuration and credentials rather than code.
 - Negative:
   - The owner maintains a profile for every agent and Executor preset.
-  - The per-runtime memory and start-up cost of isolated runtimes has not been measured. MCP servers do not add to it, because the host holds one connection per server.
+  - Each running runtime holds about 80 MiB of resident memory when idle and up to about 120 MiB while it starts and runs a turn, so memory, not start-up time, sets the concurrency limit (evidence (b) under Sources). MCP servers do not add to it, because the host holds one connection per server.
   - An MCP server in a profile is a new owner grant outside module permissions. The specification's rule that roles never enable browser accounts or shell execution (agent-dispatch::CON-003) therefore becomes a per-profile owner decision.
   - Shared Executor memory lets one Assignment's process influence later Assignments that use the same profile in that conversation.
 - Neutral: this decision stays proposed until the following are verified on the pinned Codex App Server:
-  - (a) it loads skills from a per-agent home while host skill discovery and plugins remain disabled;
-  - (b) the per-runtime memory and start-up cost, which sizes the pool.
+  - (a) it loads skills from a per-agent home while host skill discovery and plugins remain disabled. On 2026-11-08 this failed with the runtime configuration in use. It held only with a private HOME and bundled skills disabled, which runtimes do not use yet;
+  - (b) the per-runtime memory and start-up cost, which sizes the pool. Verified on 2026-11-08.
 
 ## Sources
 
@@ -75,3 +75,15 @@ Memory scopes:
 - The owner's agent-link project at `/Users/loong_zhou/playground/multi-agent`: README section 「MCP（外部工具服务）」, FEATURES section 28 and `agent-link/mcp.ts` (host-managed MCP connections and proxy tools).
 - `apps/weixin-service/src/main.ts`: one tool control for every specialist and one group memory scope.
 - `apps/weixin-service/src/agent-dispatch-executor.ts`: shared prompt tail and runtime map.
+- Evidence (a), measured on 2026-11-08 with `codex-cli 0.167.0-alpha.3.2`, the executable bundled with the ChatGPT app, which the service selects when `CODEX_BIN` is unset. The repository pins no Codex version. Runtimes were created by `createIsolatedModelRuntime` and spawned as the service spawns them. Model requests went to a loopback fake Responses endpoint, never to a model.
+  - Configuration in use: `skills/list` returned the runtime's own skill, the 34 skills under the real HOME's `.agents/skills` and 5 bundled system skills installed into the runtime's own home. Skipping host skill discovery or not gave the same 40 entries.
+  - The captured model request listed a skill planted in the HOME's `.agents/skills`, and injected its body when the text named it with `$` or the input carried it as a skill item. It listed the bundled skills too.
+  - Candidate configuration, a private HOME under the runtime root plus `skills.bundled.enabled = false`: only the runtime's own skill was listed, and its body was injected when named. The planted skill was not injected, even when named or given as a skill item.
+- Evidence (b), measured on the same date with the same executable and the configuration in use, on a 32 GiB, 10-core arm64 Mac, with the same fake endpoint. Each runtime is one process.
+  - Time from spawn to a ready thread: median 163 ms, max 228 ms over 10 starts on new homes; median 111 ms, max 183 ms over 10 restarts on one home. A restart plus `thread/resume` of a persisted thread: median 73 ms, max 97 ms over 10 runs.
+  - Resident memory: 54–55 MiB after `initialize`; 67.3–80.6 MiB idle with a thread; 86.9–100.5 MiB after one turn; a peak of at most 120.3 MiB over those 20 starts, and at most 95.9 MiB with the candidate configuration. Ten turns of 64 KiB input each on one thread reached 100.2 MiB.
+  - Not measured: memory during real model turns with tool calls.
+- Pool limits, an owner decision on 2026-11-08 made through a delegate, adopted as the defaults of agent-dispatch::QR-001:
+  - 256 MiB is planned per running runtime, about twice the measured peak, to cover real model turns;
+  - the pool gets 1/8 of the 32 GiB host, 4 GiB, which allows 16 running runtimes, idle or busy. That is twice the widest request allowed without confirmation (agent-dispatch::REQ-011/AC-02): a Coordinator, 2 Team Leaders and 5 Executors;
+  - a runtime is released after 5 idle minutes, because a restart with resume costs under 0.25 s while an idle runtime keeps about 80 MiB and a pool slot.
