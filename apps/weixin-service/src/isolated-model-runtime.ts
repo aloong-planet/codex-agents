@@ -10,7 +10,8 @@ export const ISOLATED_MODEL_DISABLED_FEATURES = [
 
 export type IsolatedModelRuntime = { cwd: string; env: NodeJS.ProcessEnv; permissionProfile: string; configOverrides: string[] };
 
-/** Host configuration and auth are separate: only login credentials enter this private runtime home. */
+/** Host configuration, HOME and auth are separate: only login credentials enter this private runtime home, and the
+ * runtime gets its own HOME, so the App Server finds no owner skills there; bundled system skills stay off. */
 export function createIsolatedModelRuntime(options: {
   root: string;
   scope: string;
@@ -22,8 +23,8 @@ export function createIsolatedModelRuntime(options: {
     throw new Error("isolated_runtime_scope_invalid");
   }
   const root = path.resolve(options.root, options.scope);
-  const cwd = path.join(root, "workspace"), codexHome = path.join(root, "codex-home");
-  for (const directory of [root, cwd, codexHome]) {
+  const cwd = path.join(root, "workspace"), codexHome = path.join(root, "codex-home"), home = path.join(root, "home");
+  for (const directory of [root, cwd, codexHome, home]) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (fs.lstatSync(directory).isSymbolicLink()) throw new Error("isolated_runtime_path_invalid");
     fs.chmodSync(directory, 0o700);
@@ -49,6 +50,8 @@ export function createIsolatedModelRuntime(options: {
     '[features]',
     'skip_host_skill_discovery = true',
     ...ISOLATED_MODEL_DISABLED_FEATURES.map((feature) => `${feature} = false`),
+    '[skills.bundled]',
+    'enabled = false',
     '[permissions.group.filesystem]',
     '":root" = "deny"',
     '":minimal" = "read"',
@@ -61,9 +64,9 @@ export function createIsolatedModelRuntime(options: {
     "",
   ].join("\n");
   fs.writeFileSync(path.join(codexHome, "config.toml"), config, { mode: 0o600 });
-  const env: NodeJS.ProcessEnv = { CODEX_HOME: codexHome, XDG_CONFIG_HOME: path.join(root, "config") };
-  for (const key of ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "OPENAI_API_KEY"]) {
+  const env: NodeJS.ProcessEnv = { CODEX_HOME: codexHome, HOME: home, XDG_CONFIG_HOME: path.join(root, "config") };
+  for (const key of ["PATH", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "OPENAI_API_KEY"]) {
     if (environment[key] !== undefined) env[key] = environment[key];
   }
-  return { cwd, env, permissionProfile: "group", configOverrides: ["features.skip_host_skill_discovery=true", "project_doc_max_bytes=0"] };
+  return { cwd, env, permissionProfile: "group", configOverrides: ["features.skip_host_skill_discovery=true", "skills.bundled.enabled=false", "project_doc_max_bytes=0"] };
 }

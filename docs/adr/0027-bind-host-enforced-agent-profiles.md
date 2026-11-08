@@ -1,6 +1,6 @@
 # ADR-0027: Bind a host-enforced profile to each agent
 
-- Status: Proposed
+- Status: Accepted (2026-11-08)
 
 ## Context
 
@@ -20,7 +20,7 @@ ADR-0026 requires the Coordinator, each Team Leader and each Executor to have it
 
 ## Decision
 
-We adopt **option 1**, pending the evidence listed under Consequences.
+We adopt **option 1**.
 
 Profiles and authority:
 
@@ -32,7 +32,7 @@ Profiles and authority:
 
 Runtimes and sessions:
 
-- Each running agent has its own isolated runtime home. The host writes only that profile's skills into it; host plugins, host skill discovery and the other disabled features stay off.
+- Each running agent has its own isolated runtime home and its own HOME inside it, and Codex's bundled skills are disabled. The host writes only that profile's skills into that home; host plugins and the other disabled features stay off.
 - MCP servers follow the owner's agent-link design:
   - The host service connects and holds every MCP server in the MCP Catalog.
   - An agent receives proxy tools named `mcp__<server>__<tool>` only for the servers its profile attaches.
@@ -56,11 +56,11 @@ Memory scopes:
   - Adding a kind of Executor, or changing one, becomes configuration and credentials rather than code.
 - Negative:
   - The owner maintains a profile for every agent and Executor preset.
-  - The per-runtime memory and start-up cost of isolated runtimes has not been measured. MCP servers do not add to it, because the host holds one connection per server.
+  - Every isolated runtime costs memory and start-up time (evidence (b)). MCP servers do not add to it, because the host holds one connection per server.
   - An MCP server in a profile is a new owner grant outside module permissions. The specification's rule that roles never enable browser accounts or shell execution (agent-dispatch::CON-003) therefore becomes a per-profile owner decision.
   - Shared Executor memory lets one Assignment's process influence later Assignments that use the same profile in that conversation.
-- Neutral: this decision stays proposed until the following are verified on the pinned Codex App Server:
-  - (a) it loads skills from a per-agent home while host skill discovery and plugins remain disabled;
+- Neutral: the decision was accepted once two checks held on the pinned Codex App Server (Sources):
+  - (a) it loads skills from a per-agent home while host skills, bundled skills and plugins stay out. Skipping host skill discovery alone did not achieve this; a runtime's own HOME and disabled bundled skills did;
   - (b) the per-runtime memory and start-up cost, which sizes the pool.
 
 ## Sources
@@ -71,7 +71,9 @@ Memory scopes:
   - preset Executor profiles per team;
   - shared memory among same-profile Executors;
   - MCP capability only through explicit owner configuration.
-- `apps/weixin-service/src/isolated-model-runtime.ts`: disabled runtime features and skipped host skill discovery.
+- `apps/weixin-service/src/isolated-model-runtime.ts`: disabled runtime features, the runtime's own HOME and disabled bundled skills.
+- Evidence (a), 2026-11-08, Codex `0.167.0-alpha.3.2`, against a loopback fake model endpoint. With the real HOME, an isolated runtime listed 40 skills: 1 of its own, 34 from `~/.agents/skills` (7 of them symbolic links) and 5 bundled. It injected a host skill's instructions when the turn named it with `$`. With its own HOME and bundled skills disabled, it listed and injected only its own skills, and the copied login still reached the endpoint. `pnpm --filter @aloong-planet/codex-weixin-service test:isolated-runtime` (`apps/weixin-service/tests/isolated-model-runtime.test.ts`) repeats the check for every runtime kind.
+- Evidence (b), 2026-11-08, Codex `0.167.0-alpha.3.2`, 30 starts: a thread was ready in a median 0.16 s (maximum 0.23 s); a runtime used about 80 MiB idle and at most 120 MiB.
 - The owner's agent-link project at `/Users/loong_zhou/playground/multi-agent`: README section 「MCP（外部工具服务）」, FEATURES section 28 and `agent-link/mcp.ts` (host-managed MCP connections and proxy tools).
 - `apps/weixin-service/src/main.ts`: one tool control for every specialist and one group memory scope.
 - `apps/weixin-service/src/agent-dispatch-executor.ts`: shared prompt tail and runtime map.

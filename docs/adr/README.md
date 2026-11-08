@@ -30,5 +30,5 @@
 | ADR-0024 | [Coordinate independent group agents without changing group authority](0024-coordinate-independent-group-agents.md) | Superseded by ADR-0026 |
 | ADR-0025 | [Isolate private financial authority from assistant memory](0025-isolate-private-financial-authority.md) | Accepted (2026-11-07) |
 | ADR-0026 | [Coordinate work through isolated domain teams](0026-coordinate-group-work-through-isolated-teams.md) | Accepted (2026-11-07) |
-| ADR-0027 | [Bind a host-enforced profile to each agent](0027-bind-host-enforced-agent-profiles.md) | Proposed |
+| ADR-0027 | [Bind a host-enforced profile to each agent](0027-bind-host-enforced-agent-profiles.md) | Accepted (2026-11-08) |
 | ADR-0028 | [Manage agent teams, MCP servers and skills from the local console](0028-manage-agent-teams-from-the-local-console.md) | Accepted (2026-11-07) |
