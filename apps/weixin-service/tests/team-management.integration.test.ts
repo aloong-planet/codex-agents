@@ -4,18 +4,12 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { TeamRegistry } from "../src/team-registry.js";
-import { dispatchConfig, start } from "./support/real-main.js";
+import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
+import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures.
 // No console API reads the team registry yet, so these cases read and save it through TeamRegistry, the store's own public class,
 // on main's state directory. Registry rules themselves are covered in team-registry.test.ts.
-const PRODUCTION_TOOL_IDS = ["files.edit", "files.find", "files.grep", "files.read", "files.write", "media.send", "schedules.create", "schedules.delete",
-  "schedules.disable", "schedules.edit", "schedules.enable", "schedules.inspect", "schedules.list", "schedules.read_text", "schedules.retry_news",
-  "schedules.run_now", "weixin.send_files"];
-const groupMessage = (messageId: string, text: string, dispatchDecision: unknown) => ({
-  event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
-      content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision });
 
 it("imports the local configuration into the team registry on first start, and the specialist turn carries its Executor profile", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-registry-main-"));

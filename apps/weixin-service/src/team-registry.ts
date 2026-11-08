@@ -6,8 +6,13 @@ import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 /** The Coordinator's fixed identity: Sam cannot be replaced, deleted or unbound (team-management::REQ-001/AC-01). */
 export const COORDINATOR_ID = "sam";
 
-/** Today's domain paragraph for every specialist turn; the seeded Executor profiles carry it verbatim. */
-export const INITIAL_EXECUTOR_INSTRUCTIONS = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核其事实与来源是否相符、预算和时间安排是否自洽。";
+/**
+ * Seeded Executor instructions by team. Bill's team owns the weather, route, walking, opening-hours and budget-and-schedule
+ * rules that every specialist turn carried before profiles; the domain-neutral source rules stay in shared prompt assembly.
+ */
+const SEEDED_EXECUTOR_INSTRUCTIONS: Readonly<Record<string, string>> = {
+  bill: "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。",
+};
 
 /** An agent's instructions and host-tool allowlist. MCP servers and skills join with their catalogs. */
 export type AgentProfile = Readonly<{ instructions: string; hostTools: readonly string[] }>;
@@ -150,7 +155,7 @@ function seededDefinitions(local: Readonly<FeishuDispatchConfiguration>, executo
     teams: local.agents.filter(({ id }) => id !== COORDINATOR_ID).map((agent) => ({
       id: agent.id, teamName: SEEDED_TEAM_NAMES[agent.id] ?? `${agent.name} 团队`, responsibility: agent.responsibility,
       leader: { name: agent.name, appId: agent.appId, profile: EMPTY_PROFILE },
-      executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: INITIAL_EXECUTOR_INSTRUCTIONS, hostTools: [...executorHostTools] }],
+      executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: SEEDED_EXECUTOR_INSTRUCTIONS[agent.id] ?? "", hostTools: [...executorHostTools] }],
       bindings: local.groupChatIds.map((chatId) => ({ chatId, state: "accepting" as const })),
     })),
   };
