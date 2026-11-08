@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { acceptingTeams, TeamRegistry, type TeamDefinitions } from "../src/team-registry.js";
+import { acceptingTeams, TeamDefinitionError, TeamRegistry, type TeamDefinitions, type TeamEdit } from "../src/team-registry.js";
 
 // Registry seam only. The local configuration follows the documented shape in docs/ops/feishu-agent-dispatch.md;
 // the owner's real channel.json is production data and is not read. Real-main wiring is in team-management.integration.test.ts.
@@ -48,9 +48,10 @@ describe("team registry", () => {
     try {
       registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
       const bindings = [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }];
-      const executorProfiles = [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }];
-      const billProfiles = [{ id: "executor-1", name: "能力档 1", instructions: BILL_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
-      const jackProfiles = [{ id: "executor-1", name: "能力档 1", instructions: JACK_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
+      // Every seeded profile names its Executors 「执行者 <n>」 (ticket 11, decision D6).
+      const executorProfiles = [{ id: "executor-1", name: "能力档 1", noun: "执行者", instructions: "", hostTools: HOST_TOOLS }];
+      const billProfiles = [{ id: "executor-1", name: "能力档 1", noun: "执行者", instructions: BILL_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
+      const jackProfiles = [{ id: "executor-1", name: "能力档 1", noun: "执行者", instructions: JACK_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
       const leaderProfile = { instructions: "", hostTools: [] };
       expect(registry.current()).toEqual({ version: 1, basedOn: null, source: "local_configuration", definitions: {
         coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调、澄清和分派任务，不执行具体业务事务。",
@@ -144,7 +145,6 @@ describe("team registry", () => {
   it.each([
     ["a binding to a chat outside the dispatch groups", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, bindings: [...team.bindings, { chatId: "oc_gamma", state: "accepting" }] })), SAM, "team_registry_roster_unsupported"],
     ["two teams sharing one application", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_3333333333333333" } })), SAM, "team_registry_roster_unsupported"],
-    ["an application without a stored secret", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_7777777777777777" } })), SAM, "team_registry_secret_missing"],
     ["a connection that is not the Coordinator's application", undefined, { appId: "cli_8888888888888888", appSecret: "other" }, "team_registry_roster_unsupported"],
     ["two teams sharing one agent ID", (definitions: TeamDefinitions) => ({ ...definitions, teams: definitions.teams.map((team) => team.id === "jack" ? { ...team, id: "bill" } : team) }), SAM, "team_registry_roster_unsupported"],
     ["a team using the Coordinator's agent ID", (definitions: TeamDefinitions) => ({ ...definitions, teams: definitions.teams.map((team) => team.id === "jack" ? { ...team, id: "sam" } : team) }), SAM, "team_registry_roster_unsupported"],
@@ -187,8 +187,161 @@ describe("team registry", () => {
         { id: "lily", name: "Lily", responsibility: "视觉设计和品牌素材。", appId: "cli_5555555555555555", appSecret: "lily-secret" }]), { executorHostTools: HOST_TOOLS }).definitions;
       expect(definitions.teams.at(-1)).toEqual({ id: "lily", teamName: "Lily 团队", responsibility: "视觉设计和品牌素材。",
         leader: { name: "Lily", appId: "cli_5555555555555555", profile: { instructions: "", hostTools: [] } },
-        executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }],
+        executorProfiles: [{ id: "executor-1", name: "能力档 1", noun: "执行者", instructions: "", hostTools: HOST_TOOLS }],
         bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }] });
+    } finally { registry.close(); }
+  });
+});
+
+/** The console's edit of a stored team: its editable fields and the groups it is checked into. */
+function editOf(definitions: TeamDefinitions, id: string): TeamEdit {
+  const team = definitions.teams.find((candidate) => candidate.id === id)!;
+  return { id, teamName: team.teamName, responsibility: team.responsibility,
+    leader: { name: team.leader.name, appId: team.leader.appId, instructions: team.leader.profile.instructions },
+    executorProfiles: team.executorProfiles.map(({ id: profileId, name, noun, instructions, hostTools }) => ({ id: profileId, name, noun: noun ?? "执行者", instructions, hostTools })),
+    groups: team.bindings.map(({ chatId }) => chatId) };
+}
+
+describe("console saves of a team", () => {
+  const profile = (name: string) => ({ name, noun: "执行者", instructions: "", hostTools: [] });
+  // team-management::REQ-002: the reasons the save bar lists under 「无法保存」.
+  it.each([
+    ["no leader name", (edit: TeamEdit) => ({ ...edit, leader: { ...edit.leader, name: " " } }), ["缺少负责人名称"]],
+    ["no team name", (edit: TeamEdit) => ({ ...edit, teamName: "" }), ["缺少团队名称"]],
+    ["no Executor profile", (edit: TeamEdit) => ({ ...edit, executorProfiles: [] }), ["至少需要一个执行者能力档"]],
+    ["two profiles with one name", (edit: TeamEdit) => ({ ...edit, executorProfiles: [profile("行程规划"), profile("行程规划")] }), ["两个能力档同名：「行程规划」"]],
+    ["the Coordinator's application", (edit: TeamEdit) => ({ ...edit, leader: { ...edit.leader, appId: SAM.appId } }), [`App ID ${SAM.appId} 已被 Sam 使用，每个团队需要自己的飞书应用`]],
+    ["another team's application", (edit: TeamEdit) => ({ ...edit, leader: { ...edit.leader, appId: "cli_3333333333333333" } }), ["App ID cli_3333333333333333 已被 Jack 使用，每个团队需要自己的飞书应用"]],
+    ["a profile without a name", (edit: TeamEdit) => ({ ...edit, executorProfiles: [profile(" ")] }), ["能力档名称不能为空"]],
+    ["a malformed App ID", (edit: TeamEdit) => ({ ...edit, leader: { ...edit.leader, appId: "cli_../../x" } }), ["App ID cli_../../x 格式不正确，应为 cli_ 加 16 位十六进制字符"]],
+    ["several problems at once", (edit: TeamEdit) => ({ ...edit, teamName: "", leader: { ...edit.leader, name: "" }, executorProfiles: [] }), ["缺少负责人名称", "缺少团队名称", "至少需要一个执行者能力档"]],
+  ] as const)("refuses a team with %s and lists the reasons", (_case, change, reasons) => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      let refused: unknown;
+      try { registry.saveTeam(change(editOf(seeded.definitions, "bill")), { basedOn: 1 }); } catch (error) { refused = error; }
+      expect(refused).toBeInstanceOf(TeamDefinitionError);
+      expect((refused as TeamDefinitionError).reasons).toEqual(reasons);
+      expect(registry.current()).toEqual(seeded);
+    } finally { registry.close(); }
+  });
+});
+
+describe("console saves and binding states", () => {
+  function seeded() {
+    const registry = new TeamRegistry(databasePath());
+    return { registry, seeded: registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS }) };
+  }
+  const team = (version: { definitions: TeamDefinitions }, id: string) => version.definitions.teams.find((candidate) => candidate.id === id)!;
+
+  it("refuses a second save of a team based on an outdated version, but not another team's save", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      registry.saveTeam({ ...editOf(first.definitions, "bill"), responsibility: "新职责" }, { basedOn: 1 });
+      expect(() => registry.saveTeam({ ...editOf(first.definitions, "bill"), leader: { ...editOf(first.definitions, "bill").leader, instructions: "新提示词" } }, { basedOn: 1 }))
+        .toThrow(/^team_registry_version_stale$/);
+      const alice = registry.saveTeam({ ...editOf(first.definitions, "alice"), responsibility: "运营新职责" }, { basedOn: 1 }).version;
+      expect([team(alice, "bill").responsibility, team(alice, "bill").leader.profile.instructions, team(alice, "alice").responsibility]).toEqual(["新职责", "", "运营新职责"]);
+      expect({ version: alice.version, basedOn: alice.basedOn, source: alice.source }).toEqual({ version: 3, basedOn: 2, source: "console" });
+    } finally { registry.close(); }
+  });
+
+  it("starts onboarding in a newly checked group, drains an accepting one that is unchecked and drops an onboarding one", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      // Bill accepts in oc_alpha and oc_beta (seeded). Unchecking oc_beta drains it; checking it again keeps it draining (ticket 13 completes drains).
+      const drained = registry.saveTeam({ ...editOf(first.definitions, "bill"), groups: ["oc_alpha"] }, { basedOn: 1 }).version;
+      expect(team(drained, "bill").bindings).toEqual([{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "draining" }]);
+      const again = registry.saveTeam({ ...editOf(drained.definitions, "bill"), groups: ["oc_alpha", "oc_beta"] }, { basedOn: drained.version }).version;
+      expect(team(again, "bill").bindings).toEqual([{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "draining" }]);
+      // A new team starts onboarding in every checked group; unchecking a group it does not accept work in drops it at once.
+      const created = registry.saveTeam({ teamName: "设计团队", responsibility: "视觉方案", leader: { name: "Daisy", appId: "cli_5555555555555555", instructions: "" },
+        executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: ["files.read"] }], groups: ["oc_alpha", "oc_beta"] }, { basedOn: again.version });
+      const daisy = team(created.version, created.teamId);
+      expect({ id: created.teamId.startsWith("team-"), profiles: daisy.executorProfiles, bindings: daisy.bindings }).toEqual({ id: true,
+        profiles: [{ id: "executor-1", name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: ["files.read"] }],
+        bindings: [{ chatId: "oc_alpha", state: "onboarding" }, { chatId: "oc_beta", state: "onboarding" }] });
+      const dropped = registry.saveTeam({ ...editOf(created.version.definitions, created.teamId), groups: ["oc_alpha"] }, { basedOn: created.version.version }).version;
+      expect(team(dropped, created.teamId).bindings).toEqual([{ chatId: "oc_alpha", state: "onboarding" }]);
+    } finally { registry.close(); }
+  });
+
+  it("starts onboarding again in every group when an accepting team's application is replaced", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const edit = editOf(first.definitions, "bill");
+      const replaced = registry.saveTeam({ ...edit, leader: { ...edit.leader, appId: "cli_6666666666666666" } }, { basedOn: 1, secret: "bill-new" }).version;
+      expect(team(replaced, "bill").bindings).toEqual([{ chatId: "oc_alpha", state: "onboarding" }, { chatId: "oc_beta", state: "onboarding" }]);
+      expect([registry.hasSecret("cli_6666666666666666"), registry.hasSecret("cli_2222222222222222")]).toEqual([true, false]);
+    } finally { registry.close(); }
+  });
+
+  it("changes only Sam's responsibility and instructions, and refuses any other change to Sam", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const saved = registry.saveCoordinator({ responsibility: "只协调", instructions: "先澄清" }, { basedOn: 1 });
+      expect(saved.definitions.coordinator).toEqual({ ...first.definitions.coordinator, responsibility: "只协调", profile: { instructions: "先澄清", hostTools: [] } });
+      expect(saved.definitions.teams).toEqual(first.definitions.teams);
+      expect(() => registry.saveTeam({ ...editOf(first.definitions, "bill"), id: "sam" }, { basedOn: saved.version })).toThrow(/^team_registry_coordinator_fixed$/);
+      expect(() => registry.saveCoordinator({ responsibility: "再改", instructions: "" }, { basedOn: 1 })).toThrow(/^team_registry_version_stale$/);
+    } finally { registry.close(); }
+  });
+});
+
+describe("onboarding and acceptance", () => {
+  const daisy: TeamEdit = { teamName: "设计团队", responsibility: "视觉方案", leader: { name: "Daisy", appId: "cli_5555555555555555", instructions: "" },
+    executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: [] }], groups: ["oc_alpha", "oc_beta"] };
+  const DONE = { status: "done", at: 1 } as const;
+
+  // team-management::REQ-003: credentials verified (with the published, enabled bot) and the bot in that group; the test message never gates.
+  it("accepts work in a group only once the credentials are verified and the bot has joined that group", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      const { teamId } = registry.saveTeam(daisy, { basedOn: 1, secret: "daisy-secret" });
+      const accepting = () => ["oc_alpha", "oc_beta"].map((chatId) => acceptingTeams(registry.current()!.definitions, chatId).map(({ id }) => id).includes(teamId));
+      registry.recordOnboarding("cli_5555555555555555", { step: "join", chatId: "oc_alpha" }, DONE);
+      expect([registry.settleOnboarding(), accepting()]).toEqual([[], [false, false]]);
+      registry.recordOnboarding("cli_5555555555555555", { step: "credentials" }, DONE);
+      registry.recordOnboarding("cli_5555555555555555", { step: "join", chatId: "oc_beta" }, { status: "action", reason: "仅群主和管理员可添加成员", at: 2 });
+      const settled = registry.settleOnboarding();
+      expect([settled, accepting()]).toEqual([[{ teamId, chatId: "oc_alpha" }], [true, false]]);
+      expect(registry.current()!.source).toBe("onboarding");
+      // The Team Directory of each group lists exactly the teams accepting work there (team-management::REQ-004/AC-02).
+      expect(acceptingTeams(registry.current()!.definitions, "oc_beta").map(({ name }) => name)).toEqual(["运营团队", "生活团队", "技术团队"]);
+      expect(acceptingTeams(registry.current()!.definitions, "oc_alpha").at(-1)).toEqual({ id: teamId, name: "设计团队", responsibility: "视觉方案" });
+      expect(registry.onboarding("cli_5555555555555555")).toEqual({ credentials: DONE,
+        joins: { oc_alpha: DONE, oc_beta: { status: "action", reason: "仅群主和管理员可添加成员", at: 2 } } });
+    } finally { registry.close(); }
+  });
+
+  it("keeps recorded onboarding outcomes across a restart and forgets them when the application is replaced", () => {
+    const path = databasePath();
+    const first = new TeamRegistry(path);
+    first.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+    const { teamId } = first.saveTeam(daisy, { basedOn: 1, secret: "daisy-secret" });
+    first.recordOnboarding("cli_5555555555555555", { step: "credentials" }, DONE);
+    first.close();
+    const registry = new TeamRegistry(path);
+    try {
+      expect(registry.onboarding("cli_5555555555555555")).toEqual({ credentials: DONE, joins: {} });
+      const current = registry.current()!;
+      const edit = editOf(current.definitions, teamId);
+      registry.saveTeam({ ...edit, leader: { ...edit.leader, appId: "cli_7777777777777777" } }, { basedOn: current.version, secret: "daisy-new" });
+      expect([registry.onboarding("cli_5555555555555555"), registry.onboarding("cli_7777777777777777")]).toEqual([{ joins: {} }, { joins: {} }]);
+    } finally { registry.close(); }
+  });
+
+  // Ticket 03's guard refused a team without a stored secret at startup; such a team is onboarding instead (ticket 11, D7).
+  it("serves the roster while a saved team has no secret yet, leaving that team out of it", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      const { version } = registry.saveTeam({ ...daisy, leader: { ...daisy.leader, appId: "" } }, { basedOn: 1 });
+      registry.saveTeam({ ...daisy, teamName: "内容团队", leader: { ...daisy.leader, name: "Eve", appId: "cli_5555555555555555" } }, { basedOn: version.version });
+      expect(registry.roster(SAM).agents.map(({ id }) => id)).toEqual(["sam", "alice", "bill", "jack"]);
+      expect(JSON.stringify(registry.current())).not.toContain("daisy-secret");
     } finally { registry.close(); }
   });
 });
