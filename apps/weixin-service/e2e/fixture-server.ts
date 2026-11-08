@@ -6,9 +6,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { requestConsoleControl } from "../src/console-control.js";
+import { authorizeLocalService } from "./console-session.js";
+
 let telemetryBuilt = false;
 
-export async function startFixtureServer(modelMode: string, routerMode: string, fileScanLimit?: number) {
+/**
+ * Starts the service in fixture mode in its own state directory. The harness authorizes itself through the
+ * console control channel, like the owner's login command, and exposes `cookie` for its own state reads and
+ * `loginLink()` for browsers.
+ */
+export async function startFixtureServer(
+  modelMode: string,
+  routerMode: string,
+  fileScanLimit?: number,
+  options: { stateDirectory?: string; businessDirectory?: string; port?: number } = {},
+) {
   if (![modelMode, routerMode].every((mode) => mode === "live" || mode === "fixture")) {
     throw new Error("invalid E2E model mode: use live or fixture");
   }
@@ -16,15 +29,15 @@ export async function startFixtureServer(modelMode: string, routerMode: string, 
     execFileSync(process.execPath, [fileURLToPath(new URL("../scripts/build-sandbox-telemetry.mjs", import.meta.url))]);
     telemetryBuilt = true;
   }
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-case-"));
+  const directory = options.stateDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-case-"));
   // Business files live outside the state directory, as in production, where file tools refuse the state directory.
-  const businessDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-business-"));
+  const businessDirectory = options.businessDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-business-"));
   const traceFile = path.join(directory, "service.log");
   const otelDirectory = path.join(directory, "otel");
   const reservation = net.createServer();
   await new Promise<void>((resolve, reject) => {
     reservation.once("error", reject);
-    reservation.listen(0, "127.0.0.1", resolve);
+    reservation.listen(options.port ?? 0, "127.0.0.1", resolve);
   });
   const address = reservation.address();
   if (!address || typeof address === "string") throw new Error("fixture port unavailable");
@@ -63,14 +76,21 @@ export async function startFixtureServer(modelMode: string, routerMode: string, 
     while (child.exitCode === null && child.signalCode === null && Date.now() < killedUntil) await delay(25);
     if (child.pid && child.exitCode === null && child.signalCode === null) throw new Error(`fixture cleanup failed: ${directory}`);
   };
+  const loginLink = async () => {
+    const { url: link } = await requestConsoleControl(directory, { command: "login-link" });
+    if (typeof link !== "string") throw new Error("fixture control channel returned no login link");
+    return link;
+  };
   try {
     const until = Date.now() + 20_000;
+    let cookie: string | undefined;
     while (Date.now() < until) {
       if (spawnError) throw spawnError;
       if (child.exitCode !== null || child.signalCode !== null) throw new Error(`fixture exited; inspect ${traceFile}`);
       try {
-        const response = await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(500) });
-        if (response.ok) return { url, directory, businessDirectory, traceFile, otelDirectory, pid: child.pid!, close };
+        cookie ??= await authorizeLocalService(directory);
+        const response = await fetch(`${url}/api/state`, { headers: { cookie }, signal: AbortSignal.timeout(500) });
+        if (response.ok) return { url, directory, businessDirectory, traceFile, otelDirectory, pid: child.pid!, cookie, loginLink, close };
       } catch { /* bounded readiness retry */ }
       await delay(50);
     }

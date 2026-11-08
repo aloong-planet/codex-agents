@@ -27,7 +27,7 @@ export const test = base.extend<Fixtures>({
     } finally {
       try {
         // Independent of the browser/POST: retain evidence even when an interaction times out.
-        const response = await fetch(`${server.url}/api/state`, { signal: AbortSignal.timeout(2_000) });
+        const response = await fetch(`${server.url}/api/state`, { headers: { cookie: server.cookie }, signal: AbortSignal.timeout(2_000) });
         await info.attach("fixture-final-state", { body: await response.text(), contentType: "application/json" });
       } catch (error) {
         await info.attach("fixture-snapshot-error", { body: String(error), contentType: "text/plain" });
@@ -44,4 +44,9 @@ export const test = base.extend<Fixtures>({
     }
   }, { timeout: 30_000 }],
   baseURL: async ({ fixtureServer }, use) => { await use(fixtureServer.url); },
+  // Every page of the local service requires an authorized browser; log in the way the owner does.
+  page: async ({ page, fixtureServer }, use) => {
+    await page.goto(await fixtureServer.loginLink());
+    await use(page);
+  },
 });

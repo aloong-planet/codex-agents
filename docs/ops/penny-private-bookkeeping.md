@@ -28,7 +28,7 @@ Set `PENNY_CONFIG_PATH` to an absolute, private configuration file. Its permissi
 
 Use an application distinct from the existing roster and a port distinct from administration and Sam's receiver. The optional configuration is read on startup. An invalid Penny configuration leaves Penny unavailable without disabling healthy existing channels. A changed application/tenant/owner cannot open a ledger bound to the previous identity. Correct a mistaken binding instead of deleting the ledger to bypass that check.
 
-Penny uses the existing owner's selected available Codex model through its own restricted runtime. The installed Codex must support structured output, local images and named permissions. Financial interpretation has no file-operation, shell, browser, shared memory or payment tools. Operational status at local `/api/state` exposes `penny.configured`, `penny.ready` and value-free error codes; it does not expose financial records.
+Penny uses the existing owner's selected available Codex model through its own restricted runtime. The installed Codex must support structured output, local images and named permissions. Financial interpretation has no file-operation, shell, browser, shared memory or payment tools. Operational status at local `/api/state`, open only to an [authorized browser](../../apps/weixin-service/README.md#local-login), exposes `penny.configured`, `penny.ready` and value-free error codes; it does not expose financial records.
 
 ## Callback and deployment
 

@@ -1,8 +1,14 @@
 import { createServer } from "node:http";
 
+import { ConsoleAccess } from "./console-access.js";
+
 /** Read-only local status; the fixture ingress exists only when explicitly supplied by the host. */
-export function createChannelStatusServer(state: () => unknown, fixture?: { emit(input: unknown): Promise<void> }) {
-  return createServer(async (request, response) => {
+export function createChannelStatusServer(
+  state: () => unknown,
+  fixture?: { emit(input: unknown): Promise<void> },
+  access: ConsoleAccess = new ConsoleAccess(),
+) {
+  return createServer(access.guard(async (request, response) => {
     response.setHeader("Content-Type", "application/json; charset=utf-8");
     response.setHeader("Cache-Control", "no-store");
     const host = request.headers.host ?? "";
@@ -29,5 +35,5 @@ export function createChannelStatusServer(state: () => unknown, fixture?: { emit
       return;
     }
     response.writeHead(404); response.end('{"error":"not_found"}');
-  });
+  }, { fixtureMode: fixture !== undefined }));
 }

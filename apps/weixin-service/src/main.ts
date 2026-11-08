@@ -9,6 +9,8 @@ import { WeixinConversationChannel } from "./weixin-conversation-channel.js";
 import { WeixinTurnAdapter } from "./weixin-turn-adapter.js";
 import { NotificationChannelRouter } from "./notification-channel-router.js";
 import { createChannelStatusServer } from "./channel-status-server.js";
+import { ConsoleAccess } from "./console-access.js";
+import { ConsoleControlServer } from "./console-control.js";
 import { FixtureFeishuTransport } from "./fixture-feishu-transport.js";
 import { loadChannelStartupConfiguration } from "./channel-startup-config.js";
 import { FeishuChannel } from "./feishu-channel.js";
@@ -996,10 +998,14 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
   weixin: { enabled: Boolean(channelPort), ready: startedChannels.has("weixin") && channelPort!.getSnapshot().accounts.some((account) => account.credentialStatus === "usable") },
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
-const server = service ? createDemoServer(service, { fixtureMode, channelState, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
+// Every page and API of the local service requires an owner-authorized browser (agent-console::CON-001).
+const consoleStateDirectory = path.dirname(privateStatePath);
+const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory });
+const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),
   fixtureFeishu,
+  consoleAccess,
 );
 
 // Binding the exclusive listener precedes any news handoff or activation.
@@ -1009,6 +1015,11 @@ await new Promise<void>((resolve, reject) => {
 });
 process.stdout.write(`${feishuChannel ? "飞书服务状态" : "个人微信直连 iLink Demo"}: http://${host}:${port}${feishuChannel ? "/api/state" : ""}\n`);
 if (fixtureMode) process.stdout.write("当前为 fixture 测试模式，不会连接真实渠道或发送真实消息。\n");
+// The login command reaches the running service through this owner-only channel; without it the service still runs.
+const consoleControl = await ConsoleControlServer.start({ stateDirectory: consoleStateDirectory, access: consoleAccess, port }).catch((error: unknown) => {
+  process.stderr.write(`console_control_unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+  return undefined;
+});
 let stopping = false;
 const pennyStartup = penny?.start().catch(() => { pennyError = "penny_startup_unavailable"; });
 const startup = (async () => {
@@ -1122,6 +1133,8 @@ function shutdown(): Promise<void> {
     () => startup,
     () => scheduledTasks.close(),
     () => httpClosed,
+    () => consoleControl?.close(),
+    () => consoleAccess.close(),
     () => workflowEngine.close(),
     () => localFileTools.close(),
     () => workflowModulePermissions.close(),
