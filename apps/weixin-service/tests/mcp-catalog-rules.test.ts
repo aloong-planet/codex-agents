@@ -211,15 +211,16 @@ describe("launch plan (mcp-catalog::US-001/AC-03 sandbox)", () => {
       },
     });
   });
-  it.each([
-    ["the home directory", "/h/owner/bin/node", "Node.js 安装目录不能是家目录本身或它的上级：/h/owner"],
-    ["the state directory", "/h/owner/.state/weixin/node/bin/node", "Node.js 安装目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin/node"],
-  ])("refuses to start when the Node.js installation is in %s instead of widening the sandbox", (_case, execPath, message) => {
-    expect(() => launchPlan({ name: "boxed", command: "node", args: [], sandbox: { domains: [], read: [], write: [] } }, { ...launch, execPath })).toThrow(message);
+  it.each([[[]], [["api.example.com"]]])("never adds a domain the owner did not list (%j)", (domains) => {
+    const plan = launchPlan({ name: "boxed", command: "npx", args: ["-y", "some-server"], sandbox: { domains, read: [], write: [] } }, launch);
+    expect((plan.sandbox?.settings as { network: { allowedDomains: string[] } }).network.allowedDomains).toEqual(domains);
   });
-  it("refuses a sandbox outside macOS instead of running without one", () => {
-    expect(() => launchPlan({ name: "boxed", command: "node", args: [], sandbox: { domains: [], read: [], write: [] } }, { ...launch, platform: "linux" }))
-      .toThrow("沙箱只支持 macOS，boxed 设为在沙箱中运行，未启动");
+  it.each([
+    ["the Node.js installation is in the home directory", { execPath: "/h/owner/bin/node" }, "Node.js 安装目录不能是家目录本身或它的上级：/h/owner"],
+    ["the Node.js installation is in the state directory", { execPath: "/h/owner/.state/weixin/node/bin/node" }, "Node.js 安装目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin/node"],
+    ["the system is not macOS", { platform: "linux" }, "沙箱只支持 macOS，boxed 设为在沙箱中运行，未启动"],
+  ])("refuses to start a sandboxed program when %s, instead of widening or dropping the sandbox", (_case, override, message) => {
+    expect(() => launchPlan({ name: "boxed", command: "node", args: [], sandbox: { domains: [], read: [], write: [] } }, { ...launch, ...override })).toThrow(message);
   });
 });
 

@@ -112,6 +112,9 @@ test("registers a local program only after confirming its exact command", async 
   // The page follows the service every 2 seconds; an opened output tail must stay open across that refresh.
   await page.locator("#amc-status summary").click();
   await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
+  // The program's output is shown as text: its markup creates no link or image (agent-console::REQ-005/AC-04).
+  await expect(page.locator("#amc-status pre")).toContainText('<a href="https://evil.example/login">重新登录</a><img src="x">');
+  await expect(page.locator("#amc-status a, #amc-status img")).toHaveCount(0);
   await page.waitForTimeout(2_500);
   await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
   await testInfo.attach("failed-server", { body: await page.screenshot(), contentType: "image/png" });
@@ -130,7 +133,8 @@ test("registers a local program only after confirming its exact command", async 
 test("reviews new and changed tools and switches tools off", async ({ page, fixtureServer }, testInfo) => {
   const work = workDirectory();
   const files = testServerFiles(work, "review");
-  writeTools(files.tools, [LOOKUP]);
+  const markedUp = '<a href="https://example.com/old">old</a>';
+  writeTools(files.tools, [{ ...LOOKUP, description: markedUp }]);
   await registerViaApi(fixtureServer, { name: "review", command: process.execPath, args: testServerArgs(files) });
   await page.goto(`${fixtureServer.url}/console/mcp`);
   await expect(row(page, "review")).toContainText("已连接", LONG);
@@ -144,7 +148,7 @@ test("reviews new and changed tools and switches tools off", async ({ page, fixt
   const tool = (name: string) => page.locator(".amc-tool").filter({ has: page.locator(`[data-tool="${name}"]`) });
   await expect(tool("fresh")).toContainText("新增，待复核", LONG);
   await expect(tool("lookup")).toContainText("定义有变化，待复核");
-  await expect(tool("lookup")).toContainText("变化的部分：说明；原说明：Finds an item.");
+  await expect(tool("lookup")).toContainText(`变化的部分：说明；原说明：${markedUp}`);
   await expect(tool("pay")).toContainText("需人工确认，不提供");
   // Text from a server is shown as text: its markup creates no link or image (agent-console::REQ-005/AC-04).
   await expect(tool("pay")).toContainText('<a href="https://example.com/x">link</a><img src="x">');
