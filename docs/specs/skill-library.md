@@ -2,7 +2,7 @@
 
 > Status: specified; not implemented.
 > Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: group runtimes skip host skill discovery, and no agent can load a skill.
+> Pending: no agent can load a Skill Library skill. Group runtimes skip host skill discovery, yet they still list the owner's skills under the real HOME's `.agents/skills` and Codex's bundled system skills, and inject one when it is named ([ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md) Sources).
 
 ## Problem Statement
 
