@@ -139,7 +139,7 @@ export class TeamRegistry {
    * there and is dropped otherwise; a changed application starts onboarding again in every group it does not drain.
    * `secret` is written beside the versions, never into one. Returns the saved version and the team's ID.
    */
-  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string }>): Readonly<{ version: DefinitionsVersion; teamId: string }> {
+  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>> }>): Readonly<{ version: DefinitionsVersion; teamId: string }> {
     let teamId = edit.id ?? "";
     this.transaction(() => {
       const latest = this.current(), base = this.version(options.basedOn);
@@ -153,7 +153,7 @@ export class TeamRegistry {
         if (JSON.stringify(editable(before)) !== JSON.stringify(editable(existing))) throw new Error("team_registry_version_stale");
       }
       if (edit.groups.some((chatId) => !definitions.dispatchGroups.includes(chatId))) throw new Error("team_registry_group_unknown");
-      const reasons = teamReasons(edit, definitions);
+      const reasons = teamReasons(edit, definitions, options.reserved ?? {});
       if (reasons.length) throw new TeamDefinitionError(reasons);
       teamId = existing?.id ?? `team-${randomUUID().slice(0, 8)}`;
       const appId = edit.leader.appId.trim(), replaced = existing !== undefined && existing.leader.appId !== appId;
@@ -329,7 +329,7 @@ function editable(team: TeamDefinition) {
 }
 
 /** Why a team cannot be saved (team-management::REQ-002), in the order the save bar lists them. */
-function teamReasons(edit: TeamEdit, definitions: TeamDefinitions): string[] {
+function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Readonly<Record<string, string>>): string[] {
   const reasons: string[] = [];
   if (!edit.leader.name.trim()) reasons.push("缺少负责人名称");
   if (!edit.teamName.trim()) reasons.push("缺少团队名称");
@@ -343,6 +343,8 @@ function teamReasons(edit: TeamEdit, definitions: TeamDefinitions): string[] {
   const user = appId === definitions.coordinator.appId ? definitions.coordinator.name
     : definitions.teams.find(({ id, leader }) => id !== edit.id && leader.appId === appId)?.leader.name;
   if (appId && user) reasons.push(`App ID ${appId} 已被 ${user} 使用，每个团队需要自己的飞书应用`);
+  // An application reserved outside the registry, such as Penny's private financial bot, never posts for a team (ADR-0025).
+  if (appId && Object.hasOwn(reserved, appId)) reasons.push(reserved[appId]!);
   return reasons;
 }
 

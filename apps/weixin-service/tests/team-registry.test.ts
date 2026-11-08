@@ -228,6 +228,20 @@ describe("console saves of a team", () => {
   });
 });
 
+// ADR-0025: Penny's private financial bot never posts for a team; the service passes its application as reserved.
+it("refuses a team on an application reserved outside the registry, with the reason it was given", () => {
+  const registry = new TeamRegistry(databasePath());
+  try {
+    const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+    const edit = editOf(seeded.definitions, "bill");
+    let refused: unknown;
+    try { registry.saveTeam({ ...edit, leader: { ...edit.leader, appId: "cli_eeeeeeeeeeeeeeee" } }, { basedOn: 1, reserved: { cli_eeeeeeeeeeeeeeee: "该飞书应用已用于 Penny，不能用于团队" } }); }
+    catch (error) { refused = error; }
+    expect((refused as TeamDefinitionError).reasons).toEqual(["该飞书应用已用于 Penny，不能用于团队"]);
+    expect(registry.current()).toEqual(seeded);
+  } finally { registry.close(); }
+});
+
 describe("console saves and binding states", () => {
   function seeded() {
     const registry = new TeamRegistry(databasePath());

@@ -164,6 +164,8 @@ if (fixtureCoordinationRuntime && !fixtureMode) throw new Error("fixture_switch_
 // Fixture-only seam: Executor home compaction stops after its first removal, so a case can kill the service mid-compaction.
 const fixtureCompactionHold = process.env.WORKFLOW_FIXTURE_COMPACTION_HOLD === "1";
 if (fixtureCompactionHold && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+// Fixture-only seam: the fake onboarding platform's answers before startup resumes onboarding.
+if (process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 const fixtureLiveMainModel = fixtureMode && process.env.WORKFLOW_SIMULATOR_MODEL === "live";
 const fixtureLiveWorkflowAgents = fixtureLiveMainModel ||
   (fixtureMode && process.env.WORKFLOW_SIMULATOR_PENDING_ROUTER === "live");
@@ -214,12 +216,13 @@ const consoleStateDirectory = path.dirname(privateStatePath);
 const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
 const fixtureOnboarding = fixtureMode ? new FixtureOnboardingPlatform() : undefined;
-if (process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixtureOnboarding.configure(JSON.parse(process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING));
 let teamManagement: TeamManagement | undefined;
 // Set once the dispatch applications exist; a roster change before that has nothing to start.
 let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () => {};
 let countActiveAssignments: (teamId: string) => number = () => 0;
+// Penny's application, read from its configuration at startup; no team may use it (ADR-0025, team-management::REQ-002).
+let pennyApplicationId: string | undefined;
 const feishuConfiguration = (() => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
   if (!entry?.dispatch) return entry;
@@ -236,6 +239,7 @@ const feishuConfiguration = (() => {
       }),
       activeAssignments: (teamId) => countActiveAssignments(teamId),
       rosterChanged: (roster) => applyRoster(roster),
+      reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
       report: (code) => process.stderr.write(`${code}\n`) });
     teamManagement = management;
     return Object.freeze({ ...entry, dispatch: management.roster() });
@@ -1174,6 +1178,7 @@ if (pennyConfigured) {
       apps: [...(feishuConfiguration ? [feishuConfiguration.connection.appId] : []), ...dispatchApplications.keys()],
       ports: [port, ...(feishuConfiguration?.webhook ? [feishuConfiguration.webhook.port] : [])],
     });
+    pennyApplicationId = configuration.appId;
     const root = path.join(path.dirname(privateStatePath), "penny");
     const mediaRoot = path.join(root, "media"); fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
     if (fixtureMode && !fixtureLiveMainModel) {

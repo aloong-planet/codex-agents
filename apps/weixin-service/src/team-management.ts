@@ -28,6 +28,8 @@ export type TeamManagementOptions = Readonly<{
   activeAssignments(teamId: string): number;
   /** Called when the roster (applications and their secrets) changes, so that main can start new sending applications. */
   rosterChanged(roster: Readonly<FeishuDispatchConfiguration>): void;
+  /** Applications no team may use, such as Penny's, each with the reason the save bar shows. */
+  reservedApplications?(): Readonly<Record<string, string>>;
   report(code: string): void;
   now?: () => number;
 }>;
@@ -74,7 +76,7 @@ export class TeamManagement {
     const { edit, secret } = parseTeamEdit(input, this.options.catalogToolIds);
     const basedOn = parseVersion(options.basedOn);
     const before = edit.id === undefined ? undefined : this.current().definitions.teams.find(({ id }) => id === edit.id);
-    const { version, teamId } = this.options.registry.saveTeam(edit, { basedOn, ...(secret === undefined ? {} : { secret }) });
+    const { version, teamId } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, ...(secret === undefined ? {} : { secret }) });
     const after = version.definitions.teams.find(({ id }) => id === teamId)!;
     this.auditTeamSave(before, after, secret !== undefined, version.version, options.actor);
     // Removing a team from a group starts at once: the Coordinator announces that it left (team-management::REQ-004/AC-01).

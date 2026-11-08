@@ -5,7 +5,7 @@ import { expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { TeamRegistry } from "../src/team-registry.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
-import { config, dispatchConfig, groupMessage, start, type State } from "./support/real-main.js";
+import { config, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures, and the
 // onboarding platform is the fake fixture mode uses (team-onboarding.test.ts covers its answers). The first two cases read and save
@@ -281,5 +281,20 @@ it("answers the team API without Feishu dispatch, saying that no dispatch group 
     writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
     running = await start(directory);
     expect(await running.get<View>("/api/teams")).toEqual({ configured: false });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("refuses a team on Penny's application, read from Penny's configuration", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-penny-application-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    const penny = { appId: "cli_eeeeeeeeeeeeeeee", appSecret: "penny-secret", tenantKey: "penny-tenant", ownerOpenId: "ou_pennyowner", privateChatId: "oc_pennyprivate",
+      webhook: { port: await freePort(), path: "/feishu/penny/events", verificationToken: "penny-token", encryptKey: "penny-key" } };
+    writeFileSync(join(directory, "penny.json"), JSON.stringify(penny), { mode: 0o600 });
+    running = await start(directory, { PENNY_CONFIG_PATH: join(directory, "penny.json") });
+    const refused = await running.send("/api/teams/save", { basedOn: (await running.get<View>("/api/teams")).version,
+      team: daisy({ leader: { name: "Daisy", appId: penny.appId, instructions: "" } }) });
+    expect(refused).toEqual({ status: 400, body: { error: "无法保存", reasons: ["该飞书应用已用于 Penny，不能用于团队"] } });
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);

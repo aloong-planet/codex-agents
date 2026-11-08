@@ -89,6 +89,11 @@ export async function start(directory: string, extraEnv: Record<string, string> 
       expect(response.status, text).toBe(200);
       return (text ? JSON.parse(text) : undefined) as T;
     },
+    /** POSTs as the authorized owner and returns the status and JSON body, whatever the status. */
+    async send<T = unknown>(route: string, body: unknown): Promise<{ status: number; body: T }> {
+      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json", cookie: await authorized() }, body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as T };
+    },
     /** GETs a JSON route as the authorized owner. */
     async get<T = unknown>(route: string): Promise<T> {
       const response = await fetch(`${url}${route}`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(5000) });
