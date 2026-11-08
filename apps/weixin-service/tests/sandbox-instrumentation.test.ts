@@ -7,6 +7,8 @@ import { NodeFileSandbox } from "../src/file-sandbox.js";
 import { DiagnosticFiles } from "../src/diagnostic-files.js";
 import { LocalDiagnostics } from "../src/local-diagnostics.js";
 import { readDiagnostics } from "../src/read-diagnostics.js";
+// Waits for the worker process or its telemetry are process waits.
+import { processWaitLimitMs } from "./support/process-wait.js";
 
 // Public sandbox + real Node IPC + persisted OTel, not preconstructed spans.
 function fixture(prelude = "", write = false) {
@@ -108,7 +110,7 @@ it("exports initialization start before completion and settles concurrent waiter
   const f = fixture("setInterval(() => {}, 1000); await new Promise(() => {});");
   try {
     const results = Promise.allSettled([f.sandbox.execute({ type: "find" }), f.sandbox.execute({ type: "find" })]);
-    await expect.poll(() => { try { return f.pid() > 0; } catch { return false; } }).toBe(true);
+    await expect.poll(() => { try { return f.pid() > 0; } catch { return false; } }, { timeout: processWaitLimitMs }).toBe(true);
     await f.diagnostics.files.flush();
     const before = await f.evidence();
     expect(before.records.filter((r) => r.name === "sandbox.init.start")).toHaveLength(1);
@@ -197,7 +199,7 @@ it("settles an active execute once on close and does not create requests after c
     await expect.poll(async () => {
       await f.diagnostics.files.flush();
       return (await f.evidence()).records.filter((r) => r.name === "sandbox.execute.start").length;
-    }).toBe(2);
+    }, { timeout: processWaitLimitMs }).toBe(2);
     await f.sandbox.close();
     expect(await result).toEqual([{ status: "rejected", reason: new Error("file_sandbox_closed") }]);
     await expect(f.sandbox.execute({ type: "find" })).rejects.toThrow("file_sandbox_closed");

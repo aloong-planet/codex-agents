@@ -10,6 +10,7 @@ import { expect, it } from "vitest";
 import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { AccountMemoryToolHost } from "../src/account-memory-tool-host.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
+import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 import { config, dispatchConfig, freePort, start, stop } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
 import { memoryAccountId } from "../src/agent-profile.js";
@@ -1405,8 +1406,13 @@ it("reports confirmed file work after a hard interruption without automatically 
         { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: "crash-plan.txt", content: { $fixtureToolResult: { call: 1, path: ["status"] } }, overwrite: false } },
       ],
     });
-    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" &&
-      readFileSync(join(business, "demo-vault", "crash-plan.txt"), "utf8") === "disabled");
+    // The file content lands before the operation journal records the write as completed, and the
+    // recovery report reads the journal. Crash only once the journal has the completion.
+    const journal = new LocalFileOperationStore(join(directory, "local-file-operations.sqlite"));
+    try {
+      await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" &&
+        journal.dispatchEvidence(state.agentDispatch.jobs[0].id).completed === 1);
+    } finally { journal.close(); }
     // A second request for the same team in the same group waits behind the running one.
     await running.post("/api/fixture/feishu/inbound", {
       event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },

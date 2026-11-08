@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { DiagnosticFiles } from "../src/diagnostic-files.js";
 import { LocalDiagnostics } from "../src/local-diagnostics.js";
 import { readDiagnostics } from "../src/read-diagnostics.js";
 import { createIsolatedModelRuntime } from "../src/isolated-model-runtime.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 
 const dirs: string[] = [];
 afterEach(() => { for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true }); });
@@ -15,6 +16,15 @@ function executable(script: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "research-child-test-")); dirs.push(dir);
   const file = path.join(dir, "codex-fixture");
   fs.writeFileSync(file, `#!${process.execPath}\n${script}`, { mode: 0o700 }); return { file, dir };
+}
+// A child the product is expected to stop outlives every case limit, but still exits on its
+// own if a failed case never stops it.
+const unstoppedChildExit = "setTimeout(() => process.exit(0), 60_000);";
+// Waiting for a child to get ready is a process wait (tests/support/process-wait.ts).
+// Children publish markers by rename, so a marker that exists is complete.
+async function readyMarker(marker: string) {
+  await expect.poll(() => fs.existsSync(marker), { timeout: processWaitLimitMs }).toBe(true);
+  return JSON.parse(fs.readFileSync(marker, "utf8"));
 }
 it("runs in an isolated directory, requires completed search, and returns the complete sourced report", async () => {
   const { file, dir } = executable(`const fs = require('node:fs');
@@ -37,17 +47,36 @@ fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'研究结论�
 it("stops a timed-out process before rejecting, even when it ignores termination", async () => {
   const { file, dir } = executable(`const fs = require('node:fs');
 const args = process.argv.slice(2);
-fs.writeFileSync('pid.json', JSON.stringify(process.pid));
 process.on('SIGTERM', () => {});
+fs.writeFileSync('PID.tmp', JSON.stringify(process.pid)); fs.renameSync('PID.tmp', 'PID');
 console.log(JSON.stringify({type:'item.completed',item:{type:'web_search'}}));
 fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'迟到报告。',sources:[{title:'来源',url:'https://example.com'}]}));
-setTimeout(() => process.exit(0), 3000);`);
+${unstoppedChildExit}`);
   // Capture the real child identity outside its disposable workspace.
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("'pid.json'", JSON.stringify(path.join(dir, "pid.json"))));
-  await expect(createScheduledResearch({ executable: file, timeoutMs: 1200 })(input())).rejects.toThrow("research_timeout");
-  const pid = JSON.parse(fs.readFileSync(path.join(dir, "pid.json"), "utf8"));
-  expect(() => process.kill(pid, 0)).toThrow();
-});
+  const marker = path.join(dir, "pid.json");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("'PID.tmp'", JSON.stringify(`${marker}.tmp`)).replaceAll("'PID'", JSON.stringify(marker)));
+  // The deadline is a product timer that starts at spawn; hold it until the child is ignoring
+  // SIGTERM (tests/support/process-wait.ts).
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let pid: number | undefined;
+  try {
+    const pending = createScheduledResearch({ executable: file, timeoutMs: 1200 })(input());
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = expect(pending).rejects.toThrow("research_timeout");
+    pid = await readyMarker(marker);
+    await vi.advanceTimersByTimeAsync(1200); // Deadline: SIGTERM, which the child ignores.
+    expect(settled).toBe(false); // No rejection while the child is still running.
+    expect(() => process.kill(pid!, 0)).not.toThrow();
+    await vi.advanceTimersByTimeAsync(1000); // Escalation: SIGKILL, the only way this child ends within the case limit.
+    await rejected;
+    expect(() => process.kill(pid!, 0)).toThrow();
+    pid = undefined;
+  } finally {
+    vi.useRealTimers();
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+  }
+}, processWaitLimitMs + 5_000);
 
 it.each([
   ["search snippets without reading", "search_only", { body: "只看了摘要。", sources: [{ title: "来源", url: "https://example.com" }] }, "research_source_read_missing"],
@@ -66,16 +95,16 @@ fs.writeFileSync(args[args.indexOf('-o')+1], ${JSON.stringify(JSON.stringify(rep
 
 it("cancels on external revocation, waits for exit and removes its isolated workspace", async () => {
   const { file, dir } = executable(`const fs = require('node:fs');
-fs.writeFileSync('READY', JSON.stringify({pid:process.pid,cwd:process.cwd()}));
-setInterval(() => {}, 100);`);
-  const marker = path.join(dir, "ready.json"); fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("'READY'", JSON.stringify(marker)));
+fs.writeFileSync('READY.tmp', JSON.stringify({pid:process.pid,cwd:process.cwd()})); fs.renameSync('READY.tmp', 'READY');
+${unstoppedChildExit}`);
+  const marker = path.join(dir, "ready.json");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("'READY.tmp'", JSON.stringify(`${marker}.tmp`)).replaceAll("'READY'", JSON.stringify(marker)));
   const controller = new AbortController();
   const pending = createScheduledResearch({ executable: file })({ ...input(), signal: controller.signal });
   const rejected = expect(pending).rejects.toThrow("research_cancelled");
-  await expect.poll(() => fs.existsSync(marker)).toBe(true);
-  const observed = JSON.parse(fs.readFileSync(marker, "utf8")); controller.abort(); await rejected;
+  const observed = await readyMarker(marker); controller.abort(); await rejected;
   expect(() => process.kill(observed.pid, 0)).toThrow(); expect(fs.existsSync(observed.cwd)).toBe(false);
-});
+}, processWaitLimitMs + 5_000);
 
 it("classifies startup and quota failure without exposing raw process diagnostics", async () => {
   await expect(createScheduledResearch({ executable: "/no-such-research-executable" })(input())).rejects.toThrow("research_start_failed");
