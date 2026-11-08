@@ -12,7 +12,7 @@ import { authorizeLocalService } from "../../e2e/console-session.js";
 export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number };
 export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string; result?: string;
     definitionsVersion: number | null; assignments: DispatchAssignmentState[] }>; notices?: Array<{ id: string; state: string }> };
-  fixtureLeaderRequests?: Array<{ phase: "plan" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
+  fixtureLeaderRequests?: Array<{ phase: "plan" | "supplement" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
     directory?: Array<{ name: string; responsibility: string }>; memory?: string;
     assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
   fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;

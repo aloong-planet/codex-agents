@@ -1110,10 +1110,11 @@ it("accepts requester-only cancel and supplements while a specialist is still ru
     const done = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 4);
     expect(done.agentDispatch?.jobs.find(({ agentId }) => agentId === "bill")?.status).toBe("completed");
     expect(done.fixtureModelRequests).toHaveLength(3);
-    // The promoted supplement is a new attempt: Bill re-plans it, and a new Executor runs it in its own session.
-    expect(done.fixtureModelRequests![2]!.threadId).not.toBe(done.fixtureModelRequests![1]!.threadId);
-    const replan = done.fixtureLeaderRequests!.filter(({ teamId, phase }) => teamId === "bill" && phase === "plan").at(-1)!.input.brief;
-    expect(replan.latest).toBe("补充：预算 300 元");
+    // The promoted supplement is a new attempt: Bill's supplement turn marks the Assignment affected, and its Executor reruns it on its own thread.
+    expect(done.fixtureModelRequests![2]!.threadId).toBe(done.fixtureModelRequests![1]!.threadId);
+    const supplemented = done.fixtureLeaderRequests!.filter(({ teamId, phase }) => teamId === "bill" && phase === "supplement").at(-1)!.input.brief;
+    expect(supplemented.latest).toBe("补充：预算 300 元");
+    expect(done.agentDispatch?.jobs.find(({ agentId }) => agentId === "bill")?.assignments).toEqual([expect.objectContaining({ executor: "执行者 2", attempt: 1 })]);
     expect(JSON.stringify(done.fixtureLeaderRequests)).not.toContain("改为无限预算");
     expect(JSON.stringify(done.fixtureModelRequests![2]!.input)).toContain("补充：预算 300 元");
     // Another person's control text can be inert discussion, but never the active request.
@@ -1432,17 +1433,20 @@ it("reports confirmed file work after a hard interruption without automatically 
     await running.until((state) => state.agentDispatch?.jobs[1]?.status === "queued");
     await running.crash(); running = undefined;
     running = await start(directory, env);
-    const recovered = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 3 && state.agentDispatch?.jobs[1]?.status === "completed");
+    const recovered = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 4 && state.agentDispatch?.jobs[1]?.status === "completed");
     expect(recovered.agentDispatch?.jobs.map(({ id }) => id)).toHaveLength(2);
     expect(recovered.agentDispatch?.jobs[0]).toMatchObject({ status: "failed", assignments: [expect.objectContaining({ executor: "执行者 1", status: "interrupted" })] });
     expect(recovered.agentDispatch?.jobs[1]).toMatchObject({ status: "completed", assignments: [expect.objectContaining({ executor: "执行者 2", status: "completed" })] });
-    expect(recovered.fixtureLeaderRequests?.map(({ phase, input }) => `${phase}:${input.brief.message}`)).toEqual(["plan:再整理一份计划说明", "close:再整理一份计划说明"]);
+    // The interrupted request is closed by its Team Leader's tool-free turn, then the queued request runs.
+    expect(recovered.fixtureLeaderRequests?.map(({ phase, input }) => `${phase}:${input.brief.message}`)).toEqual([
+      "close:明天提醒我检查计划；先停用这个提醒。保存 crash-plan.txt，然后继续完善计划", "plan:再整理一份计划说明", "close:再整理一份计划说明"]);
     expect(recovered.fixtureModelRequests).toHaveLength(1);
     expect(JSON.stringify(recovered.fixtureModelRequests![0]!.input)).toContain("整理计划说明");
-    expect(recovered.agentFixtureOutboxes?.jack?.text.slice(1).map(({ message }) => message)).toEqual(["我安排执行者 2（能力档 1）处理：整理计划说明。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
-    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("服务中断");
-    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("已确认完成 1 次本地文件修改");
-    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toContain("已确认完成 2 次定时任务操作");
+    expect(recovered.agentFixtureOutboxes?.jack?.text.slice(2).map(({ message }) => message)).toEqual(["我安排执行者 2（能力档 1）处理：整理计划说明。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
+    expect(recovered.agentFixtureOutboxes?.jack?.text[0]?.message).toBe("服务中断，执行者 1（能力档 1）的分工「保存并完善计划」已中断，无法确认已完成的内容，不会自动重放。");
+    expect(recovered.agentFixtureOutboxes?.jack?.text[1]?.message).toContain("服务中断");
+    expect(recovered.agentFixtureOutboxes?.jack?.text[1]?.message).toContain("已确认完成 1 次本地文件修改");
+    expect(recovered.agentFixtureOutboxes?.jack?.text[1]?.message).toContain("已确认完成 2 次定时任务操作");
     expect(readFileSync(join(business, "demo-vault", "crash-plan.txt"), "utf8")).toBe("disabled");
     expect(recovered.agentFixtureOutboxes?.alice?.text).toEqual([]);
     expect(recovered.feishuFixtureTextOutbox).toEqual([]);

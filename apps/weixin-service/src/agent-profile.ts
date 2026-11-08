@@ -78,6 +78,12 @@ export function effectiveHostTools(checked: readonly string[], scopes: ReadonlyA
  * The shared tool host as one agent sees it: only its resolved host tools are offered, and any other call is refused
  * before the shared host. Turn bindings stay on the shared host, which keeps checking module permissions on every call.
  */
+const PROFILE_TOOL_REFUSED = "agent_profile_tool_refused";
+/** Whether a tool result is the profile tool host's refusal of a call outside the profile's allowlist. */
+export function isProfileToolRefusal(result: DynamicToolResult): boolean {
+  return !result.success && result.contentItems.some((item) => item.type === "inputText" && item.text.includes(PROFILE_TOOL_REFUSED));
+}
+
 export class ProfileToolHost implements DynamicToolHost {
   private readonly allowed: ReadonlySet<string>;
   private readonly offered: WorkflowToolCatalog;
@@ -104,7 +110,7 @@ export class ProfileToolHost implements DynamicToolHost {
     if (!context?.namespace || !this.allowed.has(id) || !current?.includes(id)) {
       try { this.revocation.refused?.(id); } catch { /* Reporting cannot turn a refusal into a call. */ }
       return { success: false, contentItems: [{ type: "inputText",
-        text: JSON.stringify({ ok: false, error: { code: "agent_profile_tool_refused", retryable: false, action: "stop" } }) }] };
+        text: JSON.stringify({ ok: false, error: { code: PROFILE_TOOL_REFUSED, retryable: false, action: "stop" } }) }] };
     }
     return this.host.execute(tool, argumentsValue, context);
   }

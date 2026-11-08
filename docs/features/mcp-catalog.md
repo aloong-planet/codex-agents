@@ -32,6 +32,8 @@ The owner wants to give agents capabilities beyond module permissions through MC
 
 - A URL server's address must use https, or http on this machine. Servers that use the older SSE transport cannot be added.
 - Beside OAuth, headers cannot set Authorization or DPoP, and DPoP needs OAuth. The client secret is sent only to the authorization server entered with it; a server that names another one does not connect. An authorization server that does not publish an authorization endpoint cannot be used.
+- Headers go only to the server's own address (its scheme, host and port), never to the authorization server or to any other address the server names. An authorization server that needs a header of its own therefore cannot be used.
+- A URL server that redirects to another address is not followed there: the connection, or the call, fails with an error naming that address, and the owner can register it in its place. A redirect within the same address is followed.
 - Access tokens are kept only while connected: after a reconnection or a restart a new one is requested.
 - Importing brings in no sandbox, OAuth, timeout or trust; those are set on the form afterwards.
 - Registering a server gives no agent its tools: no profile attaches a server.

@@ -15,6 +15,7 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   private readonly decisions = new Map<string, unknown>();
   private readonly leaderPlans = new Map<string, unknown[]>();
   private readonly leaderClosings = new Map<string, unknown>();
+  private readonly leaderSupplements = new Map<string, unknown>();
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
   private applications = new Map<string, FixtureFeishuTransport>();
@@ -57,9 +58,15 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     return structuredClone(plans.length > 1 ? plans.shift() : plans[0]);
   }
   leaderClosing(messageId: string): unknown { return structuredClone(this.leaderClosings.get(messageId)); }
-  dispatchToolQueue(messageId: string): FixtureModelToolCallQueue {
-    return { takeFixtureModelToolCall: () => this.dispatchCalls.get(messageId)?.shift(), takeFixtureModelCompletion: () => {
-      const completion = this.completions.get(messageId); return completion?.promise;
+  leaderSupplement(messageId: string): unknown { return structuredClone(this.leaderSupplements.get(messageId)); }
+  /**
+   * The model's tool calls and reply for an Executor turn on `messageId`. An Assignment whose title the message gave its own
+   * turn (`executorTurns`) takes that one; the others share the message's.
+   */
+  dispatchToolQueue(messageId: string, title?: string): FixtureModelToolCallQueue {
+    const key = title !== undefined && this.completions.has(executorTurnKey(messageId, title)) ? executorTurnKey(messageId, title) : messageId;
+    return { takeFixtureModelToolCall: () => this.dispatchCalls.get(key)?.shift(), takeFixtureModelCompletion: () => {
+      const completion = this.completions.get(key); return completion?.promise;
     } };
   }
   getTextOutbox() { return structuredClone(this.outbox); }
@@ -119,9 +126,10 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
       return;
     }
     if (input.modelControl !== undefined) {
-      const control = input.modelControl as { messageId?: unknown; action?: unknown };
-      if (typeof control.messageId !== "string" || control.action !== "release" || !this.completions.has(control.messageId)) throw new Error("fixture_model_control_invalid");
-      this.completions.get(control.messageId)!.release(); return;
+      const control = input.modelControl as { messageId?: unknown; title?: unknown; action?: unknown };
+      const key = typeof control.messageId === "string" && typeof control.title === "string" ? executorTurnKey(control.messageId, control.title) : control.messageId;
+      if (typeof key !== "string" || control.action !== "release" || !this.completions.has(key)) throw new Error("fixture_model_control_invalid");
+      this.completions.get(key)!.release(); return;
     }
     if (input.connection === "unavailable") { this.handlers.unavailable(); return; }
     if (input.connection === "ready") { this.handlers.ready(); return; }
@@ -142,30 +150,50 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
       this.leaderPlans.set(event.message.message_id, structuredClone(plans));
     }
     if (input.leaderClosing !== undefined && event?.message?.message_id) this.leaderClosings.set(event.message.message_id, structuredClone(input.leaderClosing));
+    if (input.leaderSupplement !== undefined && event?.message?.message_id) this.leaderSupplements.set(event.message.message_id, structuredClone(input.leaderSupplement));
+    if (input.executorTurns !== undefined && event?.message?.message_id) {
+      if (!input.executorTurns || typeof input.executorTurns !== "object" || Array.isArray(input.executorTurns) || Object.keys(input.executorTurns).length > 20) throw new Error("fixture_executor_turns_invalid");
+      for (const [title, turn] of Object.entries(input.executorTurns as Record<string, { modelReply?: unknown; modelHold?: unknown; modelToolCalls?: unknown }>)) {
+        const key = executorTurnKey(event.message.message_id, title);
+        this.completions.set(key, heldCompletion(typeof turn.modelReply === "string" ? turn.modelReply : undefined, turn.modelHold === true));
+        if (turn.modelToolCalls !== undefined) this.dispatchCalls.set(key, toolCalls(turn.modelToolCalls));
+      }
+    }
     if ((input.modelHold === true || input.modelReply !== undefined) && event?.message?.message_id) {
-      if (input.modelReply !== undefined && (typeof input.modelReply !== "string" || input.modelReply.length > 64000)) throw new Error("fixture_model_reply_invalid");
-      const reply = typeof input.modelReply === "string" ? input.modelReply : JSON.stringify({ message: "这是 fixture Codex 回复。", results: [] });
-      let resolve!: (reply: string) => void;
-      const promise = new Promise<string>((done) => { resolve = done; });
-      const release = () => resolve(reply);
-      this.completions.set(event.message.message_id, { promise, release });
-      if (input.modelHold !== true) release();
+      if (input.modelReply !== undefined && typeof input.modelReply !== "string") throw new Error("fixture_model_reply_invalid");
+      this.completions.set(event.message.message_id, heldCompletion(input.modelReply as string | undefined, input.modelHold === true));
     }
     if (event?.message?.message_id) this.messages.set(event.message.message_id, {
       message_id: event.message.message_id, chat_id: event.message.chat_id, msg_type: event.message.message_type, body: { content: event.message.content },
     });
     if (event?.message?.message_id && input.messageDetails !== undefined) this.messages.set(event.message.message_id, structuredClone(input.messageDetails));
     if (input.modelToolCalls !== undefined) {
-      if (!Array.isArray(input.modelToolCalls) || input.modelToolCalls.length > 20) throw new Error("fixture_tools_invalid");
-      const calls = input.modelToolCalls.map((value) => {
-        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("fixture_tools_invalid");
-        const call = value as Record<string, unknown>;
-        if (typeof call.namespace !== "string" || typeof call.tool !== "string") throw new Error("fixture_tools_invalid");
-        return { namespace: call.namespace, tool: call.tool, arguments: call.arguments };
-      });
-      if (input.dispatchDecision !== undefined && event?.message?.message_id) this.dispatchCalls.set(event.message.message_id, structuredClone(calls));
-      else this.calls.push(...structuredClone(calls));
+      const calls = toolCalls(input.modelToolCalls);
+      if (input.dispatchDecision !== undefined && event?.message?.message_id) this.dispatchCalls.set(event.message.message_id, calls);
+      else this.calls.push(...calls);
     }
     await this.handlers.message(input.event);
   }
+}
+
+/** Where an Assignment's own fixture turn is kept: its message and its title. */
+function executorTurnKey(messageId: string, title: string): string { return `${messageId}\u0000${title}`; }
+/** A model completion that resolves with `reply` (the default fixture reply when absent) at once, or when released if `hold`. */
+function heldCompletion(reply: string | undefined, hold: boolean): { promise: Promise<string>; release(): void } {
+  if (reply !== undefined && reply.length > 64000) throw new Error("fixture_model_reply_invalid");
+  const text = reply ?? JSON.stringify({ message: "这是 fixture Codex 回复。", results: [] });
+  let resolve!: (reply: string) => void;
+  const promise = new Promise<string>((done) => { resolve = done; });
+  const release = () => resolve(text);
+  if (!hold) release();
+  return { promise, release };
+}
+function toolCalls(value: unknown): FixtureModelToolCall[] {
+  if (!Array.isArray(value) || value.length > 20) throw new Error("fixture_tools_invalid");
+  return structuredClone(value.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("fixture_tools_invalid");
+    const call = item as Record<string, unknown>;
+    if (typeof call.namespace !== "string" || typeof call.tool !== "string") throw new Error("fixture_tools_invalid");
+    return { namespace: call.namespace, tool: call.tool, arguments: call.arguments };
+  }));
 }

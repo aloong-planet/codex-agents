@@ -17,6 +17,7 @@ import { decision, dispatchConfig, groupMessage, start } from "./support/real-ma
 import { seedMemory } from "./support/memory.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
+import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures.
 // Registry versions are saved through TeamRegistry, the store's own public class. Fixture mode injects already-decoded Coordinator
@@ -33,6 +34,8 @@ import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-ho
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
+// - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
+//   the fixture injects both.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -149,7 +152,7 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
     for (const [index, request] of requests.entries()) {
       const message = groupMessage(request.messageId, request.text, decision(request.team, request.summary),
         { modelReply: executorReply(request.reply, request.summary), leaderClosing: { message: request.closing },
-          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }] } });
+          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }], decisions: [] } });
       await running.post("/api/fixture/inbound", message);
       if (index === 0) await running.post("/api/fixture/inbound", message);
       await running.until((state) => state.agentFixtureOutboxes?.[request.team]?.text.length === 2);
@@ -184,12 +187,12 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
 it("corrects a plan once, and fails a request whose plan stays invalid", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-leader-correction-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
-  const foreign = { assignments: [{ profileId: "jack-only", title: "规划行程", brief: "南京一日游" }] };
+  const foreign = { assignments: [{ profileId: "jack-only", title: "规划行程", brief: "南京一日游" }], decisions: [] };
   try {
     dispatchConfig(directory);
     running = await start(directory);
     await running.post("/api/fixture/inbound", groupMessage("om_corrected_plan", "帮我规划周末一日行程", decision("bill", "规划行程"),
-      { leaderPlan: [foreign, { assignments: [{ profileId: "executor-1", title: "规划行程", brief: "南京一日游" }] }] }));
+      { leaderPlan: [foreign, { assignments: [{ profileId: "executor-1", title: "规划行程", brief: "南京一日游" }], decisions: [] }] }));
     await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
     await running.post("/api/fixture/inbound", groupMessage("om_invalid_plan", "帮我修复代码", decision("jack", "修复代码"), { leaderPlan: [{ kind: "x" }, foreign] }));
     const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed" && state.agentFixtureOutboxes?.jack?.text.length === 1);
@@ -209,7 +212,7 @@ it("corrects a plan once, and fails a request whose plan stays invalid", async (
 it("runs the preset the plan names, and refuses a preset of another team", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-plan-profile-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
-  const plan = (profileId: string) => ({ assignments: [{ profileId, title: "准备周末晚餐", brief: "三人份，列出采购清单" }] });
+  const plan = (profileId: string) => ({ assignments: [{ profileId, title: "准备周末晚餐", brief: "三人份，列出采购清单" }], decisions: [] });
   try {
     dispatchConfig(directory);
     const local = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")?.dispatch;
@@ -442,7 +445,7 @@ it("captures the group memory from what was posted, each Team Leader's from its 
       const before = (await running.state()).agentFixtureOutboxes?.[request.team]?.text.length ?? 0;
       await running.post("/api/fixture/inbound", groupMessage(request.messageId, request.text, decision(request.team, request.title),
         { modelReply: executorReply(`EXEC_R2_${index + 1}`, request.title), leaderClosing: { message: `CLOSE_R2_${index + 1}` },
-          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }] } }));
+          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }], decisions: [] } }));
       await running.until((state) => state.agentFixtureOutboxes?.[request.team]?.text.length === before + 2);
     }
     const result = await running.until((state) => (state.fixtureMemoryCurations?.length ?? 0) === 9);
@@ -704,5 +707,164 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
     expect(homeListing(home(`dispatch-${"0".repeat(64)}`))).toEqual(keptListing("thread-pre05"));
     expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
     expect(running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home"))).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// Several Assignments per request. Each Assignment's Executor turn takes its own injected fixture turn by title
+// (`executorTurns`), so the cases can hold, release and script each Executor apart (agent-dispatch Testing Decisions).
+type Running = Awaited<ReturnType<typeof start>>;
+async function allowNotes(running: Running) {
+  await running.until((state) => state.channels?.feishu?.ready === true);
+  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+}
+const writeFile = (file: string) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: file, content: `内容 ${file}`, overwrite: false } });
+const writeAndSend = (file: string) => [writeFile(file),
+  { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 0, path: ["fileRef"] } }] } }];
+const divided = (titles: readonly string[], decisions: string[] = []) => ({ assignments: titles.map((title) => ({ profileId: "executor-1", title, brief: `${title}，按原消息要求` })), decisions });
+const blocked = (message: string, subject: string) => JSON.stringify({ message, results: [{ subject, status: "blocked" }] });
+const control = (requestId: string, kind: string) => ({ kind, agentId: null, requestId, summary: "", message: "" });
+const jackTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.jack?.text.map(({ message }) => message) ?? [];
+const sendRuns = (state: Awaited<ReturnType<Running["state"]>>) => state.workflows?.runs.filter(({ workflowId }) => workflowId === "weixin.send-files") ?? [];
+
+it("runs a plan's three Assignments with one Executor each, each with its own workflow run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-three-")), business = mkdtempSync(join(tmpdir(), "dispatch-three-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_three", "写周报和月报并发给我，再整理要点", decision("jack", "写周报、月报和要点"), {
+      leaderPlan: divided(["写周报", "写月报", "整理要点"], ["先写周报和月报，再整理要点"]),
+      executorTurns: { 写周报: { modelToolCalls: writeAndSend("weekly.txt") }, 写月报: { modelToolCalls: writeAndSend("monthly.txt") },
+        整理要点: { modelReply: executorReply("要点已整理。", "要点") } } }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && jackTexts(state).length === 3);
+    console.log(JSON.stringify({ kind: "dispatch_three_assignments", command: "写周报和月报并发给我，再整理要点", jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes,
+      runs: sendRuns(result) }));
+    expect(jackTexts(result).slice(0, 2)).toEqual(["我安排：\n执行者 1（能力档 1）处理：写周报\n执行者 2（能力档 1）处理：写月报\n执行者 3（能力档 1）处理：整理要点\n完成后会在本群汇报。",
+      "先写周报和月报，再整理要点"]);
+    // Each Executor's send is its own workflow run; one shared key would make the second a duplicate of the first.
+    expect(sendRuns(result).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+    expect(new Set(sendRuns(result).map(({ runRef }) => runRef)).size).toBe(2);
+    expect(result.agentFixtureOutboxes?.jack?.media.map((item) => (item as { fileName: string }).fileName).sort()).toEqual(["monthly.txt", "weekly.txt"]);
+    expect(result.fixtureModelRequests).toHaveLength(3);
+    for (const title of ["写周报", "写月报", "整理要点"]) {
+      expect(result.fixtureModelRequests!.filter(({ input }) => JSON.stringify(input).includes(`${title}，按原消息要求`))).toHaveLength(1);
+    }
+    expect(result.agentDispatch?.jobs[0]?.assignments.map(({ executor, status }) => `${executor}:${status}`)).toEqual(["执行者 1:completed", "执行者 2:completed", "执行者 3:completed"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("keeps the others when one fails, and reruns only it on retry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-partial-")), business = mkdtempSync(join(tmpdir(), "dispatch-partial-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_partial", "写周报，核对数据，再整理要点", decision("jack", "周报、核对和要点"), {
+      leaderPlan: divided(["写周报", "核对数据", "整理要点"]),
+      executorTurns: { 写周报: { modelToolCalls: [writeFile("weekly.txt")], modelReply: executorReply("周报已保存。", "周报"), modelHold: true },
+        核对数据: { modelReply: blocked("数据源不可读，无法核对。", "核对数据") }, 整理要点: { modelReply: executorReply("要点已整理。", "要点"), modelHold: true } } }));
+    // The failure is posted while the other two are still held.
+    const failing = await running.until((state) => jackTexts(state).length === 2);
+    expect(jackTexts(failing)[1]).toBe("执行者 2（能力档 1）的分工「核对数据」未能完成：执行者报告无法完成。其余分工继续处理。");
+    for (const title of ["写周报", "整理要点"]) await running.post("/api/fixture/feishu/inbound", { modelControl: { messageId: "om_partial", title, action: "release" } });
+    const partial = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "partially_failed" && jackTexts(state).length === 3);
+    expect(jackTexts(partial)[2]).toContain("已确认完成 1 次本地文件修改");
+    const requestId = partial.agentDispatch!.jobs[0]!.id;
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_partial_retry", "重试核对数据", control(requestId, "retry"), {
+      executorTurns: { 核对数据: { modelReply: executorReply("数据已核对。", "核对数据") } } }));
+    const retried = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && jackTexts(state).length === 5);
+    console.log(JSON.stringify({ kind: "dispatch_partial_failure_retry", commands: ["写周报，核对数据，再整理要点", "重试核对数据"], jobs: retried.agentDispatch, outboxes: retried.agentFixtureOutboxes }));
+    expect(jackTexts(retried)[3]).toBe("我安排执行者 2（能力档 1）处理：核对数据。完成后会在本群汇报。");
+    expect(retried.fixtureModelRequests).toHaveLength(4);
+    expect(JSON.stringify(retried.fixtureModelRequests![3]!.input)).toContain("核对数据，按原消息要求");
+    const journal = new LocalFileOperationStore(join(directory, "local-file-operations.sqlite"));
+    try { expect(journal.dispatchEvidence(requestId)).toEqual({ completed: 1, unknown: 0 }); } finally { journal.close(); }
+    expect(retried.agentDispatch?.jobs[0]?.assignments.map(({ executor, status, attempt }) => `${executor}:${status}:${attempt}`))
+      .toEqual(["执行者 1:completed:0", "执行者 2:completed:1", "执行者 3:completed:0"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("cancels the unfinished Assignments of a request and reports the completed one's effects", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-cancel-three-")), business = mkdtempSync(join(tmpdir(), "dispatch-cancel-three-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_cancel_three", "写周报，核对数据，再整理要点", decision("jack", "周报、核对和要点"), {
+      leaderPlan: divided(["写周报", "核对数据", "整理要点"]),
+      // The completed Assignment writes and sends its file, so its evidence is found by its own workflow key.
+      executorTurns: { 写周报: { modelToolCalls: writeAndSend("weekly.txt") },
+        核对数据: { modelHold: true }, 整理要点: { modelHold: true } } }));
+    const busy = await running.until((state) => state.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status).join() === "completed,running,running" &&
+      state.fixtureModelRequests?.length === 3);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_cancel_three_stop", "都停下", control(busy.agentDispatch!.jobs[0]!.id, "cancel")));
+    const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && jackTexts(state).length === 2);
+    console.log(JSON.stringify({ kind: "dispatch_cancel_three", commands: ["写周报，核对数据，再整理要点", "都停下"], jobs: cancelled.agentDispatch, outboxes: cancelled.agentFixtureOutboxes }));
+    expect(jackTexts(cancelled)[1]).toBe("已停止继续处理：\n执行者 1「写周报」已完成\n执行者 2「核对数据」已停止\n执行者 3「整理要点」已停止\n" +
+      "已确认完成 1 次本地文件修改。已确认提交 1 个文件或媒体附件。已经完成的操作不会自动撤销。");
+    expect(cancelled.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "cancelled", "cancelled"]);
+    expect(readFileSync(join(business, "demo-vault", "weekly.txt"), "utf8")).toBe("内容 weekly.txt");
+    expect(cancelled.fixtureModelRequests).toHaveLength(3);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("reruns the Assignments a supplement affects, each with the supplement and its own workflow run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-supplement-keys-")), business = mkdtempSync(join(tmpdir(), "dispatch-supplement-keys-files-"));
+  let running: Running | undefined;
+  const titles = ["写周报", "写月报", "整理要点"];
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_supplied", "写周报和月报，再整理要点", decision("jack", "周报、月报和要点"), {
+      leaderPlan: divided(titles), executorTurns: Object.fromEntries(titles.map((title) => [title, { modelReply: executorReply(`${title}完成。`, title), modelHold: true }])) }));
+    const busy = await running.until((state) => state.fixtureModelRequests?.length === 3);
+    const requestId = busy.agentDispatch!.jobs[0]!.id;
+    // The supplement arrives while all three run; the Coordinator's clarification afterwards shows it was taken in.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_supplied_more", "补充：周报和月报都另存为文件发给我", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1, 2], assignments: [], decisions: [] },
+      executorTurns: { 写周报: { modelToolCalls: writeAndSend("weekly.txt") }, 写月报: { modelToolCalls: writeAndSend("monthly.txt") } } }));
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_supplied_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" }));
+    await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+    for (const title of titles) await running.post("/api/fixture/feishu/inbound", { modelControl: { messageId: "om_supplied", title, action: "release" } });
+    const done = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && state.agentDispatch.jobs[0].assignments.some(({ attempt }) => attempt === 1) && jackTexts(state).length === 4);
+    console.log(JSON.stringify({ kind: "dispatch_supplement_keys", commands: ["写周报和月报，再整理要点", "补充：周报和月报都另存为文件发给我"], jobs: done.agentDispatch,
+      outboxes: done.agentFixtureOutboxes, leader: done.fixtureLeaderRequests, runs: sendRuns(done) }));
+    expect(jackTexts(done)[2]).toBe("我安排：\n执行者 1（能力档 1）处理：写周报\n执行者 2（能力档 1）处理：写月报\n完成后会在本群汇报。");
+    // Only the two affected Executors ran again, each on the supplement; the third received nothing.
+    const reruns = done.fixtureModelRequests!.slice(3).map(({ input }) => JSON.stringify(input));
+    expect(reruns).toHaveLength(2);
+    for (const rerun of reruns) expect(rerun).toContain("用户消息：\\n补充：周报和月报都另存为文件发给我");
+    expect(reruns.filter((rerun) => rerun.includes("写周报，按原消息要求"))).toHaveLength(1);
+    expect(reruns.filter((rerun) => rerun.includes("写月报，按原消息要求"))).toHaveLength(1);
+    expect(sendRuns(done).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
+    expect(new Set(sendRuns(done).map(({ runRef }) => runRef)).size).toBe(2);
+    expect(done.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "close", "supplement", "close"]);
+    expect(done.agentDispatch?.jobs[0]?.assignments.map(({ executor, attempt }) => `${executor}:${attempt}`)).toEqual(["执行者 1:1", "执行者 2:1", "执行者 3:0"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("reports interrupted Assignments after a crash and closes the request", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-crash-three-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_crash_three", "写周报，核对数据，再整理要点", decision("jack", "周报、核对和要点"), {
+      leaderPlan: divided(["写周报", "核对数据", "整理要点"]),
+      executorTurns: { 写周报: { modelReply: executorReply("周报已写好。", "周报") }, 核对数据: { modelHold: true }, 整理要点: { modelHold: true } } }));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status).join() === "completed,running,running" &&
+      state.fixtureModelRequests?.length === 3);
+    await running.crash(); running = undefined;
+    running = await start(directory);
+    const recovered = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "partially_failed" && jackTexts(state).length === 3);
+    console.log(JSON.stringify({ kind: "dispatch_crash_three", command: "写周报，核对数据，再整理要点", jobs: recovered.agentDispatch, outboxes: recovered.agentFixtureOutboxes }));
+    expect(jackTexts(recovered).slice(0, 2)).toEqual([
+      "服务中断，执行者 2（能力档 1）的分工「核对数据」已中断，无法确认已完成的内容，不会自动重放。",
+      "服务中断，执行者 3（能力档 1）的分工「整理要点」已中断，无法确认已完成的内容，不会自动重放。"]);
+    expect(recovered.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "interrupted", "interrupted"]);
+    expect(recovered.fixtureModelRequests).toEqual([]);
+    expect(recovered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["close"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);

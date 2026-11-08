@@ -1,17 +1,26 @@
-import { parseLeaderClosing, planWithCorrection, type LeaderAssignmentReport, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
+import { parseLeaderClosing, planWithCorrection, supplementWithCorrection, type LeaderAssignmentReport, type LeaderAssignmentView, type LeaderTurnInput,
+  type TeamLeader } from "./agent-dispatch-leader.js";
 
 /** Where fixture Team Leader outputs come from: the outputs injected with the message a turn concerns. */
-export type FixtureLeaderSource = { leaderPlan(messageId: string): unknown; leaderClosing(messageId: string): unknown };
-export type FixtureLeaderRequest = { phase: "plan" | "close"; teamId: string; input: unknown };
+export type FixtureLeaderSource = { leaderPlan(messageId: string): unknown; leaderSupplement(messageId: string): unknown; leaderClosing(messageId: string): unknown };
+export type FixtureLeaderRequest = { phase: "plan" | "supplement" | "close"; teamId: string; input: unknown };
 
 /** The default plan when a message injects none: one Assignment on the team's first preset, titled with the Coordinator's summary. */
 export function fixtureDefaultPlan(input: LeaderTurnInput) {
-  return { assignments: [{ profileId: input.profiles[0]?.id ?? "", title: input.brief.summary.slice(0, 120), brief: input.brief.latest ?? input.brief.message }] };
+  return { assignments: [{ profileId: input.profiles[0]?.id ?? "", title: input.brief.summary.slice(0, 120), brief: input.brief.latest ?? input.brief.message }], decisions: [] };
+}
+/** The default supplement answer when its message injects none: every Assignment of the request is affected. */
+export function fixtureDefaultSupplement(assignments: readonly LeaderAssignmentView[]) {
+  return { affected: assignments.map(({ position }) => position), assignments: [], decisions: [] };
+}
+/** The default closing when a message injects none: every Executor's result, in the request's order. */
+export function fixtureDefaultClosing(assignments: readonly LeaderAssignmentReport[]) {
+  return { message: assignments.map(({ result }) => result).join("\n") };
 }
 
 /**
- * Explicit fixture mode only: substitutes the Team Leader's model output with the injected, already-decoded plan or closing,
- * and still passes it through the production correction loop and parsers. The default closing repeats the Executor's result.
+ * Explicit fixture mode only: substitutes the Team Leader's model output with the injected, already-decoded plan, supplement
+ * answer or closing, and still passes it through the production correction loop and parsers.
  */
 export class FixtureTeamLeader implements TeamLeader {
   readonly requests: FixtureLeaderRequest[] = [];
@@ -24,9 +33,16 @@ export class FixtureTeamLeader implements TeamLeader {
     }, { executorProfiles: input.profiles });
   }
 
+  supplement(input: LeaderTurnInput, assignments: readonly LeaderAssignmentView[], supplement: string) {
+    return supplementWithCorrection(async (refusal) => {
+      this.record("supplement", input, { assignments, supplement, ...(refusal ? { refusal: refusal.reason } : {}) });
+      return JSON.stringify(this.source.leaderSupplement(input.fixtureMessageId) ?? fixtureDefaultSupplement(assignments));
+    }, { executorProfiles: input.profiles }, assignments.length);
+  }
+
   async close(input: LeaderTurnInput, assignments: readonly LeaderAssignmentReport[]) {
     this.record("close", input, { assignments });
-    return parseLeaderClosing(JSON.stringify(this.source.leaderClosing(input.fixtureMessageId) ?? { message: assignments[0]?.result ?? "" }));
+    return parseLeaderClosing(JSON.stringify(this.source.leaderClosing(input.fixtureMessageId) ?? fixtureDefaultClosing(assignments)));
   }
 
   private record(phase: FixtureLeaderRequest["phase"], input: LeaderTurnInput, extra: Record<string, unknown>): void {

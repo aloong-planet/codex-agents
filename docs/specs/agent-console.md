@@ -100,7 +100,7 @@ The console shows the actual Executor, process and result of every Assignment. T
 ### agent-console::REQ-002 Requester controls in private conversations
 
 - agent-console::REQ-002/AC-01: Every control in a private conversation keeps original-requester authority: the owner controls only the owner's own requests ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)).
-- agent-console::REQ-002/AC-02: A private request is cancelled, retried and confirmed beyond the Assignment limits in the private conversation where it was created, under [agent-dispatch::REQ-007/AC-03](agent-dispatch.md), [agent-dispatch::REQ-008/AC-01](agent-dispatch.md) and [agent-dispatch::REQ-011/AC-02](agent-dispatch.md). When the owner's private request is selected, its summary offers 「取消这项事务」 while it runs or waits, and 「重试失败的分工」 when it has partially failed or failed. Each opens a confirmation card in the conversation. The cancel card lists the Assignments that will stop; the retry card lists only the failed and interrupted Assignments.
+- agent-console::REQ-002/AC-02: A private request is cancelled and retried in the private conversation where it was created, under [agent-dispatch::REQ-007/AC-03](agent-dispatch.md) and [agent-dispatch::REQ-008/AC-01](agent-dispatch.md). When the owner's private request is selected, its summary offers 「取消这项事务」 while it runs or waits, and 「重试失败的分工」 when it has partially failed or failed. Each opens a confirmation card in the conversation. The cancel card lists the Assignments that will stop; the retry card lists only the failed and interrupted Assignments.
 - agent-console::REQ-002/AC-03: In the Coordinator's private conversation, the Coordinator sees the state, team and reports of the owner's requests, never Executor content.
 - agent-console::REQ-002/AC-04: For a group request selected in a private conversation, the conversation offers no cancel or retry. It notes that both are asked of the lead Team Leader in the originating group.
 
@@ -184,7 +184,6 @@ The interface is Chinese and light only; the project's capability declaration di
 | Owner confirms a supplement twice, or after the request changed | Applied once; stale proposal is checked again under agent-console::US-008/AC-04 |
 | Owner supplements a group request privately | The group sees only the leader's confirmed summary under agent-console::US-008/AC-02 and agent-console::US-008/AC-03 |
 | Owner tries to control another member's group request privately | Refused under agent-console::REQ-002/AC-01 |
-| Private request needs a sixth Assignment | Confirmation in the private conversation under agent-console::REQ-002/AC-02 and [agent-dispatch::REQ-011/AC-02](agent-dispatch.md) |
 | Owner selects a group request in a private conversation and wants to cancel it | No cancel action; the note points to the group under agent-console::REQ-002/AC-04 |
 | Owner revokes the current browser | The page turns into the login card under agent-console::US-001/AC-03 and agent-console::US-001/AC-04 |
 | Owner runs the login command while the service is not running | The command says the service is not running and prints no link under agent-console::US-001/AC-01 |

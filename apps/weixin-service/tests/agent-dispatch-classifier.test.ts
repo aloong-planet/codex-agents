@@ -74,3 +74,4 @@ it("keeps the shared Coordinator prompt free of team-domain examples", async () 
   expect(prompt).toContain("不得捏造对话中没有的事实、条件或位置");
   for (const term of ["商品", "旅行", "项目位置"]) expect(prompt).not.toContain(term);
 });
+

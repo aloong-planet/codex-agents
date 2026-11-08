@@ -87,4 +87,5 @@ Memory scopes:
 - Pool limits, an owner decision on 2026-11-08 made through a delegate, adopted as the defaults of agent-dispatch::QR-001:
   - 256 MiB is planned per running runtime, about twice the measured peak, to cover real model turns;
   - the pool gets 1/8 of the 32 GiB host, 4 GiB, which allows 16 running runtimes, idle or busy. That is twice the widest request allowed without confirmation (agent-dispatch::REQ-011/AC-02): a Coordinator, 2 Team Leaders and 5 Executors;
+    - 2026-11-08: the over-limit confirmation was removed (agent-dispatch::REQ-011/AC-02). A request now runs at most 10 Executors at once; with the Coordinator, and Team Leaders that hold a slot only for their own turns, it stays within 16, and work beyond the pool queues (agent-dispatch::QR-001/AC-02).
   - a runtime is released after 5 idle minutes, because a restart with resume costs under 0.25 s while an idle runtime keeps about 80 MiB and a pool slot.
