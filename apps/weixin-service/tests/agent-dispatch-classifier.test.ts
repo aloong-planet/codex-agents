@@ -52,3 +52,25 @@ it("preserves an external model failure and releases the temporary coordinator t
   await expect(classifier.classify(input)).rejects.toThrow("model_transport_disconnected");
   expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
 });
+
+const ignore: AppServerTurnResult = { owner: "model_owned", finalText: '{"kind":"ignore","agentId":null,"requestId":null,"summary":"","message":""}' };
+const contract = (prompt: string) => prompt.split("\n").slice(0, -1).join("\n"); // the prompt without its trailing input JSON
+
+it("names the Coordinator from the roster and adds its profile instructions", async () => {
+  const external = runtime(ignore);
+  const classifier = new CodexDispatchClassifier(external, "/isolated/coordinator", () => ({ model: "fixture-model", effort: "low" }), "协调规则 X");
+  await classifier.classify({ ...input, agents: [{ id: "sam", name: "Lin", responsibility: "协调" }, ...input.agents.slice(1)] });
+  const prompt = contract(String(external.runTurn.mock.calls[0]![1]));
+  expect(prompt).toContain("你是 Lin，");
+  expect(prompt).toContain("Lin 永不作为业务执行者");
+  expect(prompt).toContain("协调规则 X");
+  expect(prompt).not.toContain("Sam");
+});
+
+it("keeps the shared Coordinator prompt free of team-domain examples", async () => {
+  const external = runtime(ignore);
+  await new CodexDispatchClassifier(external, "/isolated/coordinator", () => ({ model: "fixture-model", effort: "low" })).classify(input);
+  const prompt = contract(String(external.runTurn.mock.calls[0]![1]));
+  expect(prompt).toContain("不得捏造对话中没有的事实、条件或位置");
+  for (const term of ["商品", "旅行", "项目位置"]) expect(prompt).not.toContain(term);
+});

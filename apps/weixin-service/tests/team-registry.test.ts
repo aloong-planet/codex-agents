@@ -7,7 +7,8 @@ import { TeamRegistry, type TeamDefinitions } from "../src/team-registry.js";
 
 // Registry seam only. The local configuration follows the documented shape in docs/ops/feishu-agent-dispatch.md;
 // the owner's real channel.json is production data and is not read. Real-main wiring is in team-management.integration.test.ts.
-const TODAY_EXECUTOR_INSTRUCTIONS = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核其事实与来源是否相符、预算和时间安排是否自洽。";
+// Bill's seed: sentences 2–5 of the specialist paragraph at 3601e19, plus the budget-and-schedule half of its last sentence (ticket 04, decision D2).
+const BILL_EXECUTOR_INSTRUCTIONS = "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。";
 const HOST_TOOLS = ["files.read", "schedules.create"];
 const SAM = { appId: "cli_0123456789abcdef", appSecret: "sam-secret" };
 
@@ -45,7 +46,8 @@ describe("team registry", () => {
     try {
       registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
       const bindings = [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }];
-      const executorProfiles = [{ id: "executor-1", name: "能力档 1", instructions: TODAY_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
+      const executorProfiles = [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }];
+      const billProfiles = [{ id: "executor-1", name: "能力档 1", instructions: BILL_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
       const leaderProfile = { instructions: "", hostTools: [] };
       expect(registry.current()).toEqual({ version: 1, basedOn: null, source: "local_configuration", definitions: {
         coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调、澄清和分派任务，不执行具体业务事务。",
@@ -55,7 +57,7 @@ describe("team registry", () => {
           { id: "alice", teamName: "运营团队", responsibility: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。",
             leader: { name: "Alice", appId: "cli_1111111111111111", profile: leaderProfile }, executorProfiles, bindings },
           { id: "bill", teamName: "生活团队", responsibility: "日常生活事务，包括吃穿住行的规划和安排。",
-            leader: { name: "Bill", appId: "cli_2222222222222222", profile: leaderProfile }, executorProfiles, bindings },
+            leader: { name: "Bill", appId: "cli_2222222222222222", profile: leaderProfile }, executorProfiles: billProfiles, bindings },
           { id: "jack", teamName: "技术团队", responsibility: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。",
             leader: { name: "Jack", appId: "cli_3333333333333333", profile: leaderProfile }, executorProfiles, bindings },
         ],
@@ -169,7 +171,7 @@ describe("team registry", () => {
         { id: "lily", name: "Lily", responsibility: "视觉设计和品牌素材。", appId: "cli_5555555555555555", appSecret: "lily-secret" }]), { executorHostTools: HOST_TOOLS }).definitions;
       expect(definitions.teams.at(-1)).toEqual({ id: "lily", teamName: "Lily 团队", responsibility: "视觉设计和品牌素材。",
         leader: { name: "Lily", appId: "cli_5555555555555555", profile: { instructions: "", hostTools: [] } },
-        executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: TODAY_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }],
+        executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }],
         bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }] });
     } finally { registry.close(); }
   });

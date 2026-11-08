@@ -3,7 +3,7 @@
 > Status: one-specialist dispatch is implemented locally and independently reviewed. Team coordination (Team Leaders, Executors and Assignments) is specified here and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
-> Pending: the service still dispatches each Dispatch Request to one specialist that executes it, shares one group memory scope among specialists, and gives every specialist the same tools and prompt tail.
+> Pending: the service still dispatches each Dispatch Request to one specialist that executes it, and shares one group memory scope among specialists. Each specialist turn already takes its instructions and host tools from its team's Executor profile.
 
 ## Problem Statement
 
@@ -252,7 +252,7 @@ It starts from the existing local configuration with the same four roles and is 
 - the skills;
 - the memory scope.
 
-Turns obtain these only through it. Domain-specific text is removed from shared prompt assembly and moved into the owning team's profiles. Before team behavior is enabled, the initial profiles reproduce today's behavior, so the resolution point can be introduced without user-visible change.
+Turns obtain these only through it. The host-tool view offers the catalog tools the profile allows. The host refuses any other call before it runs, and module permissions keep gating every call. The Coordinator never resolves to host tools. Domain-specific text is removed from shared prompt assembly and moved into the owning team's profiles. Before team behavior is enabled, the initial profiles reproduce today's behavior with one exception: the weather, route, walking, opening-hours and budget-and-schedule rules now reach only Bill's team, while the source-verification rules stay shared.
 
 **Coordinator.** The Coordinator remains a tool-free structured-output turn. Its input is:
 
