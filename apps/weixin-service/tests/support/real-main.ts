@@ -84,3 +84,9 @@ export function dispatchConfig(directory: string, dual = false) {
         { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] },
     } }));
 }
+
+/** A Feishu group text event from the owner in `oc_alpha`, with the fixture's canned Coordinator decision and optional extra fixture inputs. */
+export const groupMessage = (messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {}) => ({
+  event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+      content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision, ...extra });

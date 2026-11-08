@@ -3,6 +3,7 @@ import { ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
 import type { TeamDefinitions } from "../src/team-registry.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } from "../src/workflow-tool-host.js";
+import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 
 // Resolution and host-tool boundary seams. The shared host is the real WorkflowToolHost over the production catalog,
 // with its gateway and inline executor injected as in workflow-tool-host.test.ts. Real-main wiring is in agent-dispatch.integration.test.ts.
@@ -14,9 +15,6 @@ const definitions: TeamDefinitions = {
     executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] }],
     bindings: [{ chatId: "oc_alpha", state: "accepting" }] }],
 };
-const PRODUCTION_TOOL_IDS = ["files.edit", "files.find", "files.grep", "files.read", "files.write", "media.send", "schedules.create", "schedules.delete",
-  "schedules.disable", "schedules.edit", "schedules.enable", "schedules.inspect", "schedules.list", "schedules.read_text", "schedules.retry_news",
-  "schedules.run_now", "weixin.send_files"];
 const trusted: TrustedWorkflowTurn = { eventKey: "event-1", accountId: "account-1", target: "target-1", occurredAt: 1_788_200_000_000, originalTextRef: "text-ref-1", attachmentRefs: [] };
 function sharedHost() {
   const reached: string[] = [];
