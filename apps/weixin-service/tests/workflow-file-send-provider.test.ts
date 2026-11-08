@@ -60,7 +60,7 @@ describe("WorkflowFileSendProvider", () => {
       status: "succeeded",
       output: { items: [{ fileHandle: expect.stringMatching(/^file_[a-f0-9]{32}$/u) }] },
     });
-    expect(snapshotCandidates).toHaveBeenCalledWith("bot@im.bot", [expect.objectContaining({ fileName: "two.md" })], "owner@im.wechat");
+    expect(snapshotCandidates).toHaveBeenCalledWith("bot@im.bot", [expect.objectContaining({ fileName: "two.md" })]);
 
     await provider.invoke(invocation("run-1", "files.prepare_send_selection", {
       manifestHandle: artifact.handle,

@@ -119,12 +119,20 @@ function validateAccess(value) {
   if (!Array.isArray(deniedRoots) || deniedRoots.length > 100 || deniedRoots.some((root) => typeof root !== "string" || !path.isAbsolute(root))) {
     throw new Error("file_sandbox_access_invalid");
   }
-  return { scopes: scopes.filter((scope) => !deniedRoots.some((root) => isContainedPath(root, scope.directory))),
-    spoolDirectory: value.spoolDirectory, deniedRoots };
+  const folded = deniedRoots.map(foldDeniedPath);
+  return { scopes: scopes.filter((scope) => !folded.some((root) => isContainedPath(root, foldDeniedPath(scope.directory)))),
+    spoolDirectory: value.spoolDirectory, deniedRoots: folded };
 }
 
 function isDeniedPath(candidate) {
-  return access.deniedRoots.some((root) => isContainedPath(root, candidate));
+  const folded = foldDeniedPath(candidate);
+  return access.deniedRoots.some((root) => isContainedPath(root, folded));
+}
+
+// Case- and normalization-insensitive volumes (APFS) give one file many spellings; a protected location that does not
+// exist yet must not be reachable by creating it under another spelling. Folding can only widen what is refused.
+function foldDeniedPath(value) {
+  return value.normalize("NFC").toLowerCase();
 }
 
 const findScans = new Map();

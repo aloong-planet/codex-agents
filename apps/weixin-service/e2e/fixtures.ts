@@ -17,7 +17,7 @@ export const test = base.extend<Fixtures>({
     const settings = {
       WORKFLOW_SIMULATOR_MODEL: modelMode, WORKFLOW_SIMULATOR_PENDING_ROUTER: routerMode,
       WORKFLOW_FIXTURE_TRACE_FILE: server.traceFile, WEIXIN_OTEL_DIRECTORY: server.otelDirectory,
-      WORKFLOW_FIXTURE_STATE_DIRECTORY: server.directory,
+      WORKFLOW_FIXTURE_STATE_DIRECTORY: server.directory, WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: server.businessDirectory,
     };
     const previous = Object.fromEntries(Object.keys(settings).map((key) => [key, process.env[key]]));
     Object.assign(process.env, settings);

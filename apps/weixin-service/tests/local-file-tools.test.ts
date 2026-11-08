@@ -10,6 +10,7 @@ import { LocalFileTools } from "../src/local-file-tools.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost, type WorkflowToolTraceEvent } from "../src/workflow-tool-host.js";
 import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -27,7 +28,7 @@ describe("local_file_query_contract_regression", () => {
     let observations = 0;
     const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: ++observations <= 2 ? 1 : 2, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("revoked-search", "account-a"), binding = files.bindTurn(trusted);
     try {
       await expect(files.execute({ toolId: "files.find", toolVersion: 2, arguments: { kind: "file", limit: 1 } }, trusted))
@@ -47,7 +48,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(latest, "latest"); fs.utimesSync(latest, 2_000_000_000, 2_000_000_000);
     const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "downloads", label: "Downloads", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("recursive-latest", "account-a"), binding = files.bindTurn(trusted);
     try {
       expect(await files.execute({ toolId: "files.find", toolVersion: 2, arguments: {
@@ -68,7 +69,7 @@ describe("local_file_query_contract_regression", () => {
     fs.utimesSync(path.join(directory, "z-latest.mp4"), 200, 200);
     const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "downloads", label: "Downloads", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("metadata-find", "account-a"), binding = files.bindTurn(trusted);
     try {
       const request = { toolId: "files.find", toolVersion: 2, arguments: {
@@ -91,7 +92,7 @@ describe("local_file_query_contract_regression", () => {
     const files = new LocalFileTools({ get: () => ({
       moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 1 } });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 1 } });
     const traces: WorkflowToolTraceEvent[] = [];
     const host = new WorkflowToolHost(createProductionWorkflowToolCatalog({ files: false, media: false, directFiles: true }),
       { submit: async () => { throw new Error("unexpected send"); } }, files, { trace: (event) => traces.push(event) });
@@ -131,7 +132,7 @@ describe("local_file_query_contract_regression", () => {
     const files = new LocalFileTools({ get: () => ({
       moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Private", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const traces: WorkflowToolTraceEvent[] = [];
     const host = new WorkflowToolHost(createProductionWorkflowToolCatalog({ files: false, media: false, directFiles: true }),
       { submit: async () => { throw new Error("unexpected send"); } }, files, { trace: (event) => traces.push(event) });
@@ -238,7 +239,7 @@ describe("local_file_query_contract_regression", () => {
           { scopeId: "write-only", label: "Write only", directory: writeOnly, read: false, write: true },
         ],
       }),
-    }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("scope-repair", "account-a");
     const binding = tools.bindTurn(trusted);
     const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
@@ -307,7 +308,7 @@ describe("local_file_query_contract_regression", () => {
     };
     const tools = new LocalFileTools(permissions, {
       moduleIds: ["notes", "local-media"],
-      spoolDirectory: spool,
+      protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool,
     });
     const trusted = turn("event-a", "account-a");
     const binding = tools.bindTurn(trusted);
@@ -373,7 +374,7 @@ describe("local_file_query_contract_regression", () => {
         saved: true,
         scopes: [{ scopeId: "root", label: "Files", directory: files, read: true, write: false }],
       }),
-    }, { moduleIds: ["files"], spoolDirectory: spool });
+    }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
 
     const queryNames = async (eventKey: string, query: string, caseMode: "smart" | "insensitive" = "smart") => {
       const trusted = turn(eventKey, "account-a");
@@ -411,7 +412,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "b.txt"), "丙");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxReadFiles: 1 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxReadFiles: 1 } });
     const trusted = turn("distinct-read-budget", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -437,7 +438,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "b.txt"), "乙\n丙");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxReadCharacters: 3 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxReadCharacters: 3 } });
     const trusted = turn("parallel-read-characters", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -464,7 +465,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "b.txt"), "乙");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxReadFiles: 1, maxReadCharacters: 3 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxReadFiles: 1, maxReadCharacters: 3 } });
     const trusted = turn("failed-read-admission", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -487,7 +488,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "item.txt"), "needle");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxCalls: 3 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxCalls: 3 } });
     const trusted = turn("mixed-call-budget", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -510,7 +511,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "small.txt"), "甲乙");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxReadCharacters: 3 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxReadCharacters: 3 } });
     const trusted = turn("bounded-read", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -532,7 +533,7 @@ describe("local_file_query_contract_regression", () => {
     fs.writeFileSync(path.join(directory, "b.txt"), "beta");
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 3 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 3 } });
     const trusted = turn("parallel-traversal", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -562,7 +563,7 @@ describe("local_file_query_contract_regression", () => {
       }),
     }, {
       moduleIds: ["files"],
-      spoolDirectory: spool,
+      protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool,
       budget: { maxResultItems: 2 },
     });
     const trusted = turn("event-budget", "account-a");
@@ -586,7 +587,7 @@ describe("local_file_query_contract_regression", () => {
     const tools = new LocalFileTools({
       get: () => ({ moduleId: "files", revision: 1, saved: true,
         scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }),
-    }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), now: () => clock,
+    }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), now: () => clock,
       budget: { maxWallClockMs: 100 } });
     const trusted = turn("execution-wall-clock", "account-a");
     const binding = tools.bindTurn(trusted);
@@ -619,7 +620,7 @@ describe("local_file_query_contract_regression", () => {
     let clock = 0;
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), now: () => clock, budget: { maxWallClockMs: 100 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), now: () => clock, budget: { maxWallClockMs: 100 } });
     const trusted = turn("queued-time", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -660,7 +661,7 @@ describe("local_file_query_contract_regression", () => {
           write: false,
         }],
       }),
-    }, { moduleIds: ["first", "second"], spoolDirectory: spool });
+    }, { moduleIds: ["first", "second"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
     const trusted = turn("event-pages", "account-a");
     const binding = tools.bindTurn(trusted);
     const firstPage = await tools.execute({
@@ -705,7 +706,7 @@ describe("local_file_query_contract_regression", () => {
     const tools = new LocalFileTools({ get: () => ({
       moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("equal-time-pages", "account-a");
     const binding = tools.bindTurn(trusted);
     const query = { kind: "file", sort: { field, direction } };
@@ -737,7 +738,7 @@ describe("local_file_query_contract_regression", () => {
       scopes: (multipleModules ? [moduleId] : ["gamma", "beta", "alpha"]).map((id) => ({
         scopeId: id, label: id, directory: path.join(root, id), read: true, write: false,
       })),
-    }) }, { moduleIds: multipleModules ? ["gamma", "beta", "alpha"] : ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: multipleModules ? ["gamma", "beta", "alpha"] : ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     try {
       for (let repeat = 0; repeat < 5; repeat += 1) {
         const trusted = turn(`scope-ties-${repeat}`, "account-a");
@@ -765,7 +766,7 @@ describe("local_file_query_contract_regression", () => {
     const tools = new LocalFileTools({ get: (moduleId: string) => ({
       moduleId, revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: moduleId, directory: path.join(root, moduleId), read: true, write: false }],
-    }) }, { moduleIds: ["first", "second"], spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 2 } });
+    }) }, { moduleIds: ["first", "second"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), budget: { maxScannedFiles: 2 } });
     const trusted = turn("partial-modules", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -787,7 +788,7 @@ describe("local_file_query_contract_regression", () => {
     const tools = new LocalFileTools({ get: () => ({
       moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }],
-    }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("grep-pages", "account-a");
     const binding = tools.bindTurn(trusted);
     type Page = { matches: Array<{ fileName: string; line: number }>; cursor?: string; scanComplete: boolean; resultTruncated: boolean };
@@ -815,7 +816,7 @@ describe("local_file_query_contract_regression", () => {
         saved: true,
         scopes: [{ scopeId: "root", label: "Files", directory: files, read: true, write: false }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: spool });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
     const trusted = turn("event-grep-send", "account-a");
     const binding = tools.bindTurn(trusted);
     const grep = await tools.execute({
@@ -845,7 +846,7 @@ describe("local_file_query_contract_regression", () => {
       }),
     }, {
       moduleIds: ["files"],
-      spoolDirectory: spool,
+      protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool,
       budget: { maxScannedFiles: 1 },
     });
     const trusted = turn("event-scan-budget", "account-a");
@@ -948,7 +949,7 @@ describe("local_file_mutation_contract_regression", () => {
       }),
     }, {
       moduleIds: ["notes"],
-      spoolDirectory: spool,
+      protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool,
       budget: { maxWriteBytes: 4 },
     });
     const trusted = turn("event-write-budget", "account-a");
@@ -1001,7 +1002,7 @@ describe("local_file_mutation_contract_regression", () => {
     fs.mkdirSync(directory);
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: false, write: true }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("write-only", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -1030,7 +1031,7 @@ describe("local_file_mutation_contract_regression", () => {
         saved: true,
         scopes: [{ scopeId: "root", label: "Files", directory: files, read: false, write: true }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: spool });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
     const trusted = turn("event-overwrite-permission", "account-a");
     const binding = tools.bindTurn(trusted);
     const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
@@ -1097,7 +1098,7 @@ describe("local_file_mutation_contract_regression", () => {
         saved: true,
         scopes: [{ scopeId: "vault", label: "Vault", directory: files, read: true, write: true }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: spool });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
     const trusted = turn("event-edit", "account-a");
     const binding = tools.bindTurn(trusted);
     const found = await tools.execute({
@@ -1175,7 +1176,7 @@ describe("local_file_mutation_contract_regression", () => {
     let write = true;
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const trusted = turn("mutation-revoked", "account-a");
     const binding = tools.bindTurn(trusted);
     try {
@@ -1244,7 +1245,7 @@ describe("local_file_mutation_contract_regression", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-mutation-form-")); temporaryDirectories.push(root);
     const directory = path.join(root, "files"); fs.mkdirSync(directory);
     fs.writeFileSync(path.join(directory, "item.txt"), "x");
-    const tools = editableTools(directory, path.join(root, "spool"), { groupProtectedRoots: [path.join(root, "spool")] });
+    const tools = editableTools(directory, path.join(root, "spool"), { protectedRoots: [path.join(root, "spool")] });
     const original = { ...turn("dispatch-edit", "account-a"), target: "feishu.group.test", requesterRef: "ou_owner", dispatchRequestId: "dispatch-request" };
     let binding = tools.bindTurn(original);
     const read = async (trusted: TrustedWorkflowTurn) => {
@@ -1300,7 +1301,7 @@ describe("local_file_mutation_contract_regression", () => {
     let clock = 0;
     const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
       scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: true }] }) },
-    { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), now: () => clock, budget: { maxWallClockMs: 100 } });
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), now: () => clock, budget: { maxWallClockMs: 100 } });
     const trusted = turn("queued-write", "account-a");
     const binding = tools.bindTurn(trusted);
     const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
@@ -1547,7 +1548,7 @@ describe("local_file_mutation_contract_regression", () => {
         saved: true,
         scopes: [{ scopeId: "vault", label: "Vault", directory: files, read: true, write: false }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: spool });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool });
     const trusted = turn("event-snapshot", "account-a");
     const binding = tools.bindTurn(trusted);
     const found = await tools.execute({
@@ -1585,7 +1586,7 @@ describe("local_file_mutation_contract_regression", () => {
       }),
     }, {
       moduleIds: ["notes"],
-      spoolDirectory: spool,
+      protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool,
       budget: { maxSnapshotBytes: 10 },
     });
     const trusted = turn("event-snapshot-quota", "account-a");
@@ -1603,6 +1604,77 @@ describe("local_file_mutation_contract_regression", () => {
   });
 });
 
+describe("local_file_service_state_boundary", () => {
+  // Shapes as the service lays them out: a runtime root under the state directory, a single-file configuration root,
+  // a LaunchAgent file that does not exist yet and a Codex home holding auth.json.
+  it.each([
+    ["a private", "owner@im.wechat"],
+    ["a group", `feishu.group.${"a".repeat(64)}`],
+  ])("refuses every protected root to %s target under a covering grant while the rest of the grant reads and writes", async (_kind, target) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "service-state-boundary-")); temporaryDirectories.push(root);
+    const grant = path.join(root, "home"), runtime = path.join("state", "group-model-runtimes", "feishu.group.x");
+    for (const directory of [path.join(runtime, "workspace"), path.join(runtime, "codex-home"), path.join(runtime, "home"), "codex", "LaunchAgents", "notes", "swap"]) {
+      fs.mkdirSync(path.join(grant, directory), { recursive: true });
+    }
+    const files: Record<string, string> = { "state/state.json": "needle state", "state/item.md": "needle protected item", "channel.json": "needle channel",
+      "codex/auth.json": "needle auth", "notes/keep.md": "needle keep", "swap/item.md": "needle swap" };
+    for (const [relativePath, content] of Object.entries(files)) fs.writeFileSync(path.join(grant, relativePath), content);
+    const tools = new LocalFileTools({ get: () => ({ moduleId: "notes", revision: 1, saved: true,
+      scopes: [{ scopeId: "home", label: "Home", directory: grant, read: true, write: true }] }) }, {
+      moduleIds: ["notes"], spoolDirectory: path.join(root, "spool"),
+      // Channel.json is configured in another case than the file on disk; openclaw does not exist yet.
+      protectedRoots: ["state", "Channel.json", "LaunchAgents/svc.plist", "codex", "openclaw"].map((relativePath) => path.join(grant, relativePath)),
+    });
+    const trusted = { ...turn(`service-state-${target}`, "account-a"), target };
+    const binding = tools.bindTurn(trusted);
+    const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+    const execute = (toolId: string, toolVersion: number, args: Record<string, unknown>) => tools.execute({ toolId, toolVersion, arguments: args }, trusted);
+    const tree = (relativePath: string) => fs.readdirSync(path.join(grant, relativePath), { recursive: true }).map(String).sort();
+    try {
+      const found = await execute("files.find", 2, {}) as { entries: Array<{ fileRef: string; displayPath: string }> };
+      expect(found.entries.map((entry) => entry.displayPath).sort()).toEqual(["Home/LaunchAgents", "Home/notes", "Home/notes/keep.md", "Home/swap", "Home/swap/item.md"]);
+      const grep = await execute("files.grep", 2, { pattern: "needle" }) as { matches: Array<{ displayPath: string }> };
+      expect(grep.matches.map((match) => match.displayPath).sort()).toEqual(["Home/notes/keep.md", "Home/swap/item.md"]);
+      const targets = [`${runtime}/workspace/.agents/skills/x/SKILL.md`, `${runtime}/codex-home/skills/x/SKILL.md`, `${runtime}/home/.agents/skills/x/SKILL.md`,
+        "state/state.json", "channel.json", "LaunchAgents/svc.plist", "codex/auth.json",
+        // Case variants name the same files on a case-insensitive volume (APFS).
+        "LaunchAgents/SVC.PLIST", "OPENCLAW/config.json"];
+      expect(targets).toHaveLength(9);
+      for (const relativePath of targets) {
+        await expect(execute("files.write", 1, { scopeRef, relativePath, content: "planted", overwrite: false }), relativePath).rejects.toThrow(/^local_file_permission_denied$/u);
+      }
+
+      const created = await execute("files.write", 1, { scopeRef, relativePath: "notes/new.md", content: "created", overwrite: false }) as { fileRef: string };
+      expect(await execute("files.read", 2, { fileRef: created.fileRef })).toMatchObject({ content: "created" });
+      const keep = found.entries.find((entry) => entry.displayPath === "Home/notes/keep.md")!;
+      const kept = await execute("files.read", 2, { fileRef: keep.fileRef }) as { sha256: string };
+      await execute("files.edit", 1, { fileRef: keep.fileRef, expectedSha256: kept.sha256, oldText: "needle keep", newText: "kept" });
+      expect(fs.readFileSync(path.join(grant, "notes", "keep.md"), "utf8")).toBe("kept");
+
+      // A reference taken outside the set must not follow its directory once that directory points into the set.
+      const swapped = found.entries.find((entry) => entry.displayPath === "Home/swap/item.md")!;
+      fs.rmSync(path.join(grant, "swap"), { recursive: true });
+      fs.symlinkSync(path.join(grant, "state"), path.join(grant, "swap"));
+      await expect(execute("files.read", 2, { fileRef: swapped.fileRef })).rejects.toThrow(/^local_file_permission_denied$/u);
+
+      expect(tree("state")).toEqual(["group-model-runtimes", "group-model-runtimes/feishu.group.x", "group-model-runtimes/feishu.group.x/codex-home",
+        "group-model-runtimes/feishu.group.x/home", "group-model-runtimes/feishu.group.x/workspace", "item.md", "state.json"]);
+      expect(tree("codex")).toEqual(["auth.json"]);
+      expect(tree("LaunchAgents")).toEqual([]);
+      expect(fs.readdirSync(grant).filter((name) => name.toLowerCase() === "openclaw")).toEqual([]);
+      for (const relativePath of ["state/state.json", "state/item.md", "channel.json", "codex/auth.json"]) {
+        expect(fs.readFileSync(path.join(grant, relativePath), "utf8")).toBe(files[relativePath]);
+      }
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it.each([["without", undefined], ["with an empty", []]])("refuses to start %s protected set", (_kind, protectedRoots) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "service-state-unset-")); temporaryDirectories.push(root);
+    expect(() => new LocalFileTools({ get: () => undefined }, { moduleIds: ["notes"], spoolDirectory: path.join(root, "spool"),
+      ...(protectedRoots ? { protectedRoots } : {}) } as ConstructorParameters<typeof LocalFileTools>[1])).toThrow(/^local_file_tools_config_invalid$/u);
+  });
+});
+
 function turn(eventKey: string, accountId: string): TrustedWorkflowTurn {
   return {
     eventKey,
@@ -1617,7 +1689,7 @@ function turn(eventKey: string, accountId: string): TrustedWorkflowTurn {
 function editableTools(
   files: string,
   spool: string,
-  options: { operationDatabasePath?: string; afterMutationDurable?: () => void; groupProtectedRoots?: string[] } = {},
+  options: { operationDatabasePath?: string; afterMutationDurable?: () => void; protectedRoots?: string[] } = {},
 ): LocalFileTools {
   return new LocalFileTools({
     get: () => ({
@@ -1626,5 +1698,5 @@ function editableTools(
       saved: true,
       scopes: [{ scopeId: "vault", label: "Vault", directory: files, read: true, write: true }],
     }),
-  }, { moduleIds: ["notes"], spoolDirectory: spool, ...options });
+  }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: spool, ...options });
 }
