@@ -28,6 +28,8 @@ export const ISOLATED_RUNTIME_KINDS = {
     structuredOutput: "capability", serviceName: "feishu_group", conversation: { webSearch: "live", automaticRecovery: true } },
   dispatchCoordinator: { process: "app-server", directory: "group-model-runtimes", scope: "dispatch-coordinator", hostTools: false, readsMedia: false,
     structuredOutput: "capability", serviceName: "feishu_dispatch_coordinator", conversation: { webSearch: "disabled" } },
+  dispatchLeader: { process: "app-server", directory: "group-model-runtimes", scope: (scope) => scope, hostTools: false, readsMedia: false,
+    structuredOutput: "capability", serviceName: "feishu_dispatch_leader", conversation: { webSearch: "disabled" } },
   dispatchAgent: { process: "app-server", directory: "group-model-runtimes", scope: (scope) => scope, hostTools: true, readsMedia: true,
     structuredOutput: "capability", serviceName: (agentId) => `feishu_agent_${agentId}`, conversation: { webSearch: "live", automaticRecovery: true } },
   pendingRouter: { process: "app-server", directory: "group-model-runtimes", scope: "pending-router", hostTools: false, readsMedia: false,

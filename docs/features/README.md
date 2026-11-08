@@ -9,7 +9,7 @@
 | 功能 | 一句话 |
 |---|---|
 | [Personal channels and Feishu groups](channel-switching.md) | Use personal chats and authorized groups with independent group memory, requester-owned choices and source-bound reminders. |
-| [Automatic group task dispatch](agent-dispatch.md) | Ask in ordinary group discussion; Sam coordinates one independently identified specialist, with author-confirmed proposals and group reports. |
+| [Automatic group task dispatch](agent-dispatch.md) | Ask in ordinary group discussion; Sam routes the request to a team whose Team Leader assigns an Executor and reports start and close under its own bot, with author-confirmed proposals. |
 | [Scheduled tasks](scheduled-tasks.md) | Manage reminders, public-web research and existing daily news with editable schedules, permanent execution summaries and exact ordered cached recovery. |
 | [Daily AI news](daily-ai-news.md) | Select supported current news, reject mismatched article bodies, reuse complete summaries, disclose shortages and recover eligible reports in order independently of archiving. |
 | [工作流模块权限](workflow-module-permissions.md) | 在本地设置页按模块和目录保存读写权限，文件执行始终禁止。 |

@@ -27,6 +27,25 @@ export type DispatchJob = {
   fixtureMessageId?: string;
   retry?: boolean;
   reportId?: string;
+  /** The team definitions version the request runs under; absent only for requests stored before Assignments existed. */
+  definitionsVersion?: number;
+};
+/** One part of a Dispatch Request, performed by exactly one Executor created from one of the team's preset profiles. */
+export type DispatchAssignment = {
+  id: string;
+  requestId: string;
+  teamId: string;
+  profileId: string;
+  profileName: string;
+  /** The Executor's display name, from the durable Assignment sequence. */
+  executor: string;
+  title: string;
+  brief: string;
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
+  /** The request attempt this Assignment runs in; an explicit retry moves it to the new attempt. */
+  attempt: number;
+  result?: string;
+  runRef?: string;
 };
 export type DispatchClassificationInput = {
   event: InboundContent;
@@ -38,7 +57,7 @@ export interface DispatchClassifier { classify(input: DispatchClassificationInpu
 export type DispatchPendingResult = { handled: false; cancelledRunRef?: string } | { handled: true; senderAccountId?: string; runRef?: string; result: DispatchExecutionResult };
 export type DispatchExecutionResult = { status: "completed" | "waiting" | "failed" | "cancelled"; message: string; runRef?: string };
 export interface DispatchExecutor {
-  run(job: DispatchJob, signal: AbortSignal): Promise<DispatchExecutionResult>;
+  run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<DispatchExecutionResult>;
   close(): void | Promise<void>;
 }
 export type DispatchDelivery = (input: { accountId: string; target: string; senderAccountId: string; message: string; operationId: string; beforeSubmit(): boolean }) => Promise<SendTextResult>;
