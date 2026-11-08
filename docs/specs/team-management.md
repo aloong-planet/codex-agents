@@ -118,7 +118,10 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 
 ## Implementation Decisions
 
-**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded from the existing local configuration. Until the console saves its first change, each start imports that configuration again and records a new definitions version only when the import differs; after the first console save, the console is its only editor. Application secrets are stored beside the versions, never inside one.
+**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded from the existing local configuration. Until the console saves its first change, each start imports that configuration again and records a new definitions version only when the import differs; after the first console save, the console is its only editor. Application secrets are stored beside the versions, never inside one. The seed reproduces today's roster:
+- The teams are named 运营团队, 生活团队 and 技术团队. An extra configured role's team is named "<name> 团队", and the Coordinator's entry is labelled 总协调.
+- Each team's single Executor profile, 能力档 1, carries today's domain instructions and every production workflow tool.
+- Leader and Coordinator profiles start with empty instructions, and the Coordinator has no host tools.
 
 **Binding states.** Each team-group binding moves through these states:
 
