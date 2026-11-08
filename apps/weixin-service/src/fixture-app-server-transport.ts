@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type { AppServerMessage, AppServerTransport } from "./codex-app-server-client.js";
 import type { CodexUserInput } from "./codex-conversation.js";
 
@@ -40,7 +42,25 @@ export class FixtureAppServerTransport implements AppServerTransport {
     private readonly turnIdPrefix = "fixture-turn",
     /** Sees each started thread's service name and offered dynamic tool names, so cases can check what a runtime was given. */
     private readonly observeThreadStart?: (start: { threadId: string; serviceName: unknown; dynamicTools: string[] | null }) => void,
+    /** A Codex home in which each started thread gets a rollout file named as the App Server names it, so homes compact as in
+     * production. Resuming does not read it. */
+    private readonly rolloutHome?: string,
   ) {}
+  private readonly rollouts = new Map<string, string>();
+
+  /** Appends a line to the thread's rollout: a thread this transport started, in its runtime's Codex home. */
+  private record(threadId: string, line: unknown): void {
+    if (!this.rolloutHome) return;
+    let file = this.rollouts.get(threadId);
+    if (!file) {
+      if ((line as { type?: unknown }).type !== "session_meta") return;
+      const now = new Date().toISOString(), [date] = now.split("T");
+      file = path.join(this.rolloutHome, "sessions", ...date!.split("-"), `rollout-${now.slice(0, 19).replaceAll(":", "-")}-${threadId}.jsonl`);
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      this.rollouts.set(threadId, file);
+    }
+    fs.appendFileSync(file, `${JSON.stringify(line)}\n`, { mode: 0o600 });
+  }
 
   send(message: AppServerMessage): void {
     if (this.closed) throw new Error("fixture_app_server_closed");
@@ -102,10 +122,14 @@ export class FixtureAppServerTransport implements AppServerTransport {
       this.emit({ id, result: { userAgent: "fixture-app-server" } });
     } else if (method === "thread/start" || method === "thread/resume") {
       const threadId = method === "thread/resume" ? String(params.threadId) : randomUUID();
-      if (method === "thread/start") this.observeThreadStart?.({ threadId, serviceName: params.serviceName, dynamicTools: dynamicToolNames(params.dynamicTools) });
+      if (method === "thread/start") {
+        this.observeThreadStart?.({ threadId, serviceName: params.serviceName, dynamicTools: dynamicToolNames(params.dynamicTools) });
+        this.record(threadId, { type: "session_meta", payload: { id: threadId } });
+      }
       this.emit({ id, result: { thread: { id: threadId } } });
     } else if (method === "turn/start") {
       this.observeTurn?.({ threadId: String(params.threadId), input: structuredClone(params.input) });
+      this.record(String(params.threadId), { type: "turn_input", payload: params.input });
       const calls: FixtureModelToolCall[] = [];
       let call = this.toolCalls.takeFixtureModelToolCall(String(params.threadId));
       while (call) { calls.push(call); call = this.toolCalls.takeFixtureModelToolCall(String(params.threadId)); }

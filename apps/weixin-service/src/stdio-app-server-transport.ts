@@ -26,7 +26,11 @@ export class StdioAppServerTransport implements AppServerTransport {
   private messageListener: (message: AppServerMessage) => void = () => {};
   private exitListener: (error?: Error) => void = () => {};
 
+  /** Settles once the App Server process has exited, or failed to start. */
+  readonly exited: Promise<void>;
+
   constructor(private readonly child: AppServerProcess) {
+    this.exited = new Promise((resolve) => { child.once("exit", () => resolve()); child.once("error", () => resolve()); });
     const stdout = child.stdout as Readable;
     stdout.setEncoding("utf8");
     stdout.on("data", (chunk: string) => this.onData(chunk));

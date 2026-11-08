@@ -75,7 +75,8 @@ import { FixturePort } from "./fixture-port.js";
 import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
 import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
+import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
+import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
@@ -156,6 +157,9 @@ const fixtureMode = process.env.DEMO_MODE === "fixture";
 // Fixture-only seam: real Coordinator and Team Leader runtimes over the fixture App Server. Refused outside fixture mode.
 const fixtureCoordinationRuntime = process.env.WORKFLOW_FIXTURE_COORDINATION_RUNTIME === "1";
 if (fixtureCoordinationRuntime && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+// Fixture-only seam: Executor home compaction stops after its first removal, so a case can kill the service mid-compaction.
+const fixtureCompactionHold = process.env.WORKFLOW_FIXTURE_COMPACTION_HOLD === "1";
+if (fixtureCompactionHold && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 const fixtureLiveMainModel = fixtureMode && process.env.WORKFLOW_SIMULATOR_MODEL === "live";
 const fixtureLiveWorkflowAgents = fixtureLiveMainModel ||
   (fixtureMode && process.env.WORKFLOW_SIMULATOR_PENDING_ROUTER === "live");
@@ -693,17 +697,24 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
     ...(placement.instance !== undefined ? { instance: placement.instance } : {}),
     ...(placement.mediaRoot !== undefined ? { mediaRoot: placement.mediaRoot } : {}),
     ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
+  // Every process the conversation starts, so a closed runtime can wait for them to exit before its home is compacted.
+  const exits: Array<Promise<void>> = [];
   const agent = new CodexConversation(
-    () => fixtureRuntime
-      ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
+    () => {
+      if (fixtureRuntime) {
+        return new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           requests.push(request); if (requests.length > 20) requests.shift();
-        }, undefined, observeThreadStart)
-      : spawnIsolatedAppServer(codexExecutable, runtime),
+        }, undefined, observeThreadStart, kind === "dispatchAgent" ? runtime.env.CODEX_HOME : undefined);
+      }
+      const transport = spawnIsolatedAppServer(codexExecutable, runtime);
+      exits.push(transport.exited);
+      return transport;
+    },
     600_000, tools, undefined, 300_000,
     isolatedConversationOptions(kind, runtime, { structuredOutputSupported: appServerCapabilities.structuredOutputSupported,
       ...(placement.agentId !== undefined ? { agentId: placement.agentId } : {}) }));
-  return { agent, cwd: runtime.cwd, runtimeWorkspaceRoots: [] };
+  return { agent, cwd: runtime.cwd, runtimeWorkspaceRoots: [], exited: async () => { await Promise.all(exits); } };
 };
 const createGroupRuntime = (accountId: string, target: string) => {
   const chatId = feishuConfiguration?.owner.deliveryTarget(accountId, target);
@@ -874,7 +885,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
-  const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: ({ agent }) => agent.close() });
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: closeDispatchRuntime });
   const contextRevision = () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); };
   // Under the coordination seam the fixture App Server answers Coordinator and Team Leader turns with the injected outputs.
   const answer = (threadId: string, text: string) => fixtureThreadQueues.set(threadId, { takeFixtureModelToolCall: () => undefined, takeFixtureModelCompletion: () => Promise.resolve(text) });
@@ -937,7 +948,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         userEntry: { source: { eventKey: event.key, target: event.target, senderAccountId: job.senderAccountId }, id: `${job.id}:user:${job.attempt}`, text: event.text, createdAt: event.receivedAt, status: "completed" },
         assistantEntry: { id: `${job.id}:assistant:${job.attempt}`, text: reply, createdAt: Date.now(), status: "completed" } });
     },
+    homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory),
+      compact: (home, recordedThread) => compactRuntimeHome(home, recordedThread, fixtureCompactionHold ? { afterRemoval: () => {
+        fs.writeFileSync(path.join(stateDirectory, "fixture-compaction-held"), "");
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+      } } : {}) },
+    report: (code) => process.stderr.write(`${code}\n`),
   });
+  // Before any dispatch work can start an Executor runtime (agent-dispatch::QR-002/AC-02).
+  executor.compactHomes();
   const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized, leader,
     definitionsVersion: () => teamDefinitions!.version, team: teamView, revision: contextRevision,
     bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory,

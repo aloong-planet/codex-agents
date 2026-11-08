@@ -174,6 +174,14 @@ Applies to: every isolated model runtime used by the Coordinator, Team Leaders a
 
 The configured idle limit defaults to 5 minutes. The configured concurrency limit defaults to 16 running runtimes, idle or busy. Both defaults are derived from the measured per-runtime memory and start-up cost in the Sources of [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md).
 
+### agent-dispatch::QR-002 Disk kept per Executor home
+
+Applies to: the isolated runtime home of every Executor, including the homes left by the earlier one-specialist dispatch. The homes of the Coordinator, the Team Leaders and group conversations are excluded.
+
+- agent-dispatch::QR-002/AC-01: Once an Executor's runtime has been released and its App Server process has exited, its home holds only its records: the thread rollouts. Everything else in the home is removed, and every rollout stays byte for byte unchanged.
+- agent-dispatch::QR-002/AC-02: Each start compacts every Executor home before any dispatch work runs, under agent-dispatch::QR-002/AC-01 and agent-dispatch::QR-002/AC-03. This covers the homes written before compaction existed and the homes whose compaction a stop or crash cut off.
+- agent-dispatch::QR-002/AC-03: Compaction removes nothing from a home whose records it cannot confirm: the thread recorded for the home has no rollout there, or no thread is recorded and the home holds no rollout. When a removal fails, the home keeps what remains. In both cases a diagnostic names the home and the reason, and the next start checks the home again. Rollouts are never opened, changed or removed.
+
 ## Constraints
 
 ### agent-dispatch::CON-001 Authorized human sources (direct acceptance)
@@ -209,6 +217,12 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Team Leader plans, Executors run, all complete | Start, progress and closing messages under agent-dispatch::US-003 |
 | One of three Assignments fails | Others continue; closing names the failure; request partially failed under agent-dispatch::REQ-008/AC-01 |
 | Requester retries a partially failed request | Only failed Assignments rerun; completed effects not replayed under agent-dispatch::REQ-008/AC-01 |
+| Requester retries a failed request after its Executor's home was compacted | The Assignment resumes its own thread with its earlier process, because the rollouts are kept, under agent-dispatch::QR-002/AC-01, agent-dispatch::REQ-008/AC-01 and agent-dispatch::REQ-012/AC-03 |
+| Requester retries while the failed attempt's runtime is still closing | The retry's runtime starts only after the old one's process has exited and its home was compacted, so compaction never removes a running runtime's files, under agent-dispatch::QR-002/AC-01 |
+| A released Executor's App Server process does not exit | Its home is left as it is until the next start's sweep under agent-dispatch::QR-002/AC-02; the pool slot is freed after a bounded wait |
+| Service stops or crashes while it compacts an Executor home | Rollouts intact; the next start finishes the compaction under agent-dispatch::QR-002/AC-02 |
+| Compaction cannot remove an entry, or finds no rollout for the home's thread | The home keeps what remains and its records stay unchanged; a diagnostic names the home and the reason under agent-dispatch::QR-002/AC-03 |
+| A retried Assignment's rollout is missing, for example removed by hand | Existing behavior, unchanged: the retry runs on a fresh thread without its earlier process. Compaction never causes this, because it keeps every rollout (agent-dispatch::QR-002/AC-01) |
 | Deliver same message repeatedly, including changed delivery event IDs; restart after admission | One durable request under agent-dispatch::REQ-008/AC-02 and agent-dispatch::REQ-009/AC-02 |
 | Stop during an Assignment, after a local write, or after a platform send | Existing safe recovery only; report the interrupted Assignment rather than repeat unknown effects under agent-dispatch::REQ-008/AC-01 through agent-dispatch::REQ-008/AC-03 |
 | Start, cross-team, closing or result notification is rejected or uncertain; requester asks for another report | Delivery retry separate from execution under agent-dispatch::REQ-008/AC-03 |
@@ -324,6 +338,14 @@ Recall and capture use only the caller's scope.
 
 **Runtime pool.** Runtimes are held in a bounded pool keyed by agent, conversation, access revision and definitions version, with idle release. The Coordinator's, Team Leaders' and Executors' runtimes share one pool. When work needs a new runtime at the limit, the least recently used idle runtime is released for it at once, instead of at its idle limit. Persisted thread identities let Coordinator and Team Leader sessions resume after release.
 
+**Executor home compaction.** An Executor's runtime home keeps only its records: the thread rollouts in its Codex home's session and archived-session directories (agent-dispatch::QR-002). Everything else in the home is bookkeeping. The App Server's databases are rebuilt from the rollouts when it next starts. The configuration, the login copy and the model catalog are written again whenever the host creates a runtime. The rest are the App Server's logs, locks and temporary files. What is kept is an allowlist, so files that a later Codex version adds are removed as well.
+
+- A runtime release compacts the home inside the pool's close, once the App Server process has exited. A new runtime for the same home, such as a retry's, starts only after that close settles. A process that has not exited within a bounded wait leaves its home to the next start's sweep.
+- Each start sweeps every Executor home before dispatch work runs. Executor homes are recognized by their scope form, which the homes of the Coordinator, the Team Leaders and group conversations do not share; those homes are not compacted.
+- Before removing anything, compaction checks the records by file name only: the rollout of the thread that the Executor's session records, or, for a home with no recorded thread, at least one rollout. A retry needs nothing else. Measured on 2026-11-08 with codex-cli 0.167.0-alpha.3.2: the App Server resumed the recorded thread from its rollout alone, and the earlier user text, tool output and answer were in the retry's model input. Without the rollout it starts a fresh thread without reporting an error.
+- Compaction is idempotent and removes one entry at a time, so a stop at any point leaves the rollouts and some removable entries, which the next start removes.
+- Executor memory (agent-dispatch::REQ-012/AC-03) is kept in the host's memory store, outside every runtime home, so compaction never touches it.
+
 **Node runtime.** Deployment and local acceptance use the Node version pinned in the repository's CI configuration, matching the existing service runtime. A runtime upgrade must first verify real permission-worker writes and recovery; a successful model response does not establish filesystem compatibility.
 
 **Brief capture.** Full task Briefs use a separate 64-KiB capture, distinct from the legacy short file-search input. Oversized captures fail rather than silently dropping author conditions.
@@ -356,6 +378,13 @@ Do not substitute Provider calls or fabricated Run state for that route.
 These tests do not inspect prompt text.
 
 **Runtime pool.** The pool is tested at its public interface: concurrency limit, idle release and resume.
+
+**Home compaction.**
+
+- The compaction rule is tested on seeded homes with the file set the App Server leaves after a turn: the listing that remains, the rollouts' bytes, the guard and a failed removal.
+- In fixture mode the fixture App Server writes a rollout named after each thread it starts into an Executor runtime's Codex home, so real-main cases compact as production does. It does not model resuming from the rollout.
+- The fixture-only `WORKFLOW_FIXTURE_COMPACTION_HOLD=1` seam stops compaction after its first removal, so a case can kill the service mid-compaction. Outside fixture mode, startup refuses it.
+- Resume after compaction is tested on the installed App Server with the loopback fake model, opt-in like the other isolated runtime checks and rerun after every Codex upgrade. A failed Assignment with a host-tool call is compacted and retried; the retry resumes the same thread, with the first attempt's user text, tool output and answer in its model input.
 
 **Live acceptance.** A real local HTTP receiver test keeps covering authentication, URL verification and fast durable admission. Real model behavior, application permissions, ingress and group receipt still require live acceptance separately from fixtures. The approved prototypes define interaction decisions, not production durability or platform delivery evidence.
 
