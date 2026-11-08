@@ -1,0 +1,86 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { expect } from "vitest";
+import type { PublicCodexServiceState } from "../../src/conversation-service.js";
+
+// Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
+export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
+  fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
+  penny?: { configured: boolean; ready: boolean; error?: string };
+  pennyFixtureTextOutbox?: { chatId: string; message: string }[];
+  workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
+  workflowModulePermissions?: { modules: { moduleId: string; revision: number; scopes: { scopeId: string }[] }[] };
+  fixtureTextOutbox?: { message: string }[] };
+export const config = (channel: "weixin" | "feishu") => ({ channel,
+  owner: { memoryAccountId: "fixture-bot", bindings: [
+    { channel: "weixin", accountId: "fixture-bot", target: "fixture-user@im.wechat", senderId: "fixture-user@im.wechat" },
+    { channel: "feishu", accountId: "cli_0123456789abcdef", target: "oc_private", senderId: "ou_owner" },
+  ] }, taskScope: { accountId: "fixture-bot", target: "fixture-user@im.wechat" },
+  feishu: { appId: "cli_0123456789abcdef", appSecret: "fixture-secret" },
+});
+export async function freePort() {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("no_port");
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
+export async function stop(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  const until = Date.now() + 5000;
+  while (child.exitCode === null && child.signalCode === null && Date.now() < until) await delay(25);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  }
+}
+export async function start(directory: string, extraEnv: Record<string, string> = {}) {
+  const port = await freePort(), url = `http://127.0.0.1:${port}`;
+  let output = "";
+  const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
+    cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port), CHANNEL_CONFIG_PATH: join(directory, "channel.json"),
+      WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_SIMULATOR_MODEL: "fixture", WORKFLOW_SIMULATOR_PENDING_ROUTER: "fixture", WEIXIN_OTEL_ENABLED: "0", ...extraEnv },
+  });
+  child.stdout?.on("data", (chunk) => { output += String(chunk); });
+  child.stderr?.on("data", (chunk) => { output += String(chunk); });
+  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(1000) })).json() as State; }
+  async function until(predicate: (value: State) => boolean, timeout = 15000): Promise<State> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`fixture exited: ${output}`);
+      try { const value = await state(); if (predicate(value)) return value; } catch { /* bounded startup/readiness */ }
+      await delay(30);
+    }
+    throw new Error(`fixture condition timed out: ${JSON.stringify(await state())}\n${output}`);
+  }
+  try { await until((value) => value.channel === "feishu" ? value.ready === true : value.codex?.enabledTargets.length > 0); }
+  catch (error) { await stop(child); throw error; }
+  return { state, until, close: async () => { await stop(child); expect(child.exitCode, output).toBe(0); },
+    crash: async () => {
+      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      child.kill("SIGKILL"); await exited;
+      expect(child.signalCode).toBe("SIGKILL");
+    },
+    async post(route: string, body: unknown) {
+      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json" }, body: JSON.stringify(body) });
+      expect(response.status, await response.clone().text()).toBe(200);
+    } };
+}
+
+export function dispatchConfig(directory: string, dual = false) {
+    const configuration = config("feishu");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration, ...(dual ? { channel: undefined, enabledChannels: ["weixin", "feishu"] } : {}), feishu: { ...configuration.feishu,
+      groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }],
+      dispatch: { groupChatIds: ["oc_alpha"], agents: [{ id: "sam" },
+        { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" },
+        { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] },
+    } }));
+}
