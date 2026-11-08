@@ -253,8 +253,12 @@ it.each([
 });
 
 // agent-dispatch::REQ-010/AC-01: a cross-team Assignment runs under its own team, so what its Executor produces goes out under
-// that team's Team Leader. The runtime's turn prepares itself as the App Server does, which binds the workflow tools to the turn's event.
-it("runs a cross-team Assignment as its own team, whose Team Leader's application sends what it produces", async () => {
+// that team's Team Leader, with the application frozen when the team took its part (agent-dispatch::REQ-008/AC-04). The runtime's
+// turn prepares itself as the App Server does, which binds the workflow tools to the turn's event.
+it.each([
+  ["runs a cross-team Assignment as its own team, whose Team Leader's application sends what it produces", "cli_bill"],
+  ["refuses a cross-team Assignment whose team's application was replaced since it took its part", "cli_bill_before"],
+])("%s", async (_case, frozen) => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-cross-team-")); directories.push(directory);
   const agent = conversation("thread-1");
   const prompts: string[] = [], bound: InboundContent[] = [], created: string[] = [];
@@ -274,8 +278,14 @@ it("runs a cross-team Assignment as its own team, whose Team Leader's applicatio
     memory: () => "", capture: async () => {}, existingResult: () => undefined,
   });
   try {
-    await expect(executor.run(job("request-one"), { ...assignment("request-one:assignment:0:3"), teamId: "bill", executor: "执行者 3", title: "编写脚本" },
-      new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    const run = executor.run({ ...job("request-one"), senders: { bill: frozen } }, { ...assignment("request-one:assignment:0:3"), teamId: "bill", executor: "执行者 3",
+      title: "编写脚本" }, new AbortController().signal);
+    if (frozen !== "cli_bill") {
+      await expect(run).rejects.toThrow("dispatch_role_invalid");
+      expect(created).toEqual([]);
+      return;
+    }
+    await expect(run).resolves.toMatchObject({ status: "completed" });
     expect(created).toEqual(["bill"]);
     expect(bound.map(({ agentId, senderAccountId }) => ({ agentId, senderAccountId }))).toEqual([{ agentId: "bill", senderAccountId: "cli_bill" }]);
     expect(prompts[0]).toContain("你是 Bill 团队的执行者 3");

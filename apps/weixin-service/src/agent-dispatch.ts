@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { CrossTeamDecision, DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
   DispatchPart, DispatchPendingResult } from "./agent-dispatch-types.js";
-import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
+import { parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
@@ -174,12 +174,12 @@ export class AgentDispatch {
   }
 
   getState() {
-    return { jobs: this.jobs().map(({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, event, definitionsVersion }) =>
+    return { jobs: this.jobs().map(({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, event, definitionsVersion, parts }) =>
       ({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, accountId: event.accountId, target: event.target, requester: event.senderId,
         definitionsVersion: definitionsVersion ?? null,
         assignments: this.assignments(id).map(({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run }) =>
           ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run })),
-        parts: (this.job(id)?.parts ?? []).map(({ title, teamId, attempt: asked }) => ({ title, teamId, attempt: asked })) })),
+        parts: (parts ?? []).map((part) => ({ title: part.title, teamId: part.teamId, attempt: part.attempt })) })),
     notices: this.database.prepare("SELECT id, state FROM dispatch_notice ORDER BY sequence").all() };
   }
 
@@ -514,11 +514,13 @@ export class AgentDispatch {
     const offered = this.offeredTeams(job);
     let decisions: CrossTeamDecision[] = help.map((_part, index) => ({ part: index + 1, agentId: null, summary: "" }));
     if (offered.length) {
-      const lead = this.options.agents.find(({ id }) => id === job.agentId)!;
+      const lead = this.options.agents.find(({ id }) => id === job.agentId)!, brief = this.brief(job);
+      const input = { requestId: job.id, coordinator: this.coordinator().name, message: brief.latest ? `${brief.message}\n最新要求：${brief.latest}` : brief.message,
+        summary: job.summary, lead: { id: lead.id, name: lead.name, responsibility: lead.responsibility }, parts: help.map((part, index) => ({ part: index + 1, ...part })),
+        teams: offered.map(({ id, name, responsibility }) => ({ id, name, responsibility })), fixtureMessageId: this.fixtureMessageId(job) };
       try {
-        decisions = await this.options.classifier.assign({ requestId: job.id, coordinator: this.coordinator().name, message: (job.executionEvent ?? job.event).text,
-          summary: job.summary, lead: { id: lead.id, name: lead.name, responsibility: lead.responsibility }, parts: help.map((part, index) => ({ part: index + 1, ...part })),
-          teams: offered.map(({ id, name, responsibility }) => ({ id, name, responsibility })), fixtureMessageId: this.fixtureMessageId(job) });
+        // The host checks the decision itself, whatever produced it (agent-dispatch::REQ-008/AC-05).
+        decisions = parseCrossTeamDecision({ assignments: await this.options.classifier.assign(input) }, input);
       } catch (error) {
         if (this.closing) throw error;
         this.failure("dispatch_cross_team_decision_failed");
@@ -586,6 +588,12 @@ export class AgentDispatch {
       else delete current.decisions;
       if (division.parts.length) current.parts = division.parts;
       if (division.needs.length) current.needs = division.needs;
+      // A cross-team Team Leader's application is frozen when its team first takes a part.
+      for (const { teamId } of division.added) {
+        if (teamId === job.agentId || current.senders?.[teamId]) continue;
+        const sender = this.options.agents.find(({ id }) => id === teamId)?.senderAccountId;
+        if (sender) (current.senders ??= {})[teamId] = sender;
+      }
       current.dividedAttempt = job.attempt;
       this.save(current);
     });
@@ -712,8 +720,8 @@ export class AgentDispatch {
       return await this.options.leader.close(this.leaderInput(job, team, relay),
         assignments.map(({ title, executor, status, result }) => ({ title, executor, status, result: result ?? "" })));
     } catch {
-      return [...resultLines(assignments), ...(relay?.parts ?? []).flatMap(({ title, team: name, report }) =>
-        name ? [`${title}（${name}，经 ${this.coordinator().name} 转交）：${report ?? "暂无汇报"}`] : [])].join("\n");
+      return [...resultLines(assignments), ...(job.parts ?? []).flatMap(({ title, teamId }) => teamId === null ? []
+        : [`${title}（${this.agentName(teamId)} 队，经 ${this.coordinator().name} 转交）：${job.reports?.[teamId]?.text ?? "暂无汇报"}`])].join("\n");
     }
   }
 
@@ -825,7 +833,7 @@ export class AgentDispatch {
   /** A post under the Team Leader of `teamId`: the lead's own identity, or a cross-team Team Leader's (agent-dispatch::REQ-013/AC-04). */
   private teamNotice(job: DispatchJob, teamId: string, text: string): Notice {
     if (teamId === job.agentId) return this.notice(job, text);
-    return { event: job.event, bindingHash: job.bindingHash, agentId: teamId, senderAccountId: this.options.agents.find(({ id }) => id === teamId)?.senderAccountId ?? "", text };
+    return { event: job.event, bindingHash: job.bindingHash, agentId: teamId, senderAccountId: job.senders?.[teamId] ?? "", text };
   }
   private coordinatorNotice(job: DispatchJob, text: string): Notice {
     const coordinator = this.coordinator();

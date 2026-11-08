@@ -36,6 +36,9 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 //   curators with recorders, so only code review and a live run cover that tool host.
 // - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
 //   the fixture injects both.
+// - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
+//   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
+//   that seam's answer, which is fixture-only code.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -837,4 +840,41 @@ it("reports interrupted Assignments after a crash and closes the request", async
     expect(recovered.fixtureModelRequests).toEqual([]);
     expect(recovered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["close"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-04, REQ-010/AC-01). The engine's rules are covered at
+// the AgentDispatch boundary; this case shows main's wiring: the injected cross-team decision and per-team plans reach the production
+// turns, and the other team's Executor runs, sends and remembers under its own team.
+it("places a part with another team through main, whose Executor sends its file under its own Team Leader", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-cross-team-")), business = mkdtempSync(join(tmpdir(), "dispatch-cross-team-files-"));
+  let running: Running | undefined;
+  const texts = (state: Awaited<ReturnType<Running["state"]>>, team: string) => state.agentFixtureOutboxes?.[team]?.text.map(({ message }) => message) ?? [];
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_cross_team", "商品 D 要上架：写详情，再弄个脚本以后自动上架", decision("alice", "商品 D 上架"), {
+      leaderPlan: { assignments: [{ profileId: "executor-1", title: "撰写商品详情", brief: "九成新，128G" }], decisions: [], help: [{ title: "自动上架脚本", brief: "只交付代码，不运行" }] },
+      leaderClosing: { message: "ALICE_CLOSING" },
+      crossTeamDecision: { assignments: [{ part: 1, agentId: "jack", summary: "编写自动上架脚本" }] },
+      teamTurns: { jack: { leaderPlan: { assignments: [{ profileId: "executor-1", title: "编写上架脚本", brief: "保存为 listing.txt 并发到本群" }], decisions: [], help: [] },
+        leaderClosing: { message: "JACK_CLOSING" } } },
+      executorTurns: { 撰写商品详情: { modelReply: executorReply("详情已写好。", "详情") }, 编写上架脚本: { modelToolCalls: writeAndSend("listing.txt") } } }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && texts(state, "alice").length === 2 && texts(state, "jack").length === 2);
+    console.log(JSON.stringify({ kind: "dispatch_cross_team", command: "商品 D 要上架：写详情，再弄个脚本以后自动上架", jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes,
+      coordinator: result.feishuFixtureTextOutbox, leader: result.fixtureLeaderRequests }));
+    expect(texts(result, "alice")).toEqual(["我安排：\n执行者 1（能力档 1）处理：撰写商品详情\n自动上架脚本需要其他团队支持，已请 Sam 协调。\n完成后会在本群汇报。", "ALICE_CLOSING"]);
+    expect(result.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual(["应 Alice 请求，自动上架脚本交给 Jack 队；完成后经 Sam 交回 Alice 汇总。"]);
+    expect(texts(result, "jack")).toEqual(["我安排执行者 2（能力档 1）处理：编写上架脚本。完成后经 Sam 交回 Alice 汇总。", "JACK_CLOSING\n结果经 Sam 交回 Alice 汇总。"]);
+    // The file of Jack's Executor goes out under Jack's application, in the original group (agent-dispatch::REQ-010/AC-01).
+    expect(result.agentFixtureOutboxes?.jack?.media.map((item) => item as { chatId: string; fileName: string }).map(({ chatId, fileName }) => ({ chatId, fileName })))
+      .toEqual([{ chatId: "oc_alpha", fileName: "listing.txt" }]);
+    expect(result.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    expect(result.agentDispatch?.jobs[0]?.assignments.map(({ teamId, executor }) => `${teamId}:${executor}`)).toEqual(["alice:执行者 1", "jack:执行者 2"]);
+    expect(result.fixtureModelRequests!.filter(({ input }) => JSON.stringify(input).includes("你是 Jack 团队的执行者 2"))).toHaveLength(1);
+    // Jack's Executor remembers into Jack's profile scope in this conversation (agent-dispatch::REQ-012/AC-03).
+    const owner = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")!.owner;
+    const alpha = owner.groupAddress("oc_alpha")!, jackProfile = memoryAccountId(owner.memoryScope(alpha.accountId, alpha.target), { kind: "profile", teamId: "jack", profileId: "executor-1" });
+    const curated = await running.until((state) => state.fixtureMemoryCurations?.some(({ accountId }) => accountId === jackProfile) === true);
+    expect(curated.fixtureMemoryCurations!.find(({ accountId }) => accountId === jackProfile)!.turns).toEqual([expect.objectContaining({ user: "编写上架脚本\n保存为 listing.txt 并发到本群" })]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);

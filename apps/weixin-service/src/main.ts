@@ -75,7 +75,7 @@ import { FixturePort } from "./fixture-port.js";
 import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
 import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
+import { assignmentSender, closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
 import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
@@ -966,7 +966,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
       if (!run) return undefined;
       const destination = workflowRunTargets.resolveRunTarget(run.runId);
-      if (destination?.senderAccountId !== agents.find(({ id }) => id === assignment.teamId)?.senderAccountId) throw new Error("dispatch_authorization_changed");
+      if (destination?.senderAccountId !== assignmentSender(job, assignment)) throw new Error("dispatch_authorization_changed");
       const rendered = renderWorkflowRun(run, workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId));
       if (!rendered.handled) throw new Error("dispatch_workflow_result_unavailable");
       return { status: rendered.outcome === "succeeded" ? "completed" : rendered.outcome === "needs_input" ? "waiting" : "failed",
@@ -981,7 +981,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     },
     prepareThread: (job, assignment, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? executorEvent(job, assignment).messageId, assignment.title)); },
     capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event,
-      senderAccountId: agents.find(({ id }) => id === assignment.teamId)?.senderAccountId ?? job.senderAccountId,
+      senderAccountId: assignmentSender(job, assignment) ?? job.senderAccountId,
       userId: `${assignment.id}:user:${assignment.attempt}`, userText: brief, assistantId: `${assignment.id}:assistant:${assignment.attempt}`, assistantText: reply }),
     homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory),
       compact: (home, recordedThread) => compactRuntimeHome(home, recordedThread, fixtureCompactionHold ? { afterRemoval: () => {

@@ -741,6 +741,7 @@ it("places a part with another team, whose Team Leader starts and closes it, and
 it.each([
   ["no team for the part", 1, async () => [{ part: 1, agentId: null, summary: "" }], accepting],
   ["an invalid cross-team decision", 1, async () => { throw new Error("dispatch_cross_team_invalid"); }, accepting],
+  ["a decision naming the lead team, which the host refuses", 1, async () => [{ part: 1, agentId: "alice", summary: "自己做" }], accepting],
   ["no other team accepting work in the group", 0, toBill, ["alice"]],
 ] as const)("leaves a part untaken with %s: no other team posts, and the request is partially unassigned", async (_case, asked, assign, roster) => {
   const leader = teamLeaders(crossTurns());

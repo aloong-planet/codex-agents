@@ -44,6 +44,11 @@ export type DispatchJob = {
   reaskAttempt?: number;
   /** The last attempt whose division was stored: a retry of a later attempt that failed before its division divides again. */
   dividedAttempt?: number;
+  /**
+   * The application of each cross-team Team Leader, frozen when its team first took a part, as `senderAccountId` freezes the lead's:
+   * a changed application fails its work instead of sending under another identity (agent-dispatch::REQ-008/AC-04, REQ-010/AC-01).
+   */
+  senders?: Record<string, string>;
 };
 /** A part of a request the lead asked another team to take; `teamId` is the team the Coordinator placed it with, or null. */
 /**
