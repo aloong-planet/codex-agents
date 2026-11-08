@@ -53,7 +53,7 @@ History keeps the team's identity and records.
 ### MCP Catalog
 
 - MCP servers are registered and maintained on an MCP management page that follows the owner's agent-link MCP settings:
-  - local programs (stdio: command, arguments, working directory, environment variables) or Streamable HTTP addresses (URL and headers, or OAuth client_credentials, optionally presenting the token with DPoP);
+  - local programs (stdio: command, arguments, working directory, environment variables) or Streamable HTTP addresses (URL, headers and optionally OAuth client_credentials, presenting the token with DPoP when chosen; the rules for headers beside OAuth are in the [MCP catalog spec](../specs/mcp-catalog.md));
   - secret values that can only be written, never read back;
   - an optional macOS sandbox per local program;
   - a per-call timeout, a trusted switch for tool annotations, and an enable switch;

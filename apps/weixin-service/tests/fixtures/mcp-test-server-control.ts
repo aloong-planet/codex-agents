@@ -1,5 +1,5 @@
-// Controls for the real stdio MCP test server (mcp-test-server.mjs), shared by the catalog's unit, HTTP and browser
-// tests. Each case gets its own tools file, start marker and fail flag in a temporary directory.
+// Controls for the real stdio MCP test server (mcp-test-server.mjs), and the secret sentinels, shared by the catalog's
+// unit, HTTP and browser tests. Each case gets its own tools file, start marker and fail flag in a temporary directory.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 export const TEST_SERVER = fileURLToPath(new URL("./mcp-test-server.mjs", import.meta.url));
 /** Printed by the test server when it fails, so that masking can be checked; 22 characters. */
 export const SECRET_SENTINEL = "tok-5e1f-SENTINEL-9a7c";
+/** A URL server's header value, for the masking and no-secret-in-responses checks. */
+export const HEADER_SENTINEL = "hdr-7d21-SENTINEL-c0de";
+/** A URL server's OAuth client secret. */
+export const CLIENT_SECRET_SENTINEL = "cs-41aa-SENTINEL-77f2";
 
 export type TestServerFiles = { tools: string; marker: string; failFlag: string };
 

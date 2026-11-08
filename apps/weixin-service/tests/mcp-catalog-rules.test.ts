@@ -3,11 +3,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  checkImport,
   childEnvironment,
   launchLine,
   launchPlan,
   mergeSecrets,
   needsConfirmation,
+  normalizeHttp,
   normalizeStdio,
   normalizeTimeout,
   pinDiff,
@@ -83,6 +85,41 @@ describe("local program fields (mcp-catalog::US-001/AC-03)", () => {
   });
 });
 
+describe("URL server fields (mcp-catalog::US-001/AC-04)", () => {
+  it.each([
+    ["https", { url: "https://h.example/mcp" }, { url: "https://h.example/mcp", headerNames: [], dpop: false }],
+    ["a bare origin gets its path", { url: " https://h.example " }, { url: "https://h.example/", headerNames: [], dpop: false }],
+    ["http on localhost", { url: "http://localhost:9/mcp" }, { url: "http://localhost:9/mcp", headerNames: [], dpop: false }],
+    ["http on 127.0.0.2", { url: "http://127.0.0.2/x" }, { url: "http://127.0.0.2/x", headerNames: [], dpop: false }],
+    ["http on ::1", { url: "http://[::1]/x" }, { url: "http://[::1]/x", headerNames: [], dpop: false }],
+    ["headers beside OAuth with DPoP", { url: "https://h.example/mcp", headerNames: ["X-Api-Key"], oauth: { issuer: " https://auth.example ", clientId: "agent", scope: "docs:read" }, dpop: true },
+      { url: "https://h.example/mcp", headerNames: ["X-Api-Key"], oauth: { issuer: "https://auth.example", clientId: "agent", scope: "docs:read" }, dpop: true }],
+    ["OAuth without a scope", { url: "https://h.example/mcp", oauth: { issuer: "https://auth.example", clientId: "agent", scope: "" } },
+      { url: "https://h.example/mcp", headerNames: [], oauth: { issuer: "https://auth.example", clientId: "agent" }, dpop: false }],
+    ["empty OAuth fields are no OAuth", { url: "https://h.example/mcp", headerNames: ["Authorization"], oauth: { issuer: "", clientId: "", scope: "" } },
+      { url: "https://h.example/mcp", headerNames: ["Authorization"], dpop: false }],
+  ])("accepts %s", (_case, input, expected) => {
+    expect(normalizeHttp(input)).toEqual(expected);
+  });
+  it.each([
+    [{ url: "" }, "请填写网址"],
+    [{ url: "not a url" }, "网址无效：not a url"],
+    [{ url: "http://h.example/mcp" }, "网址应以 https:// 开头，本机地址可用 http://：http://h.example/mcp"],
+    [{ url: "ftp://h.example/x" }, "网址应以 https:// 开头，本机地址可用 http://：ftp://h.example/x"],
+    [{ url: "https://user:pass@h.example/x" }, "网址不能包含用户名或密码，请改用请求头"],
+    [{ url: "https://h.example/x", headerNames: ["bad name"] }, "请求头名称不合法：bad name"],
+    [{ url: "https://h.example/x", headerNames: ["X-Key", "x-key"] }, "请求头重复：x-key"],
+    [{ url: "https://h.example/x", headerNames: ["Authorization"], oauth: { issuer: "https://auth.example", clientId: "a" } }, "已填写 OAuth 时，请求头不能包含 Authorization：令牌由 OAuth 取得"],
+    [{ url: "https://h.example/x", headerNames: ["dpop"], oauth: { issuer: "https://auth.example", clientId: "a" } }, "已填写 OAuth 时，请求头不能包含 dpop：令牌由 OAuth 取得"],
+    [{ url: "https://h.example/x", dpop: true }, "DPoP 需要配合 OAuth 使用"],
+    [{ url: "https://h.example/x", oauth: { issuer: "https://auth.example" } }, "请填写客户端 ID"],
+    [{ url: "https://h.example/x", oauth: { clientId: "a" } }, "请填写 OAuth 授权服务器"],
+    [{ url: "https://h.example/x", oauth: { issuer: "http://auth.example", clientId: "a" } }, "OAuth 授权服务器应以 https:// 开头，本机地址可用 http://：http://auth.example"],
+  ])("refuses %j", (input, message) => {
+    expect(() => normalizeHttp(input)).toThrow(message);
+  });
+});
+
 describe("write-only environment values (mcp-catalog::REQ-001)", () => {
   const saved = { TOKEN: "saved-token-value" };
   it.each([
@@ -92,8 +129,11 @@ describe("write-only environment values (mcp-catalog::REQ-001)", () => {
   ])("%s", (_case, input, expected) => {
     expect(mergeSecrets(input, saved)).toEqual(expected);
   });
-  it("refuses the placeholder for a value that was never saved", () => {
-    expect(() => mergeSecrets({ OTHER: "••••••" }, saved)).toThrow("环境变量 OTHER 没有已保存的值，请填写");
+  it.each([
+    [undefined, "环境变量 OTHER 没有已保存的值，请填写"],
+    ["请求头", "请求头 OTHER 没有已保存的值，请填写"],
+  ])("refuses the placeholder for a value that was never saved (%s)", (what, message) => {
+    expect(() => mergeSecrets({ OTHER: "••••••" }, saved, what)).toThrow(message);
   });
 });
 
@@ -101,11 +141,18 @@ describe("the exact launch line (mcp-catalog::US-001/AC-06, REQ-002)", () => {
   it("quotes arguments the way a POSIX shell reads them", () => {
     expect(launchLine({ command: "node", args: ["/tmp/a b.js", "it's", "", "--port=8080"] })).toBe(`node '/tmp/a b.js' 'it'\\''s' '' --port=8080`);
   });
+  it("shows a URL server's address as it connects to it", () => {
+    expect(launchLine({ transport: "http", url: "https://h.example/a b?x=1" })).toBe("https://h.example/a b?x=1");
+  });
   it.each([
     ["a new server", undefined, { command: "node", args: ["a.js"] }, true],
     ["a changed command", { command: "node", args: ["a.js"] }, { command: "bun", args: ["a.js"] }, true],
     ["changed arguments", { command: "node", args: ["a.js"] }, { command: "node", args: ["b.js"] }, true],
     ["the same program", { command: "node", args: ["a.js"] }, { command: "node", args: ["a.js"] }, false],
+    ["a new URL server", undefined, { transport: "http" as const, url: "https://h.example/mcp" }, true],
+    ["a changed URL", { transport: "http" as const, url: "https://h.example/mcp" }, { transport: "http" as const, url: "https://h.example/v2" }, true],
+    ["the same URL", { transport: "http" as const, url: "https://h.example/mcp" }, { transport: "http" as const, url: "https://h.example/mcp" }, false],
+    ["a program becoming a URL with the same text", { command: "https://h.example/mcp", args: [] }, { transport: "http" as const, url: "https://h.example/mcp" }, true],
   ])("%s needs confirmation: %s", (_case, previous, next, expected) => {
     expect(needsConfirmation(previous, next)).toBe(expected);
   });
@@ -240,5 +287,66 @@ describe("which tools are provided (mcp-catalog::US-004)", () => {
     ["on a trusted server", tool, { trusted: true, disabled: false, pin: pinned }, { usable: true, needsUser: false, readOnly: true, mayModify: true }],
   ])("%s", (_case, definition, server, expected) => {
     expect(toolStatus(definition, server)).toEqual(expected);
+  });
+});
+
+describe("import check (mcp-catalog::US-002/AC-01)", () => {
+  // The shapes follow real configurations: Claude Desktop keeps settings beside mcpServers; Claude Code writes
+  // `type: "stdio"` with an empty env object and `type: "http"`; Cursor writes `type: "sse"` with a loopback URL.
+  const document = JSON.stringify({
+    globalShortcut: "",
+    preferences: { quickEntry: true },
+    mcpServers: {
+      taken: { command: "npx", args: ["-y", "taken"] },
+      notes: { type: "sse", url: "http://127.0.0.1:3845/sse" },
+      socket: { type: "websocket", url: "wss://h.example/ws" },
+      "my notes": { command: "npx" },
+      empty: {},
+      both: { command: "npx", url: "https://h.example/mcp" },
+      typed: { type: "stdio", command: "npx", args: ["-y", "@scope/server", "/tmp/a b"], env: {} },
+      plain: { command: "/usr/local/bin/tool", args: ["--flag"], cwd: "/srv/tool", env: { TOKEN: "${GITHUB_TOKEN}", MODE: "fast" } },
+      remote: { type: "http", url: "https://h.example/mcp", headers: { "X-Api-Key": "${input:key}", Authorization: "Bearer ${X}" } },
+      streamable: { type: "streamable-http", url: "https://h.example/s" },
+      untyped: { url: "http://localhost:7/mcp" },
+      off: { command: "npx", args: ["off"], disabled: true },
+      insecure: { url: "http://h.example/mcp" },
+      badcwd: { command: "npx", cwd: "relative" },
+    },
+  });
+
+  it("lists each server as to be imported or skipped with the reason", () => {
+    const entries = checkImport(document, (name) => name === "taken", context);
+    expect(entries.map((entry) => (entry.ok ? { name: entry.name, transport: entry.transport, line: entry.line, fill: entry.fill, enabled: entry.enabled } : entry))).toEqual([
+      { name: "taken", ok: false, reason: "已有同名服务器" },
+      { name: "notes", ok: false, reason: "SSE 传输，不支持" },
+      { name: "socket", ok: false, reason: "不支持的连接方式：websocket" },
+      { name: "my notes", ok: false, reason: "名称不合法：只能包含英文字母、数字、_ 和 -，1–32 个字符" },
+      { name: "empty", ok: false, reason: "缺少命令或网址" },
+      { name: "both", ok: false, reason: "同时填写了命令和网址" },
+      { name: "typed", transport: "stdio", line: "npx -y @scope/server '/tmp/a b'", fill: [], enabled: true },
+      { name: "plain", transport: "stdio", line: "/usr/local/bin/tool --flag", fill: ["TOKEN"], enabled: true },
+      { name: "remote", transport: "http", line: "https://h.example/mcp", fill: ["X-Api-Key"], enabled: true },
+      { name: "streamable", transport: "http", line: "https://h.example/s", fill: [], enabled: true },
+      { name: "untyped", transport: "http", line: "http://localhost:7/mcp", fill: [], enabled: true },
+      { name: "off", transport: "stdio", line: "npx off", fill: [], enabled: false },
+      { name: "insecure", ok: false, reason: "网址应以 https:// 开头，本机地址可用 http://：http://h.example/mcp" },
+      { name: "badcwd", ok: false, reason: "工作目录应为绝对路径" },
+    ]);
+  });
+
+  it("imports a placeholder value as empty and keeps other values literally", () => {
+    const entries = Object.fromEntries(checkImport(document, () => false, context).filter((entry) => entry.ok).map((entry) => [entry.name, entry.ok ? entry.server : undefined]));
+    expect(entries.plain).toEqual({ transport: "stdio", name: "plain", enabled: true, command: "/usr/local/bin/tool", args: ["--flag"], cwd: "/srv/tool", env: { TOKEN: "", MODE: "fast" } });
+    expect(entries.remote).toEqual({ transport: "http", name: "remote", enabled: true, url: "https://h.example/mcp", headers: { "X-Api-Key": "", Authorization: "Bearer ${X}" } });
+  });
+
+  it.each([
+    ['{"mcpServers": ', "不是有效的 JSON"],
+    ["[]", "没有找到 mcpServers 对象"],
+    ['{"servers": {}}', "没有找到 mcpServers 对象"],
+    ['{"mcpServers": []}', "没有找到 mcpServers 对象"],
+    ['{"mcpServers": {}}', "mcpServers 里没有服务器"],
+  ])("refuses %s", (text, message) => {
+    expect(() => checkImport(text, () => false, context)).toThrow(message);
   });
 });

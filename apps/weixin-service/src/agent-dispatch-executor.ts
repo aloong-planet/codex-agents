@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import path, { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { CodexConversation, CodexTurnModel } from "./codex-conversation.js";
 import { ChannelTurnAdapter, type ConversationTurnToolControl } from "./channel-turn-adapter.js";
@@ -12,13 +12,36 @@ import type { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
+import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
 
-export type DispatchRuntime = { agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">; cwd: string };
+export type DispatchRuntime = {
+  agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">;
+  cwd: string;
+  /** Settles once every App Server process the runtime started has exited. */
+  exited?(): Promise<void>;
+  /** Runs after the runtime closed, once its processes exited (`exited` true) or the wait for them ran out (false). */
+  afterClose?(exited: boolean): void;
+};
+/** How long a closed runtime's App Server processes may take to exit before its home is left to the next start (agent-dispatch::QR-002). */
+export const DISPATCH_RUNTIME_EXIT_WAIT_MS = 10_000;
+/** The pool close of every dispatch runtime: close it, wait a bounded time for its processes to exit, then run its afterClose. */
+export async function closeDispatchRuntime(runtime: DispatchRuntime): Promise<void> {
+  await runtime.agent.close();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const exited = !runtime.exited || await Promise.race([
+    runtime.exited().then(() => true, () => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), DISPATCH_RUNTIME_EXIT_WAIT_MS); timer.unref?.(); }),
+  ]);
+  clearTimeout(timer);
+  runtime.afterClose?.(exited);
+}
 /** The shared tool host as one Executor profile sees it, with the contract hash of what it offers. */
 export type ExecutorToolHost = DynamicToolHost & { contractHash(): string };
 /** An Assignment's Executor profile as resolved for its request's definitions version. */
 export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost }>;
 
+/** An Executor's runtime home: `dispatch-` and its session scope's 64-hex hash. The one-specialist dispatch named its homes the same way. */
+export const EXECUTOR_RUNTIME_HOME = /^dispatch-([0-9a-f]{64})$/u;
 /** Default limits of agent-dispatch::QR-001: running runtimes, idle or busy, and the idle time before release. */
 export const DISPATCH_RUNTIME_LIMIT = 16;
 export const DISPATCH_RUNTIME_IDLE_MS = 5 * 60_000;
@@ -48,6 +71,9 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     capture(job: DispatchJob, assignment: DispatchAssignment, scope: ExecutorProfileView["memoryScope"], turn: Readonly<{ brief: string; reply: string }>): Promise<void>;
     existingResult(job: DispatchJob): DispatchExecutionResult | undefined;
     prepareThread?(job: DispatchJob, threadId: string): void;
+    /** Where Executor runtime homes are, and how one is compacted to its records (agent-dispatch::QR-002); without it homes are kept whole. */
+    homes?: { root: string; compact(home: string, recordedThread: string | undefined): CompactionOutcome };
+    report?(code: string): void;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
@@ -64,8 +90,45 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     const profile = this.options.profile(job, assignment);
     const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash(),
       assignment.id])).digest("hex");
-    return this.options.runtimes.use(scope, () => this.options.createRuntime(job, `dispatch-${scope}`, profile.tools),
+    return this.options.runtimes.use(scope, () => this.compacting(this.options.createRuntime(job, `dispatch-${scope}`, profile.tools), scope),
       (runtime) => this.runOn(runtime, job, assignment, role, profile, scope, eligible, signal), { signal, releaseWhenDone: true });
+  }
+
+  /**
+   * Compacts every Executor home on disk (agent-dispatch::QR-002/AC-02). Main runs it at start, before any Executor
+   * runtime exists: compaction must never run on a home whose App Server is running.
+   */
+  compactHomes(): void {
+    if (!this.options.homes) return;
+    let homes: RuntimeHome[];
+    try { homes = runtimeHomes(this.options.homes.root, EXECUTOR_RUNTIME_HOME); }
+    catch { this.report("dispatch_executor_homes_unreadable"); return; }
+    for (const home of homes) this.compactHome(home.key, home.path);
+  }
+
+  /** The runtime, compacting its home after the pool closed it and its processes exited. The pool starts no other runtime
+   * for the same scope until that close settles, so a retry never starts on a home being compacted. */
+  private compacting(runtime: DispatchRuntime, scope: string): DispatchRuntime {
+    const homes = this.options.homes;
+    if (!homes) return runtime;
+    return { ...runtime, afterClose: (exited) => {
+      runtime.afterClose?.(exited);
+      const home = path.join(homes.root, `dispatch-${scope}`);
+      if (exited) this.compactHome(scope, home);
+      else this.report(`dispatch_executor_home_deferred:process_running:${path.basename(home)}`);
+    } };
+  }
+
+  private compactHome(scope: string, home: string): void {
+    try {
+      const recorded = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
+      const outcome = this.options.homes!.compact(home, recorded ? String(recorded.thread_id) : undefined);
+      if (outcome.status === "kept") this.report(`dispatch_executor_home_kept:${outcome.reason}:${path.basename(home)}`);
+    } catch { this.report(`dispatch_executor_home_kept:compaction_failed:${path.basename(home)}`); }
+  }
+
+  private report(code: string): void {
+    try { this.options.report?.(code); } catch { /* Diagnostics cannot change task outcomes. */ }
   }
 
   private async runOn(runtime: DispatchRuntime, job: DispatchJob, assignment: DispatchAssignment, role: DispatchAgent, profile: ExecutorProfileView, scope: string, eligible: () => boolean,

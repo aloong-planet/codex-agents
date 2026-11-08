@@ -75,7 +75,7 @@ export async function start(directory: string, extraEnv: Record<string, string> 
   }
   try { await until((value) => value.channel === "feishu" ? value.ready === true : value.codex?.enabledTargets.length > 0); }
   catch (error) { await stop(child); throw error; }
-  return { state, until, close: async () => { await stop(child); expect(child.exitCode, output).toBe(0); },
+  return { state, until, output: () => output, close: async () => { await stop(child); expect(child.exitCode, output).toBe(0); },
     crash: async () => {
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
       child.kill("SIGKILL"); await exited;
