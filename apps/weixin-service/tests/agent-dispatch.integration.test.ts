@@ -12,6 +12,7 @@ import { RuntimePool } from "../src/runtime-pool.js";
 import { TeamRegistry } from "../src/team-registry.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
 
@@ -405,7 +406,7 @@ const sha256 = (file: string) => createHash("sha256").update(readFileSync(file))
 /** Waits until home holds only one rollout (of `threadId` when given) and the directories leading to it; returns that rollout. */
 async function onlyRolloutRemains(home: string, threadId?: string): Promise<string> {
   const rollout = new RegExp(`^codex-home/sessions/\\d{4}/\\d{2}/\\d{2}/rollout-.+-${threadId ?? "[0-9a-f-]{36}"}\\.jsonl$`, "u");
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + processWaitLimitMs;
   for (;;) {
     const listing = homeListing(home), files = listing.filter((entry) => !entry.endsWith("/"));
     const ancestors = files.length === 1 ? files[0]!.split("/").slice(0, -1).map((_part, index, parts) => `${parts.slice(0, index + 1).join("/")}/`) : [];
@@ -448,7 +449,7 @@ it("finishes on the next start a compaction that a crash cut off, with the rollo
     running = await start(directory, { WORKFLOW_FIXTURE_COMPACTION_HOLD: "1" });
     await running.post("/api/fixture/inbound", groupMessage("om_compaction_held", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述"),
       { modelReply: executorReply("商品文案已整理好。", "整理闲鱼商品描述") }));
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + processWaitLimitMs;
     while (!existsSync(join(directory, "fixture-compaction-held"))) {
       if (Date.now() > deadline) throw new Error("compaction hold not reached");
       await delay(25);
