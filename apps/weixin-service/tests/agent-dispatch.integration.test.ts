@@ -14,7 +14,11 @@ import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
 // decisions and Team Leader plans (agent-dispatch Testing Decisions); main still passes them through the production correction loop,
 // validation and effects. The Coordinator's and Team Leaders' real runtime construction is driven by the case that sets
 // WORKFLOW_FIXTURE_COORDINATION_RUNTIME, where the fixture App Server answers their turns with the same injected outputs.
-// Gap: a live run is still needed for real model semantics and for the default Team Leader runtimes outside that seam.
+// Gaps:
+// - A live run is still needed for real model semantics and for the default Team Leader runtimes outside that seam.
+// - The upgrade case covers the stored states the pre-05 fixture mode can produce. A state reached only in production, such as
+//   an old request whose team was later removed from the local configuration, keeps the existing authorization fencing,
+//   which channel-startup's "fails closed for an unavailable assignee" cases drive; no case here builds it.
 
 it("keeps travel rules in Bill's turn only, with the shared facts-and-sources check in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -108,18 +112,22 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
   let running: Awaited<ReturnType<typeof start>> | undefined;
   const requests = [
     { team: "alice", messageId: "om_team_alice", text: "帮我整理闲鱼商品描述：九成新 iPad，128G，无维修", summary: "整理闲鱼商品描述",
-      reply: "商品文案已整理：标题、描述和买家问答，电池健康度标为待确认。", closing: "闲鱼商品文案已整理好，电池健康度请你补充确认。" },
+      title: "撰写 iPad 闲鱼文案", brief: "成色九成新、128G、无维修；电池健康度未知，标为待补", reply: "商品文案已整理：标题、描述和买家问答，电池健康度标为待确认。",
+      closing: "闲鱼商品文案已整理好，电池健康度请你补充确认。" },
     { team: "bill", messageId: "om_team_bill", text: "帮我规划周六南京一日游，两人，预算 400 元", summary: "规划南京一日游",
-      reply: "南京一日行程已规划：交通、餐饮和预算估算，天气按官方预报核对。", closing: "南京一日行程已规划好，预算估算与已核实信息分开标注。" },
+      title: "排南京周六行程", brief: "两人，预算 400 元；交通与天气注明来源，估算单列", reply: "南京一日行程已规划：交通、餐饮和预算估算，天气按官方预报核对。",
+      closing: "南京一日行程已规划好，预算估算与已核实信息分开标注。" },
     { team: "jack", messageId: "om_team_jack", text: "TypeScript 函数 discount 可能返回负数，请给出补丁和回归测试", summary: "修复 discount 负数问题",
-      reply: "补丁与 3 个回归用例已给出，测试尚未运行。", closing: "discount 补丁和 3 个回归用例已给出，测试尚未运行。" },
+      title: "给 discount 出补丁", brief: "结果不得为负；附 3 个回归用例，不声称测试已运行", reply: "补丁与 3 个回归用例已给出，测试尚未运行。",
+      closing: "discount 补丁和 3 个回归用例已给出，测试尚未运行。" },
   ];
   try {
     dispatchConfig(directory);
     running = await start(directory);
     for (const [index, request] of requests.entries()) {
       const message = groupMessage(request.messageId, request.text, decision(request.team, request.summary),
-        { modelReply: executorReply(request.reply, request.summary), leaderClosing: { message: request.closing } });
+        { modelReply: executorReply(request.reply, request.summary), leaderClosing: { message: request.closing },
+          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }] } });
       await running.post("/api/fixture/inbound", message);
       if (index === 0) await running.post("/api/fixture/inbound", message);
       await running.until((state) => state.agentFixtureOutboxes?.[request.team]?.text.length === 2);
@@ -130,13 +138,14 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
     expect(result.agentDispatch?.jobs).toHaveLength(3);
     for (const [index, request] of requests.entries()) {
       expect(result.agentFixtureOutboxes?.[request.team]?.text.map(({ chatId, message }) => ({ chatId, message }))).toEqual([
-        { chatId: "oc_alpha", message: `我安排执行者 ${index + 1}（能力档 1）处理：${request.summary}。完成后会在本群汇报。` },
+        { chatId: "oc_alpha", message: `我安排执行者 ${index + 1}（能力档 1）处理：${request.title}。完成后会在本群汇报。` },
         { chatId: "oc_alpha", message: request.closing },
       ]);
       expect(result.agentDispatch?.jobs[index]).toMatchObject({ agentId: request.team, status: "completed", requester: "ou_owner", definitionsVersion: 1,
-        assignments: [{ teamId: request.team, profileId: "executor-1", executor: `执行者 ${index + 1}`, title: request.summary, status: "completed", attempt: 0 }] });
+        assignments: [{ teamId: request.team, profileId: "executor-1", executor: `执行者 ${index + 1}`, title: request.title, status: "completed", attempt: 0 }] });
       expect(JSON.stringify(result.fixtureModelRequests![index]!.input)).toContain(`你是 ${request.team[0]!.toUpperCase()}${request.team.slice(1)} 团队的执行者 ${index + 1}`);
-      expect(JSON.stringify(result.fixtureModelRequests![index]!.input)).toContain(request.summary);
+      // The plan's title and Brief differ from the Coordinator's summary and the message, so only the Team Leader's division can supply them.
+      for (const fragment of [request.title, request.brief]) expect(JSON.stringify(result.fixtureModelRequests![index]!.input)).toContain(fragment);
     }
     expect(result.fixtureTextOutbox).toEqual([]);
     const posted = JSON.stringify([result.agentFixtureOutboxes, result.fixtureTextOutbox]);
@@ -145,7 +154,7 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
     for (const [index, request] of requests.entries()) {
       const [plan, close] = [result.fixtureLeaderRequests![index * 2]!, result.fixtureLeaderRequests![index * 2 + 1]!];
       expect(plan.input.brief).toEqual({ message: request.text, summary: request.summary });
-      expect(close.input.assignments).toEqual([{ title: request.summary, executor: `执行者 ${index + 1}`, status: "completed", result: request.reply }]);
+      expect(close.input.assignments).toEqual([{ title: request.title, executor: `执行者 ${index + 1}`, status: "completed", result: request.reply }]);
     }
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
@@ -172,6 +181,64 @@ it("corrects a plan once, and fails a request whose plan stays invalid", async (
     expect(result.agentFixtureOutboxes?.jack?.text.map(({ message }) => message)).toEqual(["我暂时无法形成有效分工，本次尚未开始处理。请补充需求后明确重试。"]);
     expect(result.fixtureModelRequests).toHaveLength(1);
     expect(result.fixtureTextOutbox).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("runs the preset the plan names, and refuses a preset of another team", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-plan-profile-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const plan = (profileId: string) => ({ assignments: [{ profileId, title: "准备周末晚餐", brief: "三人份，列出采购清单" }] });
+  try {
+    dispatchConfig(directory);
+    const local = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")?.dispatch;
+    if (!local) throw new Error("expected_dispatch_configuration");
+    const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try {
+      const seeded = registry.importLocalConfiguration(local, { executorHostTools: PRODUCTION_TOOL_IDS });
+      // Bill's second preset differs from his first in instructions and tools; Jack's preset ID exists in no other team.
+      registry.save({ ...seeded.definitions, teams: seeded.definitions.teams.map((team) => team.id === "bill"
+        ? { ...team, executorProfiles: [...team.executorProfiles, { id: "meal", name: "餐饮采购", instructions: "餐饮采购规则 R4", hostTools: ["schedules.list"] }] }
+        : team.id === "jack" ? { ...team, executorProfiles: [{ id: "code", name: "代码与脚本", instructions: "代码规则 R4", hostTools: PRODUCTION_TOOL_IDS }] } : team) },
+      { basedOn: seeded.version });
+    } finally { registry.close(); }
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_plan_second_preset", "帮我准备周末晚餐", decision("bill", "准备周末晚餐"), { leaderPlan: plan("meal") }));
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    await running.post("/api/fixture/inbound", groupMessage("om_plan_foreign_preset", "再帮我准备周日晚餐", decision("bill", "准备周日晚餐"), { leaderPlan: plan("code") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed" && state.agentFixtureOutboxes?.bill?.text.length === 3);
+    console.log(JSON.stringify({ kind: "dispatch_plan_profile", commands: ["帮我准备周末晚餐", "再帮我准备周日晚餐"], jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
+    expect(result.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ teamId: "bill", profileId: "meal", status: "completed" })]);
+    expect(result.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
+      "我安排执行者 1（餐饮采购）处理：准备周末晚餐。完成后会在本群汇报。", "这是 fixture Codex 回复。", "我暂时无法形成有效分工，本次尚未开始处理。请补充需求后明确重试。"]);
+    // The Executor ran with the named preset's instructions and tools, not with the team's first preset.
+    expect(result.fixtureModelRequests).toHaveLength(1);
+    expect(JSON.stringify(result.fixtureModelRequests![0]!.input)).toContain("餐饮采购规则 R4");
+    expect(JSON.stringify(result.fixtureModelRequests![0]!.input)).not.toContain("出行路线须逐段核对站名");
+    expect(result.fixtureThreadStarts?.filter(({ serviceName }) => serviceName === "feishu_agent_bill").map(({ dynamicTools }) => dynamicTools)).toEqual([["schedules.list"]]);
+    // A preset of another team is refused for Bill's plan: no Assignment, no Executor.
+    expect(result.agentDispatch?.jobs[1]).toMatchObject({ agentId: "bill", status: "failed", assignments: [] });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("fails a request whose start message was uncertain at a crash, without sending it again", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-held-start-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    // Bill's application holds the start message: it reaches the outbox, but the send never completes before the crash.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_held_start", "帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
+    const held = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1 && state.agentDispatch?.jobs[0]?.assignments[0]?.status === "queued");
+    expect(held.agentDispatch?.jobs[0]?.status).toBe("running");
+    await running.crash(); running = undefined;
+    running = await start(directory);
+    const recovered = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.bill?.text.length === 1);
+    console.log(JSON.stringify({ kind: "dispatch_held_start", command: "帮我规划周末一日行程", jobs: recovered.agentDispatch, outboxes: recovered.agentFixtureOutboxes }));
+    expect(recovered.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual(["接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。"]);
+    expect(recovered.agentDispatch?.notices?.find(({ id }) => id.endsWith(":receipt:0"))?.state).toBe("unknown");
+    expect(recovered.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
+    expect(recovered.fixtureModelRequests).toEqual([]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
