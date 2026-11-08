@@ -829,10 +829,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     scope === "group" ? configuration.owner.memoryScope(event.accountId, event.target) : undefined;
   const coordinatorProfile = resolveAgentProfile(definitions, { role: "coordinator" }, catalogToolIds);
   const memory = (event: import("./channel-contract.js").InboundContent) => accountMemory.recall(memoryAccount(coordinatorProfile.memoryScope, event)!, event.text);
+  // Building a profile's tool view compiles its tool schemas (about 50 ms), so one view is kept per distinct tool set.
+  const toolViews = new Map<string, ProfileToolHost>();
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob) => {
     const profileId = definitions.teams.find(({ id }) => id === job.agentId)?.executorProfiles[0]?.id ?? "";
     const resolved = resolveAgentProfile(definitions, { role: "executor", teamId: job.agentId, profileId }, catalogToolIds);
-    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools) };
+    const key = JSON.stringify(resolved.hostTools);
+    let tools = toolViews.get(key);
+    if (!tools) { tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools); toolViews.set(key, tools); }
+    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: ({ agent }) => agent.close() });
@@ -840,7 +845,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
     : (() => {
       if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-      // The Coordinator resolves to no host tools, so its runtime gets none (agent-dispatch::CON-003).
+      // Built without host tools: the Coordinator's session never receives business tools, as its resolved profile states (agent-dispatch::CON-003).
       const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
       return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorProfile.instructions);
     })();
