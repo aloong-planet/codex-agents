@@ -25,7 +25,7 @@ Cross-skill project facts are declared in the repository-root `capabilities.toml
 
 Group invocation, memory, model recovery, file access, pending continuation and scheduled delivery must preserve the conversation/requester boundaries in [ADR-0023](docs/adr/0023-isolate-feishu-group-authority.md).
 
-Isolated model runtimes are created only from `ISOLATED_RUNTIME_KINDS` and started only through `spawnIsolatedAppServer`, so each one is offered only its host's grant, as described in [ADR-0029](docs/adr/0029-offer-isolated-runtimes-only-granted-tools.md).
+Isolated model runtimes are created only from `ISOLATED_RUNTIME_KINDS` and started only through `spawnIsolatedAppServer`, so each one is offered only its host's grant, as described in [ADR-0030](docs/adr/0030-offer-isolated-runtimes-only-granted-tools.md).
 
 Every page and API of the local service must stay behind owner authorization and the local-Host rule in [agent-console::CON-001](docs/specs/agent-console.md); the public event ingress never routes to it.
 

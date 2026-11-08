@@ -20,7 +20,7 @@ export async function startFixtureServer(
   modelMode: string,
   routerMode: string,
   fileScanLimit?: number,
-  options: { stateDirectory?: string; port?: number } = {},
+  options: { stateDirectory?: string; businessDirectory?: string; port?: number } = {},
 ) {
   if (![modelMode, routerMode].every((mode) => mode === "live" || mode === "fixture")) {
     throw new Error("invalid E2E model mode: use live or fixture");
@@ -30,6 +30,8 @@ export async function startFixtureServer(
     telemetryBuilt = true;
   }
   const directory = options.stateDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-case-"));
+  // Business files live outside the state directory, as in production, where file tools refuse the state directory.
+  const businessDirectory = options.businessDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-business-"));
   const traceFile = path.join(directory, "service.log");
   const otelDirectory = path.join(directory, "otel");
   const reservation = net.createServer();
@@ -49,7 +51,7 @@ export async function startFixtureServer(
     env: { ...process.env, DEMO_MODE: "fixture", PORT: String(address.port),
       WORKFLOW_SIMULATOR_MODEL: modelMode, WORKFLOW_SIMULATOR_PENDING_ROUTER: routerMode,
       WORKFLOW_FIXTURE_FILE_SCAN_LIMIT: fileScanLimit === undefined ? "" : String(fileScanLimit),
-      WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WEIXIN_OTEL_DIRECTORY: otelDirectory,
+      WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: businessDirectory, WEIXIN_OTEL_DIRECTORY: otelDirectory,
       WORKFLOW_FIXTURE_TRACE_FILE: traceFile, WEIXIN_OTEL_ENABLED: "1" },
   });
   fs.closeSync(fd);
@@ -88,7 +90,7 @@ export async function startFixtureServer(
       try {
         cookie ??= await authorizeLocalService(directory);
         const response = await fetch(`${url}/api/state`, { headers: { cookie }, signal: AbortSignal.timeout(500) });
-        if (response.ok) return { url, directory, traceFile, otelDirectory, pid: child.pid!, cookie, loginLink, close };
+        if (response.ok) return { url, directory, businessDirectory, traceFile, otelDirectory, pid: child.pid!, cookie, loginLink, close };
       } catch { /* bounded readiness retry */ }
       await delay(50);
     }

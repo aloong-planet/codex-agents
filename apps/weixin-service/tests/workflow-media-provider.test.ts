@@ -12,6 +12,7 @@ import { WorkflowMediaProvider, type WorkflowMediaSendPort } from "../src/workfl
 import { WorkflowMediaRequestStore } from "../src/workflow-media-request-store.js";
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
@@ -39,7 +40,7 @@ async function fixture() {
   }, { sendImage, sendFile, reconcile }, files, requests, {
     snapshotLegacyFile: async (accountId, input) => {
       const localFiles = new LocalFileTools(permissions, {
-        moduleIds: ["notes"], spoolDirectory: path.join(root, "files", "snapshots"),
+        moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "files", "snapshots"),
         operationDatabasePath: path.join(root, "operations.sqlite"),
       });
       try { return await localFiles.snapshotLegacyFile(accountId, input); } finally { await localFiles.close(); }

@@ -2,7 +2,7 @@
 // fake model (tests/fixtures/isolated-runtime-probe.ts). Opt-in (CODEX_ISOLATED_RUNTIME_TEST=1, `pnpm test:isolated-runtime`)
 // because CI has no Codex executable; rerun after every Codex upgrade.
 // Gap: a real code_mode_only model calling host tools directly, and real web search results, need real model turns; they
-// are the owner's acceptance checks (ADR-0029), not covered here.
+// are the owner's acceptance checks (ADR-0030), not covered here.
 // Gap: that `request_user_input` sends no server request to the host is seen only through its refused output; the
 // production turn driver's answer to a server request is not observable through CodexConversation.
 import { spawnSync } from "node:child_process";

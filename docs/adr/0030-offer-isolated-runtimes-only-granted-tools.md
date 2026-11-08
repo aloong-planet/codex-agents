@@ -1,4 +1,4 @@
-# ADR-0029: Offer an isolated runtime only the tools its host grants
+# ADR-0030: Offer an isolated runtime only the tools its host grants
 
 - Status: Proposed
 

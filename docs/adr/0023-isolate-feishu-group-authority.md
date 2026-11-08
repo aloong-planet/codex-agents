@@ -51,8 +51,12 @@ Group model sessions use isolated configuration, disable inherited host memory a
 
 None of these could write a file or read an MCP resource under the "group" profile, but `spawn_agent` created live sub-agent threads with their own model requests. A read-only production check found none had ever been created.
 
-Under [ADR-0029](0029-offer-isolated-runtimes-only-granted-tools.md) (proposed), each isolated runtime runs with a direct-mode model catalog and with user input and sub-agents switched off, and it does not start without that catalog. It is offered only its host tools, plus web search where that is live.
+Under [ADR-0030](0030-offer-isolated-runtimes-only-granted-tools.md) (proposed), each isolated runtime runs with a direct-mode model catalog and with user input and sub-agents switched off, and it does not start without that catalog. It is offered only its host tools, plus web search where that is live.
 
 Threads saved before this change keep the old tool list in their history and send it again when resumed. Every tool on it is refused with no effect.
 
 This closing of the tool surface applies to isolated runtimes. The private App Servers that run in the owner's own Codex home keep the owner's Codex tool surface by design: the main conversation, the pending responder and the private memory curator.
+
+## Private-target extension
+
+[ADR-0029](0029-keep-service-state-outside-every-file-grant.md) applies the protected internal-state set of this decision to the owner's private chats as well. File grants in a private chat no longer reach service state, configuration, the private Codex home or the files isolated runtimes load. The other private semantics above are unchanged.

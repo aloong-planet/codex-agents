@@ -16,7 +16,7 @@ const MODEL_CATALOG_FILE = "direct-model-catalog.json";
 
 /** Host configuration, HOME and auth are separate: only login credentials enter this private runtime home, and the
  * runtime gets its own HOME, so the App Server finds no owner skills there; bundled system skills stay off. The runtime
- * offers its model only what the host grants (ADR-0029): a direct-mode model catalog in its own home removes `exec`,
+ * offers its model only what the host grants (ADR-0030): a direct-mode model catalog in its own home removes `exec`,
  * `wait` and `apply_patch`, and user input and sub-agents are switched off. */
 export function createIsolatedModelRuntime(options: {
   root: string;

@@ -34,6 +34,7 @@ import { WorkflowToolGateway } from "../src/workflow-tool-gateway.js";
 import { WorkflowToolHost } from "../src/workflow-tool-host.js";
 import { AppServerTurnFailure } from "../src/app-server-turn-driver.js";
 import { createWeixinSendFilesToolRegistration, createWorkflowToolReplyProjector, WorkflowToolProductionControl } from "../src/workflow-tool-production.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 // Production HTTP ingress, durable inbox, tool host, sandbox, Run/Effect and
 // stores are real. Only model/channel boundaries are fixtures. This establishes
@@ -483,7 +484,7 @@ async function createFixture(sendResult: SendTextResult = { ok: true }, sendGate
     scopes: [{ scopeId: "vault", label: "Vault", directory: vault, read: true, write: true }] });
   const diagnostics = new LocalDiagnostics(new DiagnosticFiles(path.join(root, "otel")));
   const localFiles = new LocalFileTools(permissions, {
-    moduleIds: ["notes"], spoolDirectory: path.join(root, "artifacts", "snapshots"),
+    moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "artifacts", "snapshots"),
     operationDatabasePath: path.join(root, "operations.sqlite"), diagnostics,
   });
   const files = new WorkflowFileArtifactStore(path.join(root, "artifacts"), permissions);

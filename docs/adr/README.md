@@ -32,4 +32,5 @@
 | ADR-0026 | [Coordinate work through isolated domain teams](0026-coordinate-group-work-through-isolated-teams.md) | Accepted (2026-11-07) |
 | ADR-0027 | [Bind a host-enforced profile to each agent](0027-bind-host-enforced-agent-profiles.md) | Accepted (2026-11-08) |
 | ADR-0028 | [Manage agent teams, MCP servers and skills from the local console](0028-manage-agent-teams-from-the-local-console.md) | Accepted (2026-11-07) |
-| ADR-0029 | [Offer an isolated runtime only the tools its host grants](0029-offer-isolated-runtimes-only-granted-tools.md) | Proposed |
+| ADR-0029 | [Keep service state outside every file grant](0029-keep-service-state-outside-every-file-grant.md) | Accepted (2026-11-08) |
+| ADR-0030 | [Offer an isolated runtime only the tools its host grants](0030-offer-isolated-runtimes-only-granted-tools.md) | Proposed |

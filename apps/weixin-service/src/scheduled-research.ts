@@ -42,7 +42,7 @@ export function createScheduledResearch(options: { executable: string | (() => s
         let executable: string;
         try { executable = typeof options.executable === "string" ? options.executable : options.executable(); }
         catch { reject(new Error("research_start_failed")); return; }
-        // A group runtime starts only with its direct-mode catalog in place (ADR-0029).
+        // A group runtime starts only with its direct-mode catalog in place (ADR-0030).
         if (runtime) {
           try { installDirectModelCatalog(runtime, executable); }
           catch { reject(new Error("research_runtime_unavailable")); return; }

@@ -62,7 +62,7 @@ Consequences: independent research can complete while channel prerequisites are 
 
 Sources: scheduled-tasks::REQ-006, REQ-008, QR-001 and CON-001; the user's scoped execution-host approval on 2026-10-15; real public TypeScript research, subprocess cancellation, host policy, cache-recovery and OTel correlation tests in the current implementation.
 
-2026-11-08 follow-up: group research, which runs in a group's isolated runtime, now searches in direct tool mode through the standalone `web.run` under [ADR-0029](0029-offer-isolated-runtimes-only-granted-tools.md) (proposed); Code Mode no longer applies to it. On `codex-cli 0.167.0-alpha.3.2`, a direct `web.run` call reports the search and page-open events this amendment requires. Whether a real model searches that way is the owner's research check under ADR-0029. Private research is unchanged.
+2026-11-08 follow-up: group research, which runs in a group's isolated runtime, now searches in direct tool mode through the standalone `web.run` under [ADR-0030](0030-offer-isolated-runtimes-only-granted-tools.md) (proposed); Code Mode no longer applies to it. On `codex-cli 0.167.0-alpha.3.2`, a direct `web.run` call reports the search and page-open events this amendment requires. Whether a real model searches that way is the owner's research check under ADR-0030. Private research is unchanged.
 
 ## Daily-news ownership amendment — Accepted (2026-10-16)
 
