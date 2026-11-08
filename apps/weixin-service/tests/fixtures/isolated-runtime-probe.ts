@@ -5,8 +5,9 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import type { AppServerMessage } from "../../src/codex-app-server-client.js";
-import { ISOLATED_MODEL_DISABLED_FEATURES, type IsolatedModelRuntime } from "../../src/isolated-model-runtime.js";
-import { resolveCodexExecutable, spawnStdioAppServer } from "../../src/stdio-app-server-transport.js";
+import { type IsolatedModelRuntime, spawnIsolatedAppServer } from "../../src/isolated-model-runtime.js";
+import type { IsolatedConversationKind } from "../../src/isolated-runtime-kinds.js";
+import { resolveCodexExecutable } from "../../src/stdio-app-server-transport.js";
 
 export const runsInstalledAppServer = process.env.CODEX_ISOLATED_RUNTIME_TEST === "1";
 
@@ -44,12 +45,15 @@ export class FakeResponsesEndpoint {
   respondWith(script: FakeModelScript): void { this.script = script; }
 
   /** The production runtime with its model requests routed here; nothing else is changed. `model` is the default model
-   * slug; a thread or turn that names its own model (such as a runtime profile's) still uses that one. */
+   * slug; a thread or turn that names its own model (such as a runtime profile's) still uses that one. The fake provider
+   * declares standalone web search, as production's OpenAI provider does, so a runtime that grants search offers `web.run`
+   * (its searches reach this endpoint's `/v1/alpha/search` and get 404). */
   route(runtime: IsolatedModelRuntime, model = "gpt-5.6-luna"): IsolatedModelRuntime {
     return { ...runtime, configOverrides: [...runtime.configOverrides,
       'model_provider="fake"', 'model_providers.fake.name="fake"',
       `model_providers.fake.base_url="http://127.0.0.1:${this.port}/v1"`, 'model_providers.fake.wire_api="responses"',
-      "model_providers.fake.requires_openai_auth=true", "model_providers.fake.supports_websockets=false", `model=${JSON.stringify(model)}`] };
+      "model_providers.fake.requires_openai_auth=true", "model_providers.fake.supports_websockets=false",
+      "model_providers.fake.supports_standalone_web_search=true", `model=${JSON.stringify(model)}`] };
   }
 
   /** Model requests received after `requests.length` was `from`. */
@@ -113,7 +117,7 @@ export class AppServerSession {
   private nextId = 1;
   private readonly pending = new Map<string | number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
   private readonly listeners = new Set<(message: AppServerMessage) => void>();
-  private constructor(private readonly transport: ReturnType<typeof spawnStdioAppServer>) {
+  private constructor(private readonly transport: ReturnType<typeof spawnIsolatedAppServer>) {
     transport.onMessage((message) => {
       if (message.id !== undefined && !message.method) {
         const waiter = this.pending.get(message.id);
@@ -131,9 +135,9 @@ export class AppServerSession {
     });
   }
 
-  /** Starts the App Server with the production executable, disabled features, cwd, environment and overrides. */
+  /** Starts the App Server the way production starts an isolated one (spawnIsolatedAppServer). */
   static async open(runtime: IsolatedModelRuntime): Promise<AppServerSession> {
-    const session = new AppServerSession(spawnStdioAppServer(resolveCodexExecutable(process.env), ISOLATED_MODEL_DISABLED_FEATURES, runtime));
+    const session = new AppServerSession(spawnIsolatedAppServer(resolveCodexExecutable(process.env), runtime));
     // The same handshake as the production client (codex-conversation-client.ts).
     await session.request("initialize", { clientInfo: { name: "isolated_runtime_probe", title: "Isolated runtime probe", version: "0.1.0" },
       capabilities: { experimentalApi: true, requestAttestation: false } });
@@ -189,4 +193,20 @@ export async function sampleBundledSkill(session: AppServerSession, cwd: string)
     .find((line) => line.length >= 40 && !line.startsWith("#") && JSON.stringify(line) === `"${line}"`);
   if (!bodyLine) throw new Error("bundled_skill_body_unavailable");
   return { name: bundled.name, path: bundled.path, bodyLine };
+}
+
+export type IsolatedPlacement = { instance?: string; mediaRoot?: string; agentId?: string };
+
+/** One instance of every isolated App Server kind, placed as main.ts places it (group target, dispatch scope and agent,
+ * inbound-media directory). Keyed by kind, so adding a kind to the table without a placement here does not compile. */
+export function isolatedConversationPlacements(mediaRoot: (name: string) => string): Record<IsolatedConversationKind, () => IsolatedPlacement> {
+  return {
+    feishuGroup: () => ({ instance: "feishu.group.probe", mediaRoot: mediaRoot("group") }),
+    dispatchCoordinator: () => ({}),
+    dispatchLeader: () => ({ instance: `dispatch-leader-${"b".repeat(64)}` }),
+    dispatchAgent: () => ({ instance: `dispatch-${"a".repeat(64)}`, mediaRoot: mediaRoot("specialist"), agentId: "alice" }),
+    pendingRouter: () => ({}),
+    groupMemoryCurator: () => ({}),
+    penny: () => ({ mediaRoot: mediaRoot("penny") }),
+  };
 }

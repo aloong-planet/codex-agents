@@ -288,6 +288,8 @@ The host validates them against the registry before acting.
 - It receives the triggering message and its Team Leader's Assignment title and Brief. Files, media, pending choices and reminders it produces go out under the Team Leader's application.
 - A pending choice it raises goes out verbatim under the Team Leader's identity. The requester's resolution ends the Assignment, and the Team Leader's closing turn follows.
 
+**Runtime-supplied tools.** A turn's tool list is exactly its host tools, plus web search where the turn allows it. Codex's own tools are never offered ([ADR-0030](../adr/0030-offer-isolated-runtimes-only-granted-tools.md)): code-mode `exec` and `wait`, `apply_patch`, the MCP resource tools, `request_user_input` and sub-agents. This is how agent-dispatch::REQ-016/AC-02 and agent-dispatch::CON-003 apply to the model's tool list. They hold for threads started after that change. A thread saved before it keeps the old tool list in its history and sends it again when resumed; every tool on it is refused with no effect.
+
 **Durable records.** Dispatch Requests keep their states: proposed, queued, running, waiting, completed, partially failed, failed and cancelled. Assignments add their own states: queued, running, waiting, completed, failed, cancelled and interrupted. Notification state stays independent for each message. Completed-effect evidence is keyed by Assignment and aggregated per request. Cross-team Assignments belong to the original request.
 
 The existing transition rules carry over to Assignments:

@@ -6,16 +6,19 @@ import { fileURLToPath } from "node:url";
 import { expect, test } from "vitest";
 import { CodexConversation } from "../src/codex-conversation.js";
 import { CodexFinanceInterpreter } from "../src/finance-interpreter.js";
-import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "../src/isolated-model-runtime.js";
-import { resolveCodexExecutable, spawnStdioAppServer } from "../src/stdio-app-server-transport.js";
+import { spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
+import { createIsolatedRuntime, isolatedConversationOptions } from "../src/isolated-runtime-kinds.js";
+import { resolveCodexExecutable } from "../src/stdio-app-server-transport.js";
 
 test.skipIf(process.env.PENNY_MODEL_LIVE !== "1")("interprets completed text and visible screenshot facts while clarifying plans and ambiguous refunds", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "penny-live-"));
-  const imagePath = path.join(root, "synthetic-payment.png");
+  // Penny's runtime as main.ts starts it: its own kind, with the inbound-media directory as its only readable root.
+  const media = path.join(root, "media"); fs.mkdirSync(media);
+  const imagePath = path.join(media, "synthetic-payment.png");
   fs.copyFileSync(fileURLToPath(new URL("./fixtures/finance/synthetic-payment.png", import.meta.url)), imagePath);
-  const runtime = createIsolatedModelRuntime({ root, scope: "penny-test", readableRoots: [root] });
-  const conversation = new CodexConversation(() => spawnStdioAppServer(resolveCodexExecutable(process.env), ISOLATED_MODEL_DISABLED_FEATURES, runtime),
-    120_000, undefined, undefined, 120_000, { permissionProfile: runtime.permissionProfile, structuredOutputSupported: true, webSearch: "disabled" });
+  const runtime = createIsolatedRuntime("penny", { stateDirectory: root, mediaRoot: media });
+  const conversation = new CodexConversation(() => spawnIsolatedAppServer(resolveCodexExecutable(process.env), runtime),
+    120_000, undefined, undefined, 120_000, isolatedConversationOptions("penny", runtime, { structuredOutputSupported: true }));
   try {
     const model = process.env.PENNY_TEST_MODEL ?? "gpt-5.6-luna";
     const available = (await conversation.listModels()).find((item) => item.model === model);

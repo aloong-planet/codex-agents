@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CodexConversation } from "../../src/codex-conversation.js";
-import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "../../src/isolated-model-runtime.js";
-import { resolveCodexExecutable, spawnStdioAppServer } from "../../src/stdio-app-server-transport.js";
+import { createIsolatedModelRuntime, spawnIsolatedAppServer } from "../../src/isolated-model-runtime.js";
+import { resolveCodexExecutable } from "../../src/stdio-app-server-transport.js";
 import { AppServerSession, assistantMessage, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer, sampleBundledSkill,
   skillCatalog } from "./isolated-runtime-probe.js";
 
@@ -50,7 +50,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtime probe", () => {
   it("plays scripted output items back to the runtime", async () => {
     const runtime = createIsolatedModelRuntime({ root: path.join(work, "runtimes"), scope: "scripted", environment });
     model.respondWith(() => [assistantMessage("SCRIPTED-REPLY-5E1F")]);
-    const conversation = new CodexConversation(() => spawnStdioAppServer(resolveCodexExecutable(process.env), ISOLATED_MODEL_DISABLED_FEATURES, model.route(runtime)),
+    const conversation = new CodexConversation(() => spawnIsolatedAppServer(resolveCodexExecutable(process.env), model.route(runtime)),
       60_000, undefined, undefined, 60_000, { permissionProfile: runtime.permissionProfile, webSearch: "disabled" });
     try {
       const threadId = await conversation.startOrResume(undefined, runtime.cwd);

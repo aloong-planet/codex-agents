@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LocalDiagnostics } from "./local-diagnostics.js";
-import type { IsolatedModelRuntime } from "./isolated-model-runtime.js";
+import { installDirectModelCatalog, type IsolatedModelRuntime } from "./isolated-model-runtime.js";
 import type { NotificationAddress } from "./notification-channel.js";
 import type { ScheduledTasksOptions } from "./scheduled-tasks.js";
 
@@ -42,6 +42,11 @@ export function createScheduledResearch(options: { executable: string | (() => s
         let executable: string;
         try { executable = typeof options.executable === "string" ? options.executable : options.executable(); }
         catch { reject(new Error("research_start_failed")); return; }
+        // A group runtime starts only with its direct-mode catalog in place (ADR-0030).
+        if (runtime) {
+          try { installDirectModelCatalog(runtime, executable); }
+          catch { reject(new Error("research_runtime_unavailable")); return; }
+        }
         const child = spawn(executable, ["--search", "--enable", "code_mode_host", ...SCHEDULED_RESEARCH_DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
           "-a", "never", ...(runtime ? ["-c", `default_permissions=${JSON.stringify(runtime.permissionProfile)}`, ...runtime.configOverrides.flatMap((value) => ["-c", value])] : []), "-c", "project_doc_max_bytes=0", "-c", `developer_instructions=${JSON.stringify(instructions)}`,
           "exec", ...(runtime ? [] : ["--ignore-user-config", "--sandbox", "read-only"]), "--ignore-rules", "--ephemeral", "--skip-git-repo-check",
