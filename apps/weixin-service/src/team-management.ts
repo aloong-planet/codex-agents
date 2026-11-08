@@ -24,8 +24,8 @@ export type TeamManagementOptions = Readonly<{
   catalogToolIds: readonly string[];
   /** The scopes of the saved module permissions the file tools use, for the effective tools. */
   moduleScopes(): ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>;
-  /** A team's active Assignments (queued, running or waiting). */
-  activeAssignments(teamId: string): number;
+  /** Active Assignments (queued, running or waiting) by team, counted once per view. */
+  activeAssignments(): Readonly<Record<string, number>>;
   /** Called when the roster (applications and their secrets) changes, so that main can start new sending applications. */
   rosterChanged(roster: Readonly<FeishuDispatchConfiguration>): void;
   /** Applications no team may use, such as Penny's, each with the reason the save bar shows. */
@@ -33,6 +33,9 @@ export type TeamManagementOptions = Readonly<{
   report(code: string): void;
   now?: () => number;
 }>;
+
+/** How long a group name the platform could not give is not asked for again, unless the owner saves or rechecks a team in that group. */
+const NAME_RETRY_MS = 10 * 60_000;
 
 const joinText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已加入本群，负责：${team.responsibility}`;
 const leaveText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已离开本群，不再接新的事务；进行中的事务会做完。`;
@@ -46,7 +49,10 @@ export class TeamManagement {
   private readonly onboarding: TeamOnboarding;
   private roster_: Readonly<FeishuDispatchConfiguration>;
   private send: AnnouncementSend | undefined;
-  private readonly groupNames = new Map<string, string>();
+  /** Group names by chat ID; a lookup that gave none is kept with the time it may be asked again. */
+  private readonly groupNames = new Map<string, Readonly<{ name?: string; retryAt: number }>>();
+  /** Lookups in progress, shared by concurrent views. */
+  private readonly nameLookups = new Map<string, Promise<void>>();
 
   constructor(private readonly options: TeamManagementOptions) {
     this.onboarding = new TeamOnboarding(options.registry, options.platform, options.coordinator, options.now);
@@ -74,6 +80,7 @@ export class TeamManagement {
   /** Saves one team from the console; returns the team's ID. Onboarding of its application continues in the background. */
   saveTeam(input: unknown, options: Readonly<{ basedOn: unknown; actor: TeamActor }>): string {
     const { edit, secret } = parseTeamEdit(input, this.options.catalogToolIds);
+    this.lookUpNamesAgain(edit.groups);
     const basedOn = parseVersion(options.basedOn);
     const before = edit.id === undefined ? undefined : this.current().definitions.teams.find(({ id }) => id === edit.id);
     const { version, teamId } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, ...(secret === undefined ? {} : { secret }) });
@@ -107,24 +114,23 @@ export class TeamManagement {
 
   /** Runs a team's onboarding steps again, as 「重新检查」 does, and waits for the outcome. */
   async recheck(teamId: unknown, actor: TeamActor): Promise<void> {
-    if (typeof teamId !== "string" || !this.current().definitions.teams.some(({ id }) => id === teamId)) throw new TeamInputError("团队不存在");
-    await this.runOnboarding(teamId, actor, true);
+    const team = typeof teamId === "string" ? this.current().definitions.teams.find(({ id }) => id === teamId) : undefined;
+    if (!team) throw new TeamInputError("团队不存在");
+    this.lookUpNamesAgain(team.bindings.map(({ chatId }) => chatId));
+    await this.runOnboarding(team.id, actor, true);
   }
 
   /** The console's view: no secret value ever appears in it (team-management::CON-001). */
   async view(): Promise<TeamsView> {
     const current = this.current(), { definitions } = current;
-    await Promise.all(definitions.dispatchGroups.filter((chatId) => !this.groupNames.has(chatId)).map(async (chatId) => {
-      // A name the platform cannot give falls back to the chat ID, without blocking the page (ticket 11, decision D4).
-      const name = await this.options.platform.chatName(chatId, this.options.coordinator).catch(() => undefined);
-      if (name) this.groupNames.set(chatId, name);
-    }));
+    await Promise.all(definitions.dispatchGroups.map((chatId) => this.lookUpName(chatId)));
     const scopes = this.options.moduleScopes();
+    const active = this.options.activeAssignments();
     const latest = new Map<string, TeamsView["teams"][number]["announcements"][string]>();
     for (const { chatId, teamId, kind, state, text: message } of this.options.announcements.list()) latest.set(`${teamId}\n${chatId}`, { kind, state, text: message });
     return {
       configured: true, version: current.version,
-      groups: definitions.dispatchGroups.map((chatId) => ({ chatId, name: this.groupNames.get(chatId) ?? chatId })),
+      groups: definitions.dispatchGroups.map((chatId) => ({ chatId, name: this.groupNames.get(chatId)?.name ?? chatId })),
       tools: effectiveHostTools(this.options.catalogToolIds, scopes).offered.reduce((granted, id) => ({ ...granted, [id]: true }),
         Object.fromEntries(this.options.catalogToolIds.map((id) => [id, false])) as Record<string, boolean>),
       coordinator: { id: COORDINATOR_ID, name: definitions.coordinator.name, teamName: definitions.coordinator.teamName,
@@ -140,12 +146,37 @@ export class TeamManagement {
             const effective = effectiveHostTools(hostTools, scopes);
             return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted };
           }),
-          activeAssignments: this.options.activeAssignments(team.id),
+          activeAssignments: active[team.id] ?? 0,
           announcements: Object.fromEntries(team.bindings.flatMap(({ chatId }) => latest.has(`${team.id}\n${chatId}`) ? [[chatId, latest.get(`${team.id}\n${chatId}`)!]] : [])) };
       }),
       preview: Object.fromEntries(definitions.dispatchGroups.map((chatId) => [chatId, acceptingTeams(definitions, chatId).map(({ id }) => id)])),
     };
   }
+
+  /**
+   * Looks up a group's name unless it is known or a failed lookup is recent. A name the platform cannot give falls back to the chat
+   * ID (ticket 11, decision D4), and is asked for again after NAME_RETRY_MS, so the page's polling does not call the platform each time.
+   */
+  private lookUpName(chatId: string): Promise<void> {
+    const known = this.groupNames.get(chatId);
+    if (known && (known.name || known.retryAt > this.now())) return Promise.resolve();
+    let lookup = this.nameLookups.get(chatId);
+    if (!lookup) {
+      lookup = this.options.platform.chatName(chatId, this.options.coordinator).catch(() => undefined).then((name) => {
+        this.groupNames.set(chatId, name ? { name, retryAt: Infinity } : { retryAt: this.now() + NAME_RETRY_MS });
+        this.nameLookups.delete(chatId);
+      });
+      this.nameLookups.set(chatId, lookup);
+    }
+    return lookup;
+  }
+
+  /** Forgets failed name lookups of these groups, so a fix the owner just made in Feishu shows at the next view. */
+  private lookUpNamesAgain(chatIds: readonly string[]): void {
+    for (const chatId of chatIds) if (!this.groupNames.get(chatId)?.name) this.groupNames.delete(chatId);
+  }
+
+  private now(): number { return (this.options.now ?? Date.now)(); }
 
   private async runOnboarding(teamId: string, actor: TeamActor, requested: boolean): Promise<void> {
     try {

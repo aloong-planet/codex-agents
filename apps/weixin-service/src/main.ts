@@ -219,7 +219,7 @@ if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixture
 let teamManagement: TeamManagement | undefined;
 // Set once the dispatch applications exist; a roster change before that has nothing to start.
 let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () => {};
-let countActiveAssignments: (teamId: string) => number = () => 0;
+let countActiveAssignments: () => Readonly<Record<string, number>> = () => ({});
 // Penny's application, read from its configuration at startup; no team may use it (ADR-0025, team-management::REQ-002).
 let pennyApplicationId: string | undefined;
 const feishuConfiguration = (() => {
@@ -236,7 +236,7 @@ const feishuConfiguration = (() => {
         const state = workflowModulePermissions.get(moduleId);
         return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
       }),
-      activeAssignments: (teamId) => countActiveAssignments(teamId),
+      activeAssignments: () => countActiveAssignments(),
       rosterChanged: (roster) => applyRoster(roster),
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
       report: (code) => process.stderr.write(`${code}\n`) });
@@ -1103,8 +1103,13 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
   channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
     () => teams.roster().agents);
-  countActiveAssignments = (teamId) => dispatch.getState().jobs.flatMap(({ assignments }) => assignments)
-    .filter((assignment) => assignment.teamId === teamId && ["queued", "running", "waiting"].includes(assignment.status)).length;
+  countActiveAssignments = () => {
+    const counts: Record<string, number> = {};
+    for (const { teamId, status } of dispatch.getState().jobs.flatMap(({ assignments }) => assignments)) {
+      if (["queued", "running", "waiting"].includes(status)) counts[teamId] = (counts[teamId] ?? 0) + 1;
+    }
+    return counts;
+  };
   // A roster change from a console save or onboarding: a new or re-secreted application gets its own outbound transport, media
   // routes and channel sender at once, started when the Feishu channel already runs (ticket 11, decision D5).
   const mediaRouter = selectedMediaDelivery instanceof MediaDeliveryRouter ? selectedMediaDelivery : undefined;

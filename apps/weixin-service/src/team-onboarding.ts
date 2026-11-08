@@ -115,6 +115,7 @@ export class FixtureOnboardingPlatform implements OnboardingPlatform {
     return this.chats[chatId]?.inChat ?? true;
   }
   async chatName(chatId: string): Promise<string | undefined> {
+    this.calls.push({ call: "chat_name", chatId });
     return this.chats[chatId]?.name;
   }
 }
@@ -122,6 +123,7 @@ export class FixtureOnboardingPlatform implements OnboardingPlatform {
 /** One HTTP call to the platform; `token` is a tenant access token sent as a bearer token. Throws when there is no answer. */
 export type PlatformRequest = (request: Readonly<{ method: "GET" | "POST"; url: string; token?: string; body?: unknown }>) => Promise<Readonly<{ status: number; body: unknown }>>;
 const OPEN_API = "https://open.feishu.cn/open-apis";
+const NO_ANSWER = -1;
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 /**
@@ -135,7 +137,7 @@ export class FeishuHttpOnboardingPlatform implements OnboardingPlatform {
   async checkApplication(application: ApplicationCredentials): Promise<ApplicationCheck> {
     try {
       const token = await this.token(application);
-      if (typeof token === "number") return token === 20069 ? "not_enabled" : "bad_credentials";
+      if (typeof token === "number") return token === NO_ANSWER ? "unreachable" : token === 20069 ? "not_enabled" : "bad_credentials";
       const info = record((await this.request({ method: "GET", url: `${OPEN_API}/bot/v3/info`, token })).body);
       // Bot information exists only for a published, enabled bot capability; 2 means enabled in the tenant.
       if (info.code !== 0) return "not_enabled";
@@ -146,7 +148,7 @@ export class FeishuHttpOnboardingPlatform implements OnboardingPlatform {
   async addBot(chatId: string, appId: string, coordinator: ApplicationCredentials): Promise<JoinAnswer> {
     try {
       const token = await this.token(coordinator);
-      if (typeof token === "number") return "refused";
+      if (typeof token === "number") return token === NO_ANSWER ? "unreachable" : "refused";
       const answer = record((await this.request({ method: "POST", url: `${OPEN_API}/im/v1/chats/${encodeURIComponent(chatId)}/members?member_id_type=app_id`,
         token, body: { id_list: [appId] } })).body);
       if (answer.code === 232017) return "owner_only";
@@ -175,12 +177,12 @@ export class FeishuHttpOnboardingPlatform implements OnboardingPlatform {
     } catch { return undefined; }
   }
 
-  /** A tenant access token, or the platform's refusal code. */
+  /** A tenant access token, the platform's refusal code, or NO_ANSWER when the reply carries no readable answer (such as a gateway's error page). */
   private async token({ appId, appSecret }: ApplicationCredentials): Promise<string | number> {
     const answer = record((await this.request({ method: "POST", url: `${OPEN_API}/auth/v3/tenant_access_token/internal`, body: { app_id: appId, app_secret: appSecret } })).body);
     const token = answer.tenant_access_token;
     if (answer.code === 0 && typeof token === "string" && token) return token;
-    return typeof answer.code === "number" && answer.code !== 0 ? answer.code : -1;
+    return typeof answer.code === "number" && answer.code !== 0 ? answer.code : NO_ANSWER;
   }
 }
 

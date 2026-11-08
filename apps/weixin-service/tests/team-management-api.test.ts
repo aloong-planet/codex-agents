@@ -29,7 +29,7 @@ const SECRET_SENTINEL = "api-secret-SENTINEL-41c9";
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step(); });
 
-async function start() {
+async function start(options: { now?: () => number } = {}) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "team-api-"));
   cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
   const state = path.join(work, "state");
@@ -54,7 +54,7 @@ async function start() {
   const platform = new FixtureOnboardingPlatform();
   platform.configure({ chats: { oc_alpha: { name: "银河护卫队" } } });
   const teams = new TeamManagement({ registry, coordinator: SAM, platform, announcements, audit, catalogToolIds: PRODUCTION_TOOL_IDS,
-    moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => 0, rosterChanged: () => {}, report: () => {} });
+    moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => ({}), rosterChanged: () => {}, report: () => {}, ...options });
   const server: Server = createChannelStatusServer(() => ({}), undefined, access, createConsoleRoutes({ catalog, teams }));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -72,7 +72,7 @@ async function start() {
     return { status: response.status, body: text ? JSON.parse(text) : undefined };
   };
   const auditEntries = () => fs.readFileSync(path.join(state, AUDIT_FILE), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { request, bodies, auditEntries, state };
+  return { request, bodies, auditEntries, state, platform };
 }
 
 const daisy = { teamName: "设计团队", responsibility: "视觉方案", groups: ["oc_alpha"], leader: { name: "Daisy", appId: "cli_dddddddddddddddd", instructions: "" },
@@ -125,4 +125,42 @@ describe("team management API", () => {
       .toEqual({ error: "工具格式无效" });
     expect((await request("/api/teams", undefined, {})).status).toBe(401);
   });
+
+  // Group names (ticket 11, decision D4): a name the platform cannot give is asked for again after 10 minutes, concurrent views share
+  // one lookup, and 重新检查 or a save of a team asks again at once for that team's groups, so a fix the owner just made shows (review R2).
+  it.each([
+    ["重新检查", (request: Requester) => request("/api/teams/recheck", { teamId: "bill" })],
+    ["a save", (request: Requester, view: { version: number; teams: Array<Record<string, unknown>> }) => request("/api/teams/save", { basedOn: view.version, team: unchangedBill(view) })],
+  ] as const)("looks up a group name the platform could not give again only after 10 minutes, or at once on %s", async (_case, act) => {
+    let clock = 1_000_000;
+    const { request, platform } = await start({ now: () => clock });
+    const lookups = () => platform.calls.filter(({ call, chatId }) => call === "chat_name" && chatId === "oc_beta").length;
+    const names = async () => ((await request("/api/teams")).body.groups as Array<{ name: string }>).map(({ name }) => name);
+    await Promise.all([request("/api/teams"), request("/api/teams")]);
+    expect(lookups()).toBe(1);
+    platform.configure({ chats: { oc_beta: { name: "产品讨论组" } } });
+    expect(await names()).toEqual(["银河护卫队", "oc_beta"]);
+    clock += 9 * 60_000;
+    expect([await names(), lookups()]).toEqual([["银河护卫队", "oc_beta"], 1]);
+    expect((await act(request, (await request("/api/teams")).body)).status).toBe(200);
+    expect([await names(), lookups()]).toEqual([["银河护卫队", "产品讨论组"], 2]);
+  });
+
+  it("looks up a group name the platform could not give again once 10 minutes have passed", async () => {
+    let clock = 1_000_000;
+    const { request, platform } = await start({ now: () => clock });
+    await request("/api/teams");
+    platform.configure({ chats: { oc_beta: { name: "产品讨论组" } } });
+    clock += 10 * 60_000;
+    expect(((await request("/api/teams")).body.groups as Array<{ name: string }>).map(({ name }) => name)).toEqual(["银河护卫队", "产品讨论组"]);
+  });
 });
+
+type Requester = Awaited<ReturnType<typeof start>>["request"];
+/** Bill's team as the console saves it, unchanged. */
+function unchangedBill(view: { teams: Array<Record<string, unknown>> }) {
+  const bill = view.teams.find(({ id }) => id === "bill") as { teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
+    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> };
+  return { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader, groups: bill.bindings.map(({ chatId }) => chatId),
+    executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools })) };
+}

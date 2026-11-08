@@ -230,6 +230,43 @@ it("lets a team go back to an application it used before, and posts with it agai
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 45000);
 
+it("counts each team's active Assignments in the team view", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-active-count-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_active_count", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" && (state.fixtureModelRequests?.length ?? 0) === 1);
+    const { teams } = await running.get<{ teams: Array<TeamView & { activeAssignments: number }> }>("/api/teams");
+    expect(teams.map(({ id, activeAssignments }) => [id, activeAssignments])).toEqual([["alice", 0], ["bill", 1], ["jack", 0]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// Dispatcher decision R5 (2026-11-08): a failed credentials check never moves an accepting team out of accepting, because a check
+// outcome must not change routing by itself. While the team's application cannot post, the owner sees 需处理 on the page; the
+// request fails, and its failure report goes through the same application (agent-dispatch::REQ-008/AC-04: no other identity),
+// so nothing reaches the requester in the group.
+it("keeps a team accepting work when its replaced secret fails the check, and reports nothing through another identity", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-secret-failed-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ applications: { cli_bbbbbbbbbbbbbbbb: "bad_credentials" } }) });
+    const view = await running.get<View>("/api/teams");
+    await running.post("/api/teams/save", { basedOn: view.version, team: { ...editOf(view, "bill"), secret: "bill-wrong-secret" } });
+    const checked = await viewUntil(running, (current) => (team(current, "bill") as TeamView & { credentials?: { status: string } }).credentials?.status === "action");
+    expect(team(checked, "bill")).toMatchObject({ credentials: { status: "action", reason: "bad_credentials" }, bindings: [{ chatId: "oc_alpha", state: "accepting" }] });
+    expect(checked.preview.oc_alpha).toEqual(["alice", "bill", "jack"]);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["rejected", "rejected"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_secret_failed", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    console.log(JSON.stringify({ kind: "team_secret_failed", command: "请帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
+    expect(failed.agentDispatch?.jobs[0]?.result).toBe("接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。");
+    expect([failed.agentFixtureOutboxes?.bill?.text, failed.fixtureTextOutbox, failed.fixtureModelRequests ?? []]).toEqual([[], [], []]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 it("resumes onboarding at startup without checking the credentials again", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-onboarding-resume-"));
   let running: Running | undefined;
@@ -244,7 +281,8 @@ it("resumes onboarding at startup without checking the credentials again", async
     await viewUntil(running, (current) => team(current, teamId)?.bindings[0]?.state === "accepting");
     const resumed = await running.until((state) => announcements(state).length === 1);
     console.log(JSON.stringify({ kind: "team_onboarding_resumed", calls: resumed.fixtureOnboardingCalls, announcements: announcements(resumed) }));
-    expect(resumed.fixtureOnboardingCalls).toEqual([{ call: "add", chatId: "oc_alpha", appId: DAISY_APP, as: "cli_0123456789abcdef" },
+    // Onboarding steps only; the page's group-name lookups are not part of onboarding.
+    expect(resumed.fixtureOnboardingCalls?.filter(({ call }) => call !== "chat_name")).toEqual([{ call: "add", chatId: "oc_alpha", appId: DAISY_APP, as: "cli_0123456789abcdef" },
       { call: "in_chat", chatId: "oc_alpha", as: DAISY_APP }]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 45000);

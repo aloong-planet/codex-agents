@@ -170,6 +170,8 @@ describe("the Feishu HTTP platform", () => {
     ["a token refused for a wrong secret", { [TOKEN]: { status: 400, body: { code: 10014, msg: "app secret invalid" } } }, "bad_credentials"],
     ["bot information refused", { [TOKEN]: token("t-daisy"), [BOT]: { status: 400, body: { code: 99991672, msg: "Access denied" } } }, "not_enabled"],
     ["no connection", { [TOKEN]: { fail: true } }, "unreachable"],
+    // A gateway's HTML error page is no answer from the platform, not a refusal of the secret (review item R1).
+    ["a token answer that is not JSON", { [TOKEN]: { status: 502 } }, "unreachable"],
   ] as const)("reads %s", async (_case, answers, expected) => {
     const { platform: http, requests } = platform(answers as Record<string, Answer>);
     expect(await http.checkApplication({ appId: DAISY_APP, appSecret: "daisy-secret" })).toBe(expected);
@@ -202,5 +204,10 @@ describe("the Feishu HTTP platform", () => {
   ] as const)("reads %s when adding a bot", async (_case, answer, expected) => {
     const { platform: http } = platform({ [TOKEN]: token("t-sam"), ["https://open.feishu.cn/open-apis/im/v1/chats/"]: answer as Answer });
     expect(await http.addBot("oc_alpha", DAISY_APP, SAM)).toBe(expected);
+  });
+
+  it("reads a Coordinator token answer that is not JSON as no answer when adding a bot", async () => {
+    const { platform: http } = platform({ [TOKEN]: { status: 502 } });
+    expect(await http.addBot("oc_alpha", DAISY_APP, SAM)).toBe("unreachable");
   });
 });
