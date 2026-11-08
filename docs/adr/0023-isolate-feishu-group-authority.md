@@ -44,6 +44,19 @@ Group model sessions use isolated configuration, disable inherited host memory a
 
 2026-11-08 follow-up: skipping host skill discovery did not keep the owner's skills out of group runtimes. The App Server still listed the real HOME's `.agents/skills` and Codex's bundled skills, and injected one when a member named it with `$<skill>`. Every isolated runtime now also gets its own HOME inside its runtime root and runs with bundled skills disabled. Threads saved before this change keep the earlier skill catalog, and the body of any skill named in them, in their history and send it again when resumed; it stays with the audience that already saw it, and the file paths it lists are no longer readable. Threads started after the change carry none of it. [ADR-0027](0027-bind-host-enforced-agent-profiles.md), called proposed above, was accepted on 2026-11-08; its Sources hold the evidence.
 
+2026-11-08 follow-up, tool surface: disabling Codex features did not keep runtime-supplied tools out of isolated runtimes. On the pinned App Server, the binary's model catalog puts an isolated runtime in code mode. In tests with that catalog, each runtime kind was offered:
+- `exec`, with `apply_patch` and the MCP resource tools nested inside;
+- `wait` and `request_user_input`;
+- Codex's sub-agent tools.
+
+None of these could write a file or read an MCP resource under the "group" profile, but `spawn_agent` created live sub-agent threads with their own model requests. A read-only production check found none had ever been created.
+
+Under [ADR-0030](0030-offer-isolated-runtimes-only-granted-tools.md) (proposed), each isolated runtime runs with a direct-mode model catalog and with user input and sub-agents switched off, and it does not start without that catalog. It is offered only its host tools, plus web search where that is live.
+
+Threads saved before this change keep the old tool list in their history and send it again when resumed. Every tool on it is refused with no effect.
+
+This closing of the tool surface applies to isolated runtimes. The private App Servers that run in the owner's own Codex home keep the owner's Codex tool surface by design: the main conversation, the pending responder and the private memory curator.
+
 ## Private-target extension
 
 [ADR-0029](0029-keep-service-state-outside-every-file-grant.md) applies the protected internal-state set of this decision to the owner's private chats as well. File grants in a private chat no longer reach service state, configuration, the private Codex home or the files isolated runtimes load. The other private semantics above are unchanged.

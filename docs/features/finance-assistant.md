@@ -24,7 +24,7 @@ The owner can keep personal and business receipts and payments in a private conv
 ## Boundaries and non-goals
 
 - Penny must be configured and published as a separate private bot. Its financial history is separate from general personal memory and group discussion; group specialists cannot access it.
-- Penny does not use the owner's personal skills; naming one in a Penny conversation applies nothing.
+- Penny does not use the owner's personal skills; naming one in a Penny conversation applies nothing. Penny's model cannot run code, edit files or start helper agents.
 - Only CNY is supported, with amounts accurate to cents. Invalid amounts, unsupported currencies and future payment dates are refused.
 - Planned purchases, quotations, examples and unpaid or failed transactions are not actual income or expenditure. Image interpretation may require clarification; review the visible facts before confirming.
 - Statement-file import is unavailable. Uploading a file produces an explanation and does not create an empty successful import.

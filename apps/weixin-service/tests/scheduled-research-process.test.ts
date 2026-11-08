@@ -126,11 +126,17 @@ it("retains the unavailable runtime cause in a completed OTel trace when the CLI
 });
 
 
+// What `codex debug models --bundled` prints (codex-cli 0.167.0-alpha.3.2), trimmed to one model.
+const BUNDLED_CATALOG = JSON.stringify({ models: [{ slug: "gpt-5.6-luna", tool_mode: "code_mode_only", apply_patch_tool_type: "freeform", multi_agent_version: "v1" }] });
+
 it("runs group research with an isolated home and mandatory named permission profile", async () => {
   const { file, dir } = executable(`const fs = require('node:fs');
 const args = process.argv.slice(2);
+if (args[0] === 'debug') { process.stdout.write(${JSON.stringify(BUNDLED_CATALOG)}); process.exit(0); }
 if (args.includes('-P')) { console.error("unexpected argument '-P' found"); process.exit(2); }
-fs.writeFileSync('INVOCATION', JSON.stringify({args, cwd:process.cwd(), home:process.env.CODEX_HOME, leaked:process.env.OWNER_PRIVATE_TOKEN}));
+const catalog = args.find((value) => value.startsWith('model_catalog_json='));
+const installed = catalog && fs.existsSync(JSON.parse(catalog.slice('model_catalog_json='.length))) ? JSON.parse(fs.readFileSync(JSON.parse(catalog.slice('model_catalog_json='.length)), 'utf8')) : null;
+fs.writeFileSync('INVOCATION', JSON.stringify({args, cwd:process.cwd(), home:process.env.CODEX_HOME, leaked:process.env.OWNER_PRIVATE_TOKEN, toolMode: installed?.models?.[0]?.tool_mode ?? null}));
 console.log(JSON.stringify({type:'item.completed',item:{type:'web_search',action:{type:'search'}}}));
 console.log(JSON.stringify({type:'item.completed',item:{type:'web_search',action:{type:'open_page',url:'https://example.com/release'}}}));
 fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'Group research report.',sources:[{title:'Release',url:'https://example.com/release'}]}));`);
@@ -148,8 +154,24 @@ fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'Group researc
   expect(observed.cwd).toBe(fs.realpathSync(path.join(dir, "runtime", "alpha", "workspace")));
   expect(observed).not.toHaveProperty("leaked");
   expect(observed.args).toContain('default_permissions="group"');
+  expect(observed.args).toEqual(expect.arrayContaining(["tools.experimental_request_user_input.enabled=false", "agents.enabled=false"]));
+  // The runtime's direct-mode catalog was installed before the research process started.
+  expect(observed.toolMode).toBe("direct");
   expect(observed.args).not.toContain("--ignore-user-config");
   expect(observed.args).not.toContain("--sandbox");
   expect(JSON.parse(observed.args.at(-1))).not.toHaveProperty("destination");
   await expect(createScheduledResearch({ executable: file })({ ...input(), destination })).rejects.toThrow("research_runtime_unavailable");
+});
+
+it("does not start group research when the runtime's model catalog cannot be derived", async () => {
+  const { file, dir } = executable(`const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'debug') process.exit(1);
+fs.writeFileSync('INVOCATION', JSON.stringify({ args }));`);
+  const recorded = path.join(dir, "invocation.json");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("'INVOCATION'", JSON.stringify(recorded)));
+  const run = createScheduledResearch({ executable: file, groupRuntime: () => createIsolatedModelRuntime({ root: path.join(dir, "runtime"), scope: "alpha",
+    authHome: path.join(dir, "no-auth"), environment: { PATH: process.env.PATH, HOME: dir } }) });
+  await expect(run({ ...input(), destination: { accountId: "feishu.bot.test", target: "feishu.group.alpha" } })).rejects.toThrow("research_runtime_unavailable");
+  expect(fs.existsSync(recorded)).toBe(false);
 });

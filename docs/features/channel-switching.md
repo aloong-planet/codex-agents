@@ -27,7 +27,7 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 
 - Group and member lists are maintained locally and apply on restart. Groups require Feishu permission to deliver mentions and ordinary group discussion; unseen messages cannot be used as context.
 - In mention-only groups, a typed bot name, another bot's mention, a quoted reply or @all alone does not invoke the assistant. Ordinary context is limited to recent discussion; it is not a complete group archive.
-- Group invocation does not inherit personal model integrations, skills or personal memory; naming one of the owner's skills in a group applies nothing. Business-file access remains subject to current grants and protected internal-state exclusions.
+- Group invocation does not inherit personal model integrations, skills or personal memory; naming one of the owner's skills in a group applies nothing. Group work uses only the assistant's business tools and, where allowed, web search; it cannot run code or start helper agents. Business-file access remains subject to current grants and protected internal-state exclusions.
 - Recovery retains file-query allowances and does not repeat completed changes or accepted/uncertain sends. Changed permissions, missing context, uncertain operations or exhausted limits produce a failure notice. Service restarts do not resume interrupted ordinary requests.
 - After a completed change, recovery can reuse the confirmed result; a new or changed mutation needs a fresh request. Native operations whose effects cannot be reconciled stop continuation.
 - Pairing requires an identifiable existing owner, a stopped service and a configured bot. There is no chat-based member administration, runtime channel switching or task transfer.
