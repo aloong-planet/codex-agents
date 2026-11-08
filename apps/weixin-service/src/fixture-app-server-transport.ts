@@ -38,6 +38,8 @@ export class FixtureAppServerTransport implements AppServerTransport {
     private readonly finalResponse: (results: unknown[]) => string | Error = () => JSON.stringify({ message: "这是 fixture Codex 回复。", results: [] }),
     private readonly observeTurn?: (input: { threadId: string; input: unknown }) => void,
     private readonly turnIdPrefix = "fixture-turn",
+    /** Sees each started thread's service name and offered dynamic tool names, so cases can check what a runtime was given. */
+    private readonly observeThreadStart?: (start: { threadId: string; serviceName: unknown; dynamicTools: string[] | null }) => void,
   ) {}
 
   send(message: AppServerMessage): void {
@@ -99,7 +101,9 @@ export class FixtureAppServerTransport implements AppServerTransport {
     if (method === "initialize") {
       this.emit({ id, result: { userAgent: "fixture-app-server" } });
     } else if (method === "thread/start" || method === "thread/resume") {
-      this.emit({ id, result: { thread: { id: method === "thread/resume" ? params.threadId : randomUUID() } } });
+      const threadId = method === "thread/resume" ? String(params.threadId) : randomUUID();
+      if (method === "thread/start") this.observeThreadStart?.({ threadId, serviceName: params.serviceName, dynamicTools: dynamicToolNames(params.dynamicTools) });
+      this.emit({ id, result: { thread: { id: threadId } } });
     } else if (method === "turn/start") {
       this.observeTurn?.({ threadId: String(params.threadId), input: structuredClone(params.input) });
       const calls: FixtureModelToolCall[] = [];
@@ -171,6 +175,12 @@ export class FixtureAppServerTransport implements AppServerTransport {
     this.turns.delete(turn.turnId);
     this.emit({ method: "turn/completed", params: { threadId: turn.threadId, turn: { id: turn.turnId, status: "completed" } } });
   }
+}
+
+function dynamicToolNames(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.flatMap((namespace: { name?: unknown; tools?: Array<{ name?: unknown }> }) =>
+    Array.isArray(namespace?.tools) ? namespace.tools.map((tool) => `${String(namespace.name)}.${String(tool?.name)}`) : [String(namespace?.name)]);
 }
 
 function parseFixtureToolResult(result: unknown): unknown {

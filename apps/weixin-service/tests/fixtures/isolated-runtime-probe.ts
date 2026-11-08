@@ -203,6 +203,7 @@ export function isolatedConversationPlacements(mediaRoot: (name: string) => stri
   return {
     feishuGroup: () => ({ instance: "feishu.group.probe", mediaRoot: mediaRoot("group") }),
     dispatchCoordinator: () => ({}),
+    dispatchLeader: () => ({ instance: `dispatch-leader-${"b".repeat(64)}` }),
     dispatchAgent: () => ({ instance: `dispatch-${"a".repeat(64)}`, mediaRoot: mediaRoot("specialist"), agentId: "alice" }),
     pendingRouter: () => ({}),
     groupMemoryCurator: () => ({}),

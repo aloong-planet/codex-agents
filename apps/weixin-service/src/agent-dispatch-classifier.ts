@@ -31,7 +31,9 @@ export type CoordinatorRuntime = <T>(work: (runtime: Pick<CodexConversation, "st
 /** The Coordinator's tool-free decision boundary. A decision cannot name credentials, permissions or destinations. */
 export class CodexDispatchClassifier implements DispatchClassifier {
   /** `instructions` are the Coordinator's resolved Agent Profile instructions; the lines below are its domain-neutral output contract. */
-  constructor(private readonly runtime: CoordinatorRuntime, private readonly model: () => CodexTurnModel, private readonly instructions = "") {}
+  constructor(private readonly runtime: CoordinatorRuntime, private readonly model: () => CodexTurnModel, private readonly instructions = "",
+    /** Routes a fixture turn to its injected decision; production passes none. */
+    private readonly prepareThread?: (input: DispatchClassificationInput, threadId: string) => void) {}
 
   classify(input: DispatchClassificationInput): Promise<DispatchDecision> {
     const name = input.agents.find(({ id }) => id === COORDINATOR_ID)?.name;
@@ -41,6 +43,7 @@ export class CodexDispatchClassifier implements DispatchClassifier {
 
   private async decide(runtime: Parameters<Parameters<CoordinatorRuntime>[0]>[0], cwd: string, input: DispatchClassificationInput, name: string): Promise<DispatchDecision> {
     const threadId = await runtime.startOrResume(undefined, cwd, []);
+    this.prepareThread?.(input, threadId);
     try {
       const result = await runtime.runTurn(threadId, [
         `你是 ${name}，只协调和分派群聊任务，绝不执行具体事务。只输出符合 outputSchema 的 JSON。`,

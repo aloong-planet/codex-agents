@@ -2,22 +2,28 @@ import type { DynamicToolContext, DynamicToolHost, DynamicToolResult } from "./d
 import type { TeamDefinitions } from "./team-registry.js";
 import { WorkflowToolCatalog } from "./workflow-tool-catalog.js";
 
-/** The agent whose profile a dispatch turn uses. Team Leader turns join with ticket 05. */
-export type AgentRef = Readonly<{ role: "coordinator" }> | Readonly<{ role: "executor"; teamId: string; profileId: string }>;
+/** The agent whose profile a dispatch turn uses. */
+export type AgentRef = Readonly<{ role: "coordinator" }> | Readonly<{ role: "leader"; teamId: string }> | Readonly<{ role: "executor"; teamId: string; profileId: string }>;
 /** Everything a dispatch turn may take from its Agent Profile (agent-dispatch Implementation Decisions: Profile resolution). */
 export type ResolvedAgentProfile = Readonly<{
   /** The profile's own instructions; shared code adds only domain-neutral rules around them. */
   instructions: string;
   /** Host tools offered to the turn: the profile allowlist ∩ the catalog. Module permissions still gate every call. */
   hostTools: readonly string[];
-  /** Until per-agent visibility scopes arrive, every dispatch agent recalls and captures the group memory. */
-  memoryScope: "group";
+  /** Until per-agent visibility scopes arrive, the Coordinator and Executors recall and capture the group memory; a Team Leader has none. */
+  memoryScope: "group" | "none";
 }>;
 
 /** The one resolution point for a dispatch agent's instructions, host tools and memory scope in a definitions version. */
 export function resolveAgentProfile(definitions: TeamDefinitions, agent: AgentRef, catalogToolIds: readonly string[]): ResolvedAgentProfile {
   // The Coordinator's session never receives business tools, whatever its profile lists (agent-dispatch::CON-003).
   if (agent.role === "coordinator") return { instructions: definitions.coordinator.profile.instructions, hostTools: [], memoryScope: "group" };
+  // A Team Leader plans and summarizes; it holds no side-effecting tools, whatever its profile lists (agent-dispatch::REQ-002/AC-05).
+  if (agent.role === "leader") {
+    const team = definitions.teams.find(({ id }) => id === agent.teamId);
+    if (!team) throw new Error("agent_profile_unknown");
+    return { instructions: team.leader.profile.instructions, hostTools: [], memoryScope: "none" };
+  }
   const profile = definitions.teams.find(({ id }) => id === agent.teamId)?.executorProfiles.find(({ id }) => id === agent.profileId);
   if (!profile) throw new Error("agent_profile_unknown");
   const allowed = new Set(profile.hostTools);
