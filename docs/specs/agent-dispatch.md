@@ -4,6 +4,7 @@
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
 > Pending: a plan holds exactly one Assignment.
+> Pending: the console shows a group's memory read-only, with no delete action.
 > Pending: an Executor is named `执行者 <n>（<profile name>）` in the Team Leader's start message, an interim form. The confirmed form, `<profile noun> <n>` (such as 文案执行者 51), needs an Executor-noun field on Executor profiles, which the team-management page adds.
 
 ## Problem Statement
@@ -217,7 +218,7 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Team is bound to the group, or removed, while requests run | Announcement under agent-dispatch::REQ-015/AC-03; removed team gets no new Assignments, running ones continue under agent-dispatch::REQ-015/AC-01 |
 | Member asks for, or genuinely mentions, a team bound to the group whose onboarding there is incomplete | No Assignment for that team and no post by its bot; the Coordinator clarifies or routes to an accepting team under agent-dispatch::REQ-015/AC-01 |
 | Requester cancels a request after its start message | Nothing of it enters the group memory, so no memory-derived reminder follows under agent-dispatch::REQ-012/AC-01 |
-| The service starts on group memory curated while Executors still captured their results into it | That memory may hold facts the curator drew from Executor results. It is kept, and the Coordinator may recall those facts; new captures follow agent-dispatch::REQ-012/AC-04 |
+| The service starts on group memory curated while Executors still captured their results into it | That memory may hold facts the curator drew from Executor results. It is kept, the Coordinator may recall those facts, and nothing deletes them; new captures follow agent-dispatch::REQ-012/AC-04 |
 | Owner edits a profile's instructions or skills, or attaches an MCP server, while a request runs | Running request keeps its snapshot under agent-dispatch::REQ-017/AC-01 |
 | Owner unbinds an MCP server, disables a tool or narrows module permissions while a request runs | The next call is refused and audited under agent-dispatch::REQ-017/AC-02 |
 | Brief, discussion, file or MCP result contains instructions to change roles, tools or destination | Treated as data under agent-dispatch::REQ-008/AC-05 and agent-dispatch::REQ-016 |
