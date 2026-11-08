@@ -143,7 +143,7 @@ describe("MCP catalog API", () => {
     ]);
     const confirmed = checked.body.entries.map((entry: { name: string; line: string }) => ({ name: entry.name, line: entry.line }));
     expect((await request("/api/mcp/import", { text, confirmed })).body.servers.map((item: { name: string }) => item.name)).toEqual(["imported", "local"]);
-    expect((await request("/api/mcp/import/check", { text: '{"mcpServers": ' })).body).toEqual({ error: "不是有效的 JSON" });
+    expect(await request("/api/mcp/import/check", { text: '{"mcpServers": ' })).toEqual({ status: 400, body: { error: "不是有效的 JSON" } });
 
     expect(bodies.length).toBeGreaterThanOrEqual(10);
     for (const body of bodies) {

@@ -169,6 +169,8 @@ export type HttpTestServerOptions = {
   authorizationServer?: AuthorizationServer;
   /** The issuer the protected-resource metadata names, when it must differ from `authorizationServer`. */
   advertiseIssuer?: string;
+  /** Announce `tools.listChanged`, as a server that would notify on its GET stream (which this one does not offer). */
+  listChanged?: boolean;
   /** Listen on this port, for a case that first finds the URL unreachable. */
   port?: number;
 };
@@ -229,7 +231,7 @@ export async function startHttpTestServer(options: HttpTestServerOptions = {}): 
     record.requests.push({ method: request.method, scheme: checked.scheme, ...(checked.token ? { token: checked.token } : {}), headers });
     if (request.method !== "POST") return new Response("method not allowed", { status: 405, headers: { allow: "POST" } });
     // Stateless: a server and a transport per request, as the SDK documents for Streamable HTTP without sessions.
-    const server = new Server({ name: "catalog-http-test-server", version: "2.0.1" }, { capabilities: { tools: {} } });
+    const server = new Server({ name: "catalog-http-test-server", version: "2.0.1" }, { capabilities: { tools: options.listChanged ? { listChanged: true } : {} } });
     server.setRequestHandler("tools/list", async () => ({ tools: TOOLS }));
     server.setRequestHandler("tools/call", async (call) => {
       const text = call.params.name === "whoami"

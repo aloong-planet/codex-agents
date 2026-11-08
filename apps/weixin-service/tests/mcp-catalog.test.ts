@@ -507,11 +507,12 @@ describe("URL servers", () => {
 
   it.each([
     ["a failed call", { refreshMs: 0 }],
+    // The server announces list changes: a URL server is listed again all the same.
     ["the periodic listing", { refreshMs: 200 }],
   ])("a URL server that stops answering is noticed through %s and retried", async (_case, options) => {
     const { open } = setup({ retryMs: 200, ...options });
     const catalog = open();
-    const first = await httpServer();
+    const first = await httpServer({ listChanged: true });
     const port = Number(new URL(first.url).port);
     register(catalog, { name: "gone", transport: "http", url: first.url });
     await connected(catalog, "gone");
@@ -578,8 +579,33 @@ describe("URL servers", () => {
     const text = stateText(state);
     for (const issued of as.issued) expect(text).not.toContain(issued.token);
     expect(fs.readFileSync(path.join(state, "mcp-secrets.json"), "utf8")).toContain(CLIENT_SECRET_SENTINEL);
-    expect(fs.readFileSync(path.join(state, "mcp-catalog.json"), "utf8")).not.toContain(CLIENT_SECRET_SENTINEL);
+    const others = fs.readdirSync(state).filter((name) => name !== "mcp-secrets.json" && fs.statSync(path.join(state, name)).isFile());
+    expect(others).toEqual(expect.arrayContaining(["mcp-catalog.json", "console-audit.jsonl"]));
+    for (const file of others) expect(fs.readFileSync(path.join(state, file), "utf8")).not.toContain(CLIENT_SECRET_SENTINEL);
   });
+
+  it("header values and the client secret leave the disk when dropped or deleted", async () => {
+    const { work, state, open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const server = await httpServer();
+    const remote = { name: "remote", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: "http://127.0.0.1:9", clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } };
+    register(catalog, remote);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    expect(stateText(state)).toContain(CLIENT_SECRET_SENTINEL);
+
+    catalog.update("remote", { ...remote, headers: { "X-Api-Key": "••••••" }, oauth: null }, { actor });
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    await catalog.remove("remote", actor);
+    expect(stateText(state)).not.toContain(HEADER_SENTINEL);
+
+    register(catalog, remote);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    const local = input("remote", testServerFiles(work));
+    catalog.update("remote", local, { confirmed: catalog.preview(local, "remote").launchLine, actor });
+    expect(stateText(state)).not.toContain(HEADER_SENTINEL);
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
+  }, 20_000);
 });
 
 describe("importing from JSON", () => {
