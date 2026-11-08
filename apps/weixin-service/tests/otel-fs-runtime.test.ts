@@ -1,8 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { beforeAll, expect, it, vi } from "vitest";
-import { execFileSync } from "node:child_process";
+import { expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { once } from "node:events";
 import { DiagnosticFiles } from "../src/diagnostic-files.js";
@@ -14,7 +13,6 @@ import { consumeSandboxTelemetry } from "../src/sandbox-telemetry-channel.js";
 
 // These tests observe SDK output, not synthetic spans. Physical disk failure/SIGKILL may lose
 // the final collection; a missing observation is not a successful or failed file operation.
-beforeAll(() => { execFileSync(process.execPath, ["scripts/build-sandbox-telemetry.mjs"]); });
 
 it("keeps filesystem tracing disabled while collecting runtime metrics", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "otel-fs-runtime-"));
