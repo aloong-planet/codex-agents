@@ -1,6 +1,6 @@
 # ADR-0024: Coordinate independent group agents without changing group authority
 
-- Status: Proposed
+- Status: Superseded by ADR-0026
 
 ## Context
 

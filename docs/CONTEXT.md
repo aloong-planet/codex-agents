@@ -7,6 +7,18 @@ This context describes personal Weixin/Feishu conversations, authorized Feishu g
 - Group requester
 - Dispatch Request
 - Sending Agent
+- Coordinator
+- Agent Team
+- Team Leader
+- Executor
+- Assignment
+- Brief
+- Team Directory
+- Agent Profile
+- MCP Catalog
+- Skill Library
+- Draining
+- Revocation
 - 模块（Module）
 - 能力（Capability）
 - 工作流模板（Workflow Template）
@@ -68,12 +80,60 @@ The authorized member whose message initiated a group request, whether by a ment
 _Avoid_: group owner, personal owner
 
 **Dispatch Request**:
-A group business request assigned to one specialist under its original requester's authority. It is distinct from the source platform message, a Workflow Run, a Pending Request and a Scheduled Task.
+A business request handled by Agent Teams under its original requester's authority, started from a group message or from the owner's private conversation with the Coordinator or a Team Leader. It is distinct from an Assignment, the source platform message, a Workflow Run, a Pending Request and a Scheduled Task.
 _Avoid_: message ID, workflow run, reminder
 
 **Sending Agent**:
-The configured agent whose bot identity speaks for a Dispatch Request and its resulting deliveries. It is distinct from the human Group requester and from the canonical group identity used for shared business memory and tasks.
+The Coordinator or Team Leader whose identity speaks for a Dispatch Request and its resulting deliveries. It is distinct from the human Group requester, from an Executor, and from the canonical group identity used for group memory and tasks.
 _Avoid_: requester, group owner, reply Owner
+
+**Coordinator**:
+The group-level agent, configured as Sam, that routes Dispatch Requests to Agent Teams and mediates cooperation between teams without executing business work. It is distinct from a Team Leader, which coordinates only inside its own team.
+_Avoid_: supervisor, main agent, 总管
+
+**Agent Team**:
+A domain unit of one Team Leader and at least one preset Agent Profile for its Executors, defined once and bound to dispatch groups. It is distinct from a group conversation and from a Module.
+_Avoid_: specialist (one agent under ADR-0024), department
+
+**Team Leader**:
+The agent that divides its Agent Team's Dispatch Requests into Assignments, coordinates and summarises them, and speaks for the team, holding no side-effecting tools. It is distinct from the Coordinator and from an Executor.
+_Avoid_: specialist, lead
+
+**Executor**:
+A task-created agent, without bot identity or private chat, that performs exactly one Assignment using one of its team's preset Agent Profiles. It is distinct from a Sending Agent and from Codex's built-in sub-agents.
+_Avoid_: Team Member (implies a fixed roster), sub-agent, 子 Agent, 成员
+
+**Assignment**:
+One part of a Dispatch Request that a Team Leader gives to exactly one Executor. It is distinct from the Dispatch Request itself and from a Scheduled Task.
+_Avoid_: subtask, 任务 (ambiguous)
+
+**Brief**:
+The content an assigning agent hands to the agent it assigns, which together with that agent's own memory is its only view of outside context. It is distinct from group memory and from shared discussion.
+_Avoid_: shared context, 交办记录
+
+**Team Directory**:
+The names and responsibilities of the Agent Teams bound to a group, as given to that group's Coordinator and Team Leaders. It is distinct from a Brief and holds no team's work content.
+_Avoid_: roster memory, 团队记忆
+
+**Agent Profile**:
+The instructions, host-tool allowlist, MCP servers, skills and memory scope bound to the Coordinator, a Team Leader, or one of a team's Executor presets. It is distinct from a Module Permission, which grants local resources, and from the Workflow Tool Catalog, which lists what a turn may request.
+_Avoid_: role prompt, persona, executor template (an Executor preset is an Agent Profile)
+
+**MCP Catalog**:
+The MCP servers registered in the local console, whose connections the host service holds and whose tools reach only agents whose Agent Profile attaches the server. It is distinct from MCP servers configured for the host's own Codex, which isolated runtimes never load.
+_Avoid_: MCP list, plugin
+
+**Skill Library**:
+The skills imported into the local console from local folders, from which Agent Profiles select skills. It is distinct from the host's own skills, which isolated runtimes never discover.
+_Avoid_: skill folder, host skills
+
+**Draining**:
+The state of an Agent Team's binding to one group between the start of its removal and the end of its remaining work and scheduled tasks there. It is distinct from removal, which completes only after draining, and from cancelling that work, which draining never does.
+_Avoid_: removed (only once draining completes), disabled
+
+**Revocation**:
+A saved change that takes capability away from agents: unbinding an MCP server, disabling a server or tool, removing a host tool from an Agent Profile, or narrowing a Module Permission. It is distinct from every other saved change, which reaches only requests admitted afterwards, whereas a revocation also binds running requests.
+_Avoid_: unbind (only one kind of revocation), permission change
 
 **模块（Module）**：
 一组可安装或启用的个人助理能力，并声明自己能够操作的资源类型。
@@ -369,6 +429,8 @@ _Avoid_: message-wide suppression, final reply Owner
 
 ## Flagged ambiguities（已消解歧义）
 
+- “Specialist” no longer names Alice, Bill or Jack: they are Team Leaders, and the agents that execute work are Executors (ADR-0026).
+- “任务” no longer names a unit of agent work on its own: a whole request is a Dispatch Request, and one Executor's part is an Assignment (ADR-0026).
 - “外部发送权限”不再作为模块权限维度：微信回复由渠道上下文约束，定时推送目标由 schedule 配置约束。
 - “审批”不再表示运行中升级本地权限：本地权限不足时任务终止并引导用户前往设置页。
 - `files.send` 不再表示微信文件工作流，因为它会与本地文件操作混淆；模型可见名称统一为 `weixin.send_files`，内部单文件通道能力统一为 `weixin.submit_file`。

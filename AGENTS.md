@@ -37,4 +37,4 @@ Tickets are maintained as local files. See `docs/agents/issue-tracker.md`.
 
 ### Documentation layout
 
-This repository uses one root `CONTEXT.md`. See `docs/agents/docs-layout.md`.
+This repository uses one `docs/CONTEXT.md`. See `docs/agents/docs-layout.md`.
