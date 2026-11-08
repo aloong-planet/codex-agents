@@ -23,12 +23,8 @@ describe("Team Leader plan validation", () => {
         { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: ["先定行程再订餐", "预算按 300 元控制"] });
   });
 
-  it.each([
-    ["ten Assignments, the ceiling", plan("trip", 10), 10, 0],
-    ["five decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五"] }, 1, 5],
-  ])("accepts a plan at its largest: %s", (_case, value, assignments, decisions) => {
-    const parsed = parseLeaderPlan(value, bill);
-    expect([parsed.assignments.length, parsed.decisions.length]).toEqual([assignments, decisions]);
+  it("accepts a plan with five decisions", () => {
+    expect(parseLeaderPlan({ ...plan("trip"), decisions: ["一", "二", "三", "四", "五"] }, bill).decisions).toHaveLength(5);
   });
 
   it.each([
@@ -48,14 +44,16 @@ describe("Team Leader plan validation", () => {
   it.each([
     ["an answer naming one of three Assignments", supplementOf([2]), { affected: [2], assignments: [], decisions: [] }],
     ["an answer adding an Assignment", supplementOf([], plan("meal").assignments), { affected: [], assignments: plan("meal").assignments, decisions: [] }],
+    ["an answer bringing the request to the ceiling of ten", supplementOf([], plan("meal", 7).assignments), { affected: [], assignments: plan("meal", 7).assignments, decisions: [] }],
     ["position 0", supplementOf([0]), "leader_plan_invalid"],
     ["a position past the request's Assignments", supplementOf([4]), "leader_plan_invalid"],
     ["a repeated position", supplementOf([1, 1]), "leader_plan_invalid"],
     ["an answer affecting nothing", supplementOf([]), "leader_plan_invalid"],
     ["a new Assignment on another team's preset", supplementOf([], plan("code").assignments), "leader_plan_invalid"],
-    ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid"],
-  ])("decodes or refuses a supplement answer: %s", (_case, value, expected) => {
-    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3)).toThrow(expect.objectContaining({ code: expected }));
+    ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid",
+      "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工"],
+  ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string) => {
+    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
     else expect(parseLeaderSupplement(value, bill, 3)).toEqual(expected);
   });
 

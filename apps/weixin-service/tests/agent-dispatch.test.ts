@@ -511,27 +511,33 @@ it("keeps the others running when one fails, posts the failure, ends partially f
 });
 
 it.each([
-  ["the completed one", ["整理文案"], ["completed", "cancelled", "cancelled"],
+  ["the completed one", ["整理文案"], [], ["completed", "cancelled", "cancelled"],
     "已停止继续处理：\n执行者 1「整理文案」已完成\n执行者 2「核对价格」已停止\n执行者 3「准备问答」已停止\n已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"],
-  ["none completed", [], ["cancelled", "cancelled", "cancelled"],
+  ["none completed", [], [], ["cancelled", "cancelled", "cancelled"],
     "已停止继续处理：\n执行者 1「整理文案」已停止\n执行者 2「核对价格」已停止\n执行者 3「准备问答」已停止\n已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"],
-] as const)("cancels every unfinished Assignment of a request and names %s", async (_case, completes, statuses, report) => {
+  // The failed Assignment keeps its failure: the report must not call it stopped.
+  ["one that failed before the cancel", [], ["核对价格"], ["cancelled", "failed", "cancelled"],
+    "已停止继续处理：\n执行者 1「整理文案」已停止\n执行者 2「核对价格」未能完成\n执行者 3「准备问答」已停止\n已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"],
+] as const)("cancels every unfinished Assignment of a request and names %s", async (_case, completes, fails, statuses, report) => {
   const stopped: string[] = [];
   const executor: DispatchExecutor = { run: (_job, assignment, signal) => (completes as readonly string[]).includes(assignment.title)
     ? Promise.resolve({ status: "completed", message: "文案完成" })
+    : (fails as readonly string[]).includes(assignment.title) ? Promise.resolve({ status: "failed", message: "价格页无法访问" })
     : new Promise((resolve) => signal.addEventListener("abort", () => { stopped.push(assignment.title); resolve({ status: "cancelled", message: "已取消" }); })), close: () => {} };
   const reports: Reports[] = [];
   const deliveries: Array<{ sender: string; message: string; id: string }> = [];
   const dispatch = dispatchWith(directory(), dividingLeader(three, reports), executor, deliveries, { completedWork: "已确认完成 1 次本地文件修改。" });
   await dispatch.start();
   dispatch.admit(event("one", "alice"));
-  const running = statuses.map((status) => status === "completed" ? "completed" : "running");
+  const running = statuses.map((status) => status === "cancelled" ? "running" : status);
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(running), { timeout: 2000, interval: 10 });
+  const failurePosts = (fails as readonly string[]).map((title) => `执行者 2（能力档 2）的分工「${title}」未能完成：执行者报告无法完成。其余分工继续处理。`);
+  await vi.waitFor(() => expect(messages(deliveries)).toEqual([startThree, ...failurePosts]), { timeout: 2000, interval: 10 });
   dispatch.admit(event("two", "cancel:one"));
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(stopped).toEqual(three.assignments.map(({ title }) => title).filter((title) => !(completes as readonly string[]).includes(title)));
-  expect(messages(deliveries)).toEqual([startThree, report]);
+  expect(stopped).toEqual(three.assignments.map(({ title }) => title).filter((title) => !([...completes, ...fails] as readonly string[]).includes(title)));
+  expect(messages(deliveries)).toEqual([startThree, ...failurePosts, report]);
   expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(statuses);
   expect(reports).toEqual([]);
 });
