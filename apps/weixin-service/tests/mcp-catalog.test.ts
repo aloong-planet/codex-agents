@@ -400,6 +400,8 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     const own = path.join(home, "Library", "Caches", "codex-weixin", "mcp", "npxbox");
     expect(JSON.parse((await catalog.call("mcp__npxbox__npm_settings", {})).text)).toEqual({ cache: path.join(own, "npm"), userconfig: path.join(own, "npmrc") });
     expect(fs.readdirSync(path.join(own, "npm")).length).toBeGreaterThan(0);
+    expect(fs.statSync(own).mode & 0o777).toBe(0o700);
+    expect(fs.readFileSync(path.join(own, "npmrc"), "utf8")).toBe("");
     expect(fs.existsSync(ownerCache)).toBe(false);
 
     await catalog.remove("npxbox", actor);
