@@ -433,7 +433,8 @@ it.each([
   ["an unavailable model", { kind: "error", error: new Error("dispatch_model_unavailable") }, "运行环境不可用"],
   ["an unbound group", { kind: "error", error: new Error("dispatch_group_unbound") }, "运行环境不可用"],
   ["a changed authorization", { kind: "error", error: new Error("dispatch_authorization_changed") }, "权限或可用上下文发生变化"],
-  ["an invalid result report", { kind: "error", error: new Error("main_reply_invalid") }, "执行者未返回有效的结果报告"],
+  ["a result report failing its schema", { kind: "error", error: new Error("main_reply_invalid_schema") }, "执行者未返回有效的结果报告"],
+  ["an invalid result record", { kind: "error", error: new Error("main_reply_record_invalid") }, "执行者未返回有效的结果报告"],
   ["a stop of the service", { kind: "shutdown" }, "服务中断"],
   ["another error", { kind: "error", error: new Error("executor_connection_closed") }, "执行连接中断或处理出错"],
 ] satisfies Array<[string, AssignmentFailure, string]>)("names the host-known cause of %s", (_case, failure, cause) => {
@@ -509,9 +510,14 @@ it("keeps the others running when one fails, posts the failure, ends partially f
     { id: "one:assignment:0:3", executor: "执行者 3", attempt: 0 }]);
 });
 
-it("cancels every unfinished Assignment of a request and names the completed one", async () => {
+it.each([
+  ["the completed one", ["整理文案"], ["completed", "cancelled", "cancelled"],
+    "已停止继续处理。已完成：执行者 1「整理文案」；已停止：执行者 2「核对价格」、执行者 3「准备问答」。已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"],
+  ["none completed", [], ["cancelled", "cancelled", "cancelled"],
+    "已停止继续处理。已停止：执行者 1「整理文案」、执行者 2「核对价格」、执行者 3「准备问答」。已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"],
+] as const)("cancels every unfinished Assignment of a request and names %s", async (_case, completes, statuses, report) => {
   const stopped: string[] = [];
-  const executor: DispatchExecutor = { run: (_job, assignment, signal) => assignment.title === "整理文案"
+  const executor: DispatchExecutor = { run: (_job, assignment, signal) => (completes as readonly string[]).includes(assignment.title)
     ? Promise.resolve({ status: "completed", message: "文案完成" })
     : new Promise((resolve) => signal.addEventListener("abort", () => { stopped.push(assignment.title); resolve({ status: "cancelled", message: "已取消" }); })), close: () => {} };
   const reports: Reports[] = [];
@@ -519,14 +525,14 @@ it("cancels every unfinished Assignment of a request and names the completed one
   const dispatch = dispatchWith(directory(), dividingLeader(three, reports), executor, deliveries, { completedWork: "已确认完成 1 次本地文件修改。" });
   await dispatch.start();
   dispatch.admit(event("one", "alice"));
-  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "running", "running"]), { timeout: 2000, interval: 10 });
+  const running = statuses.map((status) => status === "completed" ? "completed" : "running");
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(running), { timeout: 2000, interval: 10 });
   dispatch.admit(event("two", "cancel:one"));
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(stopped).toEqual(["核对价格", "准备问答"]);
-  expect(messages(deliveries)).toEqual([startThree,
-    "已停止继续处理。已完成：执行者 1「整理文案」；已停止：执行者 2「核对价格」、执行者 3「准备问答」。已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。"]);
-  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "cancelled", "cancelled"]);
+  expect(stopped).toEqual(three.assignments.map(({ title }) => title).filter((title) => !(completes as readonly string[]).includes(title)));
+  expect(messages(deliveries)).toEqual([startThree, report]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(statuses);
   expect(reports).toEqual([]);
 });
 
@@ -690,4 +696,55 @@ it("asks about only the new Assignments when a supplement takes the request over
   // Trimming counts the existing Assignments first, so only the fifth is added.
   expect(runs).toEqual(["分工1:0", "分工2:0", "分工3:0", "分工4:0", "分工5:1"]);
   expect(messages(deliveries).filter((message) => message.startsWith("我安排")).at(-1)).toBe("我安排执行者 5（能力档 1）处理：分工5。完成后会在本群汇报。");
+});
+
+// A pending choice of one of several Assignments (agent-dispatch failure mode "One of several Assignments raises a pending choice
+// while the others run"): it goes out at once, and only its own resolution ends it.
+function choosing(answer: DispatchExecutionResult["status"]) {
+  return async (inbound: InboundContent): Promise<DispatchPendingResult> => inbound.text === "choose:1"
+    ? { handled: true, senderAccountId: "cli_alice", runRef: "run-1", result: { status: answer, message: answer === "cancelled" ? "已取消这次选择。" : "已发送所选文件。" } }
+    : { handled: false };
+}
+const two = { assignments: three.assignments.slice(0, 2), decisions: [] as string[] };
+const startTwo = "我安排执行者 1（能力档 1）处理：整理文案；执行者 2（能力档 2）处理：核对价格。完成后会在本群汇报。";
+
+it("posts one Assignment's pending choice while another runs, then closes the request once the choice is resolved", async () => {
+  const choicePosted = deferred();
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    if (assignment.title === "整理文案") return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    // The second Assignment ends only after the first one's choice was posted, and starts a run of its own.
+    await choicePosted.promise;
+    return { status: "completed", message: "价格已核对。", runRef: "run-2" };
+  }, close: () => {} };
+  const reports: Reports[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(two, reports), executor, deliveries,
+    { pending: choosing("completed"), delivered: (message) => { if (message === "请选择要发送的文件。") choicePosted.resolve(); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["waiting", "completed"]);
+  expect(reports).toEqual([]);
+  dispatch.admit(event("two", "choose:1"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  expect(reports[0]?.map(({ executor, status, result }) => ({ executor, status, result }))).toEqual([
+    { executor: "执行者 1", status: "completed", result: "已发送所选文件。" }, { executor: "执行者 2", status: "completed", result: "价格已核对。" }]);
+  expect(messages(deliveries).at(-1)).toBe("已收尾。");
+});
+
+it("ends only the Assignment whose choice the requester cancels, and closes the request with the others", async () => {
+  const executor: DispatchExecutor = { run: async (_job, assignment) => assignment.title === "整理文案"
+    ? { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" } : { status: "completed", message: "价格已核对。", runRef: "run-2" }, close: () => {} };
+  const reports: Reports[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(two, reports), executor, deliveries, { pending: choosing("cancelled") });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "choose:1"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "completed"]);
+  expect(messages(deliveries).slice(2)).toEqual(["已取消这次选择。", "已收尾。"]);
+  expect(reports[0]?.map(({ status }) => status)).toEqual(["cancelled", "completed"]);
 });

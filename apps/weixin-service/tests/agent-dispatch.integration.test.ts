@@ -34,8 +34,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
-// - Plans name only their own team's presets until cross-team work exists, so the limit of two teams and the trim that keeps
-//   the first other team are covered at the unit level only; ticket 08 adds the real-main path.
+// - Plans name only their own team's presets until cross-team work exists, so the trim that keeps the first other team is
+//   covered at the unit level only, and the limit of two teams by no case yet; ticket 08 adds the real-main path.
 // - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
 //   the fixture injects both.
 
@@ -758,7 +758,7 @@ it("keeps the others when one fails, and reruns only it on retry", async () => {
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 
-it("cancels three running Assignments and reports the completed one's effects", async () => {
+it("cancels the unfinished Assignments of a request and reports the completed one's effects", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-cancel-three-")), business = mkdtempSync(join(tmpdir(), "dispatch-cancel-three-files-"));
   let running: Running | undefined;
   try {
@@ -766,14 +766,16 @@ it("cancels three running Assignments and reports the completed one's effects", 
     await allowNotes(running);
     await running.post("/api/fixture/feishu/inbound", groupMessage("om_cancel_three", "写周报，核对数据，再整理要点", decision("jack", "周报、核对和要点"), {
       leaderPlan: divided(["写周报", "核对数据", "整理要点"]),
-      executorTurns: { 写周报: { modelToolCalls: [writeFile("weekly.txt")], modelReply: executorReply("周报已保存。", "周报") },
+      // The completed Assignment writes and sends its file, so its evidence is found by its own workflow key.
+      executorTurns: { 写周报: { modelToolCalls: writeAndSend("weekly.txt") },
         核对数据: { modelHold: true }, 整理要点: { modelHold: true } } }));
     const busy = await running.until((state) => state.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status).join() === "completed,running,running" &&
       state.fixtureModelRequests?.length === 3);
     await running.post("/api/fixture/feishu/inbound", groupMessage("om_cancel_three_stop", "都停下", control(busy.agentDispatch!.jobs[0]!.id, "cancel")));
     const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && jackTexts(state).length === 2);
     console.log(JSON.stringify({ kind: "dispatch_cancel_three", commands: ["写周报，核对数据，再整理要点", "都停下"], jobs: cancelled.agentDispatch, outboxes: cancelled.agentFixtureOutboxes }));
-    expect(jackTexts(cancelled)[1]).toBe("已停止继续处理。已完成：执行者 1「写周报」；已停止：执行者 2「核对数据」、执行者 3「整理要点」。已确认完成 1 次本地文件修改。已经完成的操作不会自动撤销。");
+    expect(jackTexts(cancelled)[1]).toBe("已停止继续处理。已完成：执行者 1「写周报」；已停止：执行者 2「核对数据」、执行者 3「整理要点」。" +
+      "已确认完成 1 次本地文件修改。已确认提交 1 个文件或媒体附件。已经完成的操作不会自动撤销。");
     expect(cancelled.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "cancelled", "cancelled"]);
     expect(readFileSync(join(business, "demo-vault", "weekly.txt"), "utf8")).toBe("内容 weekly.txt");
     expect(cancelled.fixtureModelRequests).toHaveLength(3);

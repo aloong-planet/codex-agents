@@ -9,8 +9,8 @@ import { RuntimePool } from "../src/runtime-pool.js";
 import { conversation } from "./support/dispatch-runtime.js";
 
 // Plan validation is a pure rule. The Team Leader wrapper is the production class with only the external runtime response
-// substituted, as in agent-dispatch-classifier.test.ts (agent-dispatch Testing Decisions). Its plan JSON has no real model
-// sample yet; ticket 21's live run checks real output.
+// substituted, as in agent-dispatch-classifier.test.ts (agent-dispatch Testing Decisions). Its plan JSON and supplement answer
+// JSON have no real model sample yet; ticket 21's live run checks real output.
 const bill = { executorProfiles: [{ id: "trip" }, { id: "meal" }] };
 const plan = (profileId: string, count = 1) => ({ assignments: Array.from({ length: count }, (_, index) => ({ profileId, title: `规划行程 ${index + 1}`, brief: "南京一日游，预算 300 元" })),
   decisions: [] as string[] });
@@ -21,6 +21,14 @@ describe("Team Leader plan validation", () => {
       { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: [" 先定行程再订餐 ", "预算按 300 元控制"] }, bill))
       .toEqual({ assignments: [{ profileId: "meal", title: "采购清单", brief: "三人份晚餐" }, { profileId: "trip", title: "规划行程", brief: "南京一日游" },
         { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: ["先定行程再订餐", "预算按 300 元控制"] });
+  });
+
+  it.each([
+    ["twenty Assignments", plan("trip", 20), 20, 0],
+    ["five decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五"] }, 1, 5],
+  ])("accepts a plan at its largest: %s", (_case, value, assignments, decisions) => {
+    const parsed = parseLeaderPlan(value, bill);
+    expect([parsed.assignments.length, parsed.decisions.length]).toEqual([assignments, decisions]);
   });
 
   it.each([
