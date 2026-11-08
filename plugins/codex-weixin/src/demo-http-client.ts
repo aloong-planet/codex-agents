@@ -1,3 +1,5 @@
+import type { PluginCredentials } from "./console-control-client.js";
+
 export type ModelSafeDemoState = {
   phase: string;
   notice: string;
@@ -150,16 +152,23 @@ function parsePublicState(value: unknown): DemoStateResult {
 
 export class DemoHttpClient {
   private readonly baseUrl: string;
+  private credential: Promise<string> | undefined;
 
+  /**
+   * `credentials` supplies the console cookie (`name=value`) for the local service, shared by every plugin
+   * process. A 401 means the cookie was revoked or replaced, so the client asks for a different one once and
+   * retries.
+   */
   constructor(
     baseUrl = "http://127.0.0.1:4317",
     private readonly fetchFn: FetchLike = fetch,
+    private readonly credentials?: PluginCredentials,
   ) {
     this.baseUrl = requireLoopbackBaseUrl(baseUrl);
   }
 
   async getState(): Promise<DemoStateResult> {
-    const response = await this.fetchFn(`${this.baseUrl}/api/state`, {
+    const response = await this.send(`${this.baseUrl}/api/state`, {
       headers: { accept: "application/json" },
     });
     if (!response.ok) throw new Error(`微信 Demo 状态请求失败（HTTP ${response.status}）`);
@@ -210,8 +219,28 @@ export class DemoHttpClient {
     return this.post("/api/codex/permissions/configure", { mode, rootIds, confirmed });
   }
 
+  private async send(url: string, init: RequestInit & { headers: Record<string, string> }): Promise<Response> {
+    const credentials = this.credentials;
+    if (!credentials) return this.fetchFn(url, init);
+    let pending = this.credential ?? credentials.current();
+    for (let attempt = 0; ; attempt += 1) {
+      this.credential = pending;
+      let cookie: string;
+      try {
+        cookie = await pending;
+      } catch (error) {
+        if (this.credential === pending) this.credential = undefined;
+        throw error;
+      }
+      const response = await this.fetchFn(url, { ...init, headers: { ...init.headers, cookie } });
+      if (response.status !== 401 || attempt > 0) return response;
+      // Concurrent requests that saw the same refusal share one renewal.
+      pending = this.credential === pending ? credentials.renew(cookie) : this.credential ?? credentials.renew(cookie);
+    }
+  }
+
   private async post(pathname: string, body: Record<string, unknown>): Promise<DemoStateResult> {
-    const response = await this.fetchFn(`${this.baseUrl}${pathname}`, {
+    const response = await this.send(`${this.baseUrl}${pathname}`, {
       method: "POST",
       headers: {
         accept: "application/json",

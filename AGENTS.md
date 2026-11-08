@@ -25,6 +25,8 @@ Cross-skill project facts are declared in the repository-root `capabilities.toml
 
 Group invocation, memory, model recovery, file access, pending continuation and scheduled delivery must preserve the conversation/requester boundaries in [ADR-0023](docs/adr/0023-isolate-feishu-group-authority.md).
 
+Every page and API of the local service must stay behind owner authorization and the local-Host rule in [agent-console::CON-001](docs/specs/agent-console.md); the public event ingress never routes to it.
+
 Deployments and file-tool acceptance must use the Node version pinned in CI; changing that version requires real permission-worker write and recovery validation, as described in [agent dispatch runtime decisions](docs/specs/agent-dispatch.md#implementation-decisions).
 
 Financial state, attachments, execution history and reply destinations must remain owner-bound and separate from general personal memory and group dispatch under [ADR-0025](docs/adr/0025-isolate-private-financial-authority.md).

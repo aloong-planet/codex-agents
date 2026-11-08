@@ -14,4 +14,5 @@
 | [Daily AI news](daily-ai-news.md) | Select supported current news, reject mismatched article bodies, reuse complete summaries, disclose shortages and recover eligible reports in order independently of archiving. |
 | [工作流模块权限](workflow-module-permissions.md) | 在本地设置页按模块和目录保存读写权限，文件执行始终禁止。 |
 | [微信工作流与运行面板](workflow-runs.md) | 用自然语言查找、读取、修改或发送已授权文件，并查看持久外发与待选结果。 |
+| [Agent console](agent-console.md) | Open the local service's pages only in browsers authorized with a one-time login link from this computer; list and revoke them from the command line. |
 | [Penny private bookkeeping](finance-assistant.md) | Record personal/business cash events privately, confirm screenshot previews and query exact CNY totals. |

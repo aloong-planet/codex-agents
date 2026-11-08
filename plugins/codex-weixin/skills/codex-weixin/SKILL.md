@@ -9,7 +9,7 @@ description: "Open and operate the local personal-Weixin direct-channel panel. U
 
 ## 工作流
 
-1. 先调用 `show_weixin_panel`。后台离线时准确报告 `127.0.0.1:4317` 不可达，不读取私有状态文件。
+1. 先调用 `show_weixin_panel`。后台离线或插件无法取得本机授权时准确报告 `127.0.0.1:4317` 不可用，不读取私有状态文件。
 2. 只有用户要求重新连接时，才让用户点击“生成真实二维码”。二维码、扫码和手机端授权都不由模型代办。
 3. 连接后仍需用户从微信给 bot 发一条入站消息，等待面板自动同步目标与新的 context token。
 4. 目标仅显示服务返回的候选项；别名是用户本地标签，不宣称是微信昵称或微信号。
