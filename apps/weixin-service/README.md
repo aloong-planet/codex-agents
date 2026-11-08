@@ -45,11 +45,15 @@ The link is valid for 2 minutes and can be used once. It sets an HttpOnly, SameS
 
 The command reaches the running service through `console-control.json` and an owner-only Unix socket in the state directory; the token in that file changes on every start. Authorizations are kept in `console-browsers.json`, which stores only a hash of each cookie. The Codex plugin authorizes through the same channel and appears as one entry, 「Codex 插件」: all plugin processes share one credential kept in `console-plugin-credential.json` (`0600`) in the state directory. Revoking that entry ends every plugin process's access; they authorize again as one new entry.
 
-Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command` or `codex-plugin`), the event and the browser's ID and label; it never contains a cookie, link token or hash. Read it with standard tools, for example:
+Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command` or `codex-plugin`), the event and the browser's ID and label; it never contains a cookie, link token or hash. Saved MCP changes are appended to the same file with `by: "browser"` and the authorized browser's ID and label (see MCP management below). Read it with standard tools, for example:
 
 ```bash
 tail -n 20 "$HOME/Library/Application Support/weixin-ilink-direct-demo/console-audit.jsonl"
 ```
+
+## MCP management
+
+The console page `/console/mcp` (MCP 管理) registers local MCP programs. The service starts every enabled program when it starts, holds the connections and stops them when it stops; agents receive no MCP tools yet. The configuration, disabled tools and pinned tool definitions are kept in `mcp-catalog.json`, environment values in `mcp-secrets.json`, both `0600` in the state directory; a sandboxed program's rules are written to `mcp-sandbox/<name>.json` there, and it gets its own npm cache under `~/Library/Caches/codex-weixin/mcp/<name>` (`0700`), removed when the server is deleted. Every saved change is appended to `console-audit.jsonl` without environment values.
 
 ## Penny private bookkeeping
 
