@@ -9,13 +9,21 @@ import { AppServerTurnFailure } from "./app-server-turn-driver.js";
 import type { WorkflowHandoffReceipt } from "./workflow-tool-host.js";
 import type { DispatchAgent, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
 import type { RuntimePool } from "./runtime-pool.js";
-import { COORDINATOR_ID, INITIAL_EXECUTOR_INSTRUCTIONS } from "./team-registry.js";
+import { COORDINATOR_ID } from "./team-registry.js";
+import type { ResolvedAgentProfile } from "./agent-profile.js";
+import type { DynamicToolHost } from "./dynamic-tool-host.js";
 
 export type DispatchRuntime = { agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">; cwd: string };
+/** The shared tool host as one Executor profile sees it, with the contract hash of what it offers. */
+export type ExecutorToolHost = DynamicToolHost & { contractHash(): string };
+/** A job's Executor profile as resolved for its definitions version. */
+export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost }>;
 
 /** Default limits of agent-dispatch::QR-001: running runtimes, idle or busy, and the idle time before release. */
 export const DISPATCH_RUNTIME_LIMIT = 16;
 export const DISPATCH_RUNTIME_IDLE_MS = 5 * 60_000;
+/** Domain-neutral source rules every Executor turn carries; domain rules come only from the Agent Profile. */
+const SHARED_EXECUTOR_RULES = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。交付文件前复核其事实与来源是否相符。";
 
 /** Group authority stays canonical; only the isolated session and outbound application vary by role. */
 export class CodexDispatchExecutor implements DispatchExecutor {
@@ -24,13 +32,15 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   constructor(databasePath: string, private readonly options: {
     agents: readonly DispatchAgent[];
     runtimes: RuntimePool<DispatchRuntime>;
-    createRuntime(job: DispatchJob, scope: string): DispatchRuntime;
+    createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost): DispatchRuntime;
     tools: ConversationTurnToolControl;
+    /** The job's Executor profile as resolved for its definitions version; the only source of its instructions, tools and memory scope. */
+    profile(job: DispatchJob): ExecutorProfileView;
     contextRevision(job: DispatchJob): string;
     authorized(job: DispatchJob): boolean;
     model(job: DispatchJob): CodexTurnModel;
-    memory(job: DispatchJob): string;
-    capture(job: DispatchJob, reply: string): Promise<void>;
+    memory(job: DispatchJob, scope: ExecutorProfileView["memoryScope"]): string;
+    capture(job: DispatchJob, scope: ExecutorProfileView["memoryScope"], reply: string): Promise<void>;
     existingResult(job: DispatchJob): DispatchExecutionResult | undefined;
     prepareThread?(job: DispatchJob, threadId: string): void;
   }) {
@@ -46,12 +56,13 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     if (!eligible()) throw new Error("dispatch_authorization_changed");
     const existing = this.options.existingResult(job);
     if (existing) return existing;
-    const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, this.options.tools.contractHash?.()])).digest("hex");
-    return this.options.runtimes.use(scope, () => this.options.createRuntime(job, `dispatch-${scope}`),
-      (runtime) => this.runOn(runtime, job, role, scope, eligible, signal), { signal });
+    const profile = this.options.profile(job);
+    const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash()])).digest("hex");
+    return this.options.runtimes.use(scope, () => this.options.createRuntime(job, `dispatch-${scope}`, profile.tools),
+      (runtime) => this.runOn(runtime, job, role, profile, scope, eligible, signal), { signal });
   }
 
-  private async runOn(runtime: DispatchRuntime, job: DispatchJob, role: DispatchAgent, scope: string, eligible: () => boolean,
+  private async runOn(runtime: DispatchRuntime, job: DispatchJob, role: DispatchAgent, profile: ExecutorProfileView, scope: string, eligible: () => boolean,
     signal: AbortSignal): Promise<DispatchExecutionResult> {
     const previous = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
     const threadId = await runtime.agent.startOrResume(previous ? String(previous.thread_id) : undefined, runtime.cwd, []);
@@ -64,9 +75,9 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     let result: DispatchExecutionResult;
     try {
       const turn = await runtime.agent.runTurn(threadId, new ChannelTurnAdapter(threadId, event, {
-        accountMemory: this.options.memory(job), outboundRoots: [], channelLabel: "飞书", outboundDelivery: true,
+        accountMemory: this.options.memory(job, profile.memoryScope), outboundRoots: [], channelLabel: "飞书", outboundDelivery: true,
         workflowTools: this.options.tools, isClosing: () => !eligible(), recoveryAllowed: eligible,
-        roleInstructions: `你是 ${role.name}。你的职责：${role.responsibility}。你独立完成本次分派的事务：${job.summary}。不要冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` + INITIAL_EXECUTOR_INSTRUCTIONS,
+        roleInstructions: `你是 ${role.name}。你的职责：${role.responsibility}。你独立完成本次分派的事务：${job.summary}。不要冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` + SHARED_EXECUTOR_RULES + profile.instructions,
       }), undefined, (progress) => { if (signal.aborted && progress.kind === "turn_accepted") interrupt(); },
       { ...this.options.model(job), outputSchema: MAIN_REPLY_OUTPUT_SCHEMA });
       if (turn.owner === "workflow_owned") result = this.receipt(turn.receipt);
@@ -80,7 +91,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
       result = this.receipt(error.ownership.receipt);
     } finally { signal.removeEventListener("abort", interrupt); }
     // A memory failure must not undo a completed business result or cause its effects to repeat.
-    if (!signal.aborted) await this.options.capture(job, result.message).catch(() => {});
+    if (!signal.aborted) await this.options.capture(job, profile.memoryScope, result.message).catch(() => {});
     return result;
   }
   async close(): Promise<void> {

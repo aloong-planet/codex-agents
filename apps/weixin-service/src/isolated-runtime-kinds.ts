@@ -10,7 +10,7 @@ type ConversationKind = {
   directory: string;
   /** A fixed scope, or how an instance (group target, dispatch scope) names its own. */
   scope: string | ((instance: string) => string);
-  /** Whether the host's workflow tools are attached to its threads. */
+  /** Whether its threads get host tools: the workflow tools, or a narrower view the caller passes (a dispatch agent's profile). */
   hostTools: boolean;
   /** Whether the caller may make one inbound-media directory readable. */
   readsMedia: boolean;
