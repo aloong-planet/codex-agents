@@ -1,4 +1,5 @@
-import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "./isolated-model-runtime.js";
+import { spawnIsolatedAppServer } from "./isolated-model-runtime.js";
+import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, ISOLATED_RUNTIME_KINDS } from "./isolated-runtime-kinds.js";
 import { loadFinanceConfiguration } from "./finance-config.js";
 import { FinanceService } from "./finance-service.js";
 import { CodexFinanceInterpreter, parseFinanceCommand, type FinanceInterpreter } from "./finance-interpreter.js";
@@ -580,7 +581,8 @@ const notificationChannel = channelConfiguration ? new NotificationChannelRouter
   ...(weixinConfiguration && weixinNotifications ? [{ destination: { channel: "weixin" as const, ...weixinConfiguration.owner.conversationAddress() }, channel: weixinNotifications }] : []),
   ...(feishuConfiguration && feishuChannel ? feishuConfiguration.owner.conversationAddresses().map((address) => ({ destination: { channel: "feishu" as const, ...address }, channel: feishuChannel })) : []),
 ]) : weixinNotifications!;
-const groupRuntimeRoot = path.join(path.dirname(privateStatePath), "group-model-runtimes");
+const stateDirectory = path.dirname(privateStatePath);
+const groupRuntimeRoot = path.join(stateDirectory, "group-model-runtimes");
 const scheduledTasks = new ScheduledTasks({
   historyRetention: {
     ...(process.env.SCHEDULED_HISTORY_DETAIL_DAYS !== undefined ? { maxAgeMs: Number(process.env.SCHEDULED_HISTORY_DETAIL_DAYS) * 86_400_000 } : {}),
@@ -594,7 +596,7 @@ const scheduledTasks = new ScheduledTasks({
       if (!appServerCapabilities.namedPermissionsSupported || !feishuConfiguration?.owner.ownsAddress(destination.accountId, destination.target)) {
         throw new Error("research_runtime_unavailable");
       }
-      return createIsolatedModelRuntime({ root: groupRuntimeRoot, scope: `research-${destination.target}`,
+      return createIsolatedRuntime("research", { stateDirectory, instance: destination.target,
         ...(fixtureMode ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
     },
   }),
@@ -663,19 +665,23 @@ const codexAgent: CodexAgent = new CodexConversation(
     onConnectionFailure: (error) => diagnostics?.checkpoint("app_server.connection", { status: "closed", errorCode: error.message }),
   },
 );
-const isolatedConversation = (scope: string, options: ConstructorParameters<typeof CodexConversation>[5], readableRoots: string[] = [], main = false) => {
+const isolatedConversation = (kind: IsolatedConversationKind, placement: { instance?: string; mediaRoot?: string; agentId?: string } = {}) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-  const runtime = createIsolatedModelRuntime({ root: groupRuntimeRoot, scope, readableRoots,
+  const { hostTools } = ISOLATED_RUNTIME_KINDS[kind];
+  const runtime = createIsolatedRuntime(kind, { stateDirectory,
+    ...(placement.instance !== undefined ? { instance: placement.instance } : {}),
+    ...(placement.mediaRoot !== undefined ? { mediaRoot: placement.mediaRoot } : {}),
     ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
   const agent = new CodexConversation(
-    () => fixtureMode && !fixtureLiveMainModel && main
+    () => fixtureMode && !fixtureLiveMainModel && hostTools
       ? new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           fixtureModelRequests.push(request); if (fixtureModelRequests.length > 20) fixtureModelRequests.shift();
         })
-      : spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
-    600_000, main ? workflowToolHost : undefined, undefined, 300_000,
-    { ...options, permissionProfile: runtime.permissionProfile });
+      : spawnIsolatedAppServer(codexExecutable, runtime),
+    600_000, hostTools ? workflowToolHost : undefined, undefined, 300_000,
+    isolatedConversationOptions(kind, runtime, { structuredOutputSupported: appServerCapabilities.structuredOutputSupported,
+      ...(placement.agentId !== undefined ? { agentId: placement.agentId } : {}) }));
   return { agent, cwd: runtime.cwd, runtimeWorkspaceRoots: [] };
 };
 const createGroupRuntime = (accountId: string, target: string) => {
@@ -683,8 +689,7 @@ const createGroupRuntime = (accountId: string, target: string) => {
   if (!chatId || !target.startsWith("feishu.group.")) throw new Error("group_runtime_identity_unbound");
   const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
   fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
-  return isolatedConversation(target, { structuredOutputSupported: appServerCapabilities.structuredOutputSupported,
-    automaticRecovery: true, serviceName: "feishu_group", webSearch: "live" }, [mediaRoot], true);
+  return isolatedConversation("feishuGroup", { instance: target, mediaRoot });
 };
 let groupPendingResponseAgent: CodexConversation | undefined;
 let groupPendingResponseRouter: PendingResponseRouter | undefined;
@@ -692,7 +697,7 @@ if (feishuConfiguration?.owner.hasGroups) {
   if (fixtureMode && !fixtureLiveWorkflowAgents) groupPendingResponseRouter = new FixturePendingResponseRouter();
   else {
     try {
-      const runtime = isolatedConversation("pending-router", { serviceName: "feishu_group_pending", webSearch: "disabled", runtimeProfile: PENDING_RESPONSE_RUNTIME_PROFILE });
+      const runtime = isolatedConversation("pendingRouter");
       groupPendingResponseAgent = runtime.agent;
       groupPendingResponseRouter = new CodexPendingResponseRouter(runtime.agent, runtime.cwd);
     } catch { process.stderr.write("group_pending_runtime_unavailable\n"); }
@@ -731,7 +736,7 @@ if (feishuConfiguration?.owner.hasGroups) {
   if (fixtureMode) groupMemoryCurator = { curate: async () => ({ status: "noop" }), close: () => {} };
   else {
     try {
-      const runtime = isolatedConversation("memory-curator", { serviceName: "feishu_group_memory", webSearch: "disabled", runtimeProfile: MEMORY_CURATOR_RUNTIME_PROFILE });
+      const runtime = isolatedConversation("groupMemoryCurator");
       groupMemoryCurator = new CodexAccountMemoryCurator(runtime.agent, accountMemoryTools, runtime.cwd);
     } catch { process.stderr.write("group_memory_runtime_unavailable\n"); }
   }
@@ -825,7 +830,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
     : (() => {
       if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
+      const create = () => isolatedConversation("dispatchCoordinator");
       return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model);
     })();
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
@@ -848,7 +853,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       if (!chatId) throw new Error("dispatch_group_unbound");
       const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
       fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
-      return isolatedConversation(scope, { serviceName: `feishu_agent_${job.agentId}`, webSearch: "live", structuredOutputSupported: appServerCapabilities.structuredOutputSupported, automaticRecovery: true }, [mediaRoot], true);
+      return isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId: job.agentId });
     },
     prepareThread: (job, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId)); },
     capture: async (job, reply) => {
@@ -963,11 +968,8 @@ if (pennyConfigured) {
       interpreter = { interpret: async (input) => parseFinanceCommand({ command: commands[input.text] }, input), close: async () => {} };
     } else {
       if (!appServerCapabilities.namedPermissionsSupported || !appServerCapabilities.structuredOutputSupported) throw new Error("penny_runtime_unavailable");
-      const runtime = createIsolatedModelRuntime({ root: path.join(root, "model-runtimes"), scope: "penny", readableRoots: [mediaRoot] });
-      const conversation = new CodexConversation(() => spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
-        600_000, undefined, undefined, 300_000, { serviceName: "penny", permissionProfile: runtime.permissionProfile,
-          structuredOutputSupported: true, automaticRecovery: true, webSearch: "disabled" });
-      interpreter = new CodexFinanceInterpreter(conversation, runtime.cwd, () => {
+      const { agent: conversation, cwd } = isolatedConversation("penny", { mediaRoot });
+      interpreter = new CodexFinanceInterpreter(conversation, cwd, () => {
         const accountId = channelConfiguration?.entries[0]?.owner.conversationAddress().accountId;
         const selected = codexService.getPublicState().models?.accounts.find((account) => account.accountId === accountId)?.resolved;
         if (!selected?.available) throw new Error("penny_model_unavailable");
