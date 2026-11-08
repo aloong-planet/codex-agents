@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CodexConversation } from "../src/codex-conversation.js";
 import { createIsolatedModelRuntime, installDirectModelCatalog, type IsolatedModelRuntime, spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
 import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, type IsolatedRuntimeKind } from "../src/isolated-runtime-kinds.js";
@@ -56,7 +56,7 @@ it("creates separate model homes without importing host settings, skills or unre
 });
 
 const scratch: string[] = [];
-afterEach(() => { for (const directory of scratch.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); for (const directory of scratch.splice(0)) fs.rmSync(directory, { recursive: true, force: true }); });
 const scratchDirectory = () => { const directory = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-tools-test-")); scratch.push(directory); return directory; };
 const syntheticRuntime = (root: string) => createIsolatedModelRuntime({ root: path.join(root, "runtimes"), scope: "alpha", authHome: path.join(root, "no-auth"),
   environment: { PATH: "/usr/bin:/bin", HOME: path.join(root, "host-home"), CODEX_HOME: path.join(root, "host-codex"), OPENAI_API_KEY: "sk-host-sentinel" } });
@@ -94,6 +94,10 @@ it("installs a direct-mode copy of the binary's bundled catalog in the runtime's
   const root = scratchDirectory();
   const runtime = syntheticRuntime(root);
   const codex = fakeCodex(root, `process.stdout.write(${JSON.stringify(JSON.stringify(bundledCatalog))});`);
+  // The service's own environment, which a dump without its own environment would inherit, points at the owner's homes and key.
+  vi.stubEnv("HOME", path.join(root, "owner-home"));
+  vi.stubEnv("CODEX_HOME", path.join(root, "owner-codex-home"));
+  vi.stubEnv("OPENAI_API_KEY", "sk-owner-sentinel");
   installDirectModelCatalog(runtime, codex.file);
   const installed = path.join(runtime.env.CODEX_HOME!, "direct-model-catalog.json");
   expect(fs.statSync(installed).mode & 0o777).toBe(0o600);
@@ -106,9 +110,9 @@ it("installs a direct-mode copy of the binary's bundled catalog in the runtime's
   const [invocation, ...others] = codex.invocations();
   expect(others).toEqual([]);
   expect(invocation!.args).toEqual(["debug", "models", "--bundled"]);
-  // The derivation reads neither the owner's Codex home nor their credentials.
-  expect(invocation!.codexHome).not.toBe(path.join(root, "host-codex"));
-  expect(invocation!.home).not.toBe(path.join(root, "host-home"));
+  // The dump runs in a home of its own, so it reads neither the owner's Codex home nor their credentials.
+  expect(invocation!.codexHome).not.toBe(path.join(root, "owner-codex-home"));
+  expect(invocation!.home).not.toBe(path.join(root, "owner-home"));
   expect(invocation!.key).toBeUndefined();
 });
 
