@@ -143,6 +143,7 @@ describe("team registry", () => {
     ["an application without a stored secret", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_7777777777777777" } })), SAM, "team_registry_secret_missing"],
     ["a connection that is not the Coordinator's application", undefined, { appId: "cli_8888888888888888", appSecret: "other" }, "team_registry_roster_unsupported"],
     ["two teams sharing one agent ID", (definitions: TeamDefinitions) => ({ ...definitions, teams: definitions.teams.map((team) => team.id === "jack" ? { ...team, id: "bill" } : team) }), SAM, "team_registry_roster_unsupported"],
+    ["a team using the Coordinator's agent ID", (definitions: TeamDefinitions) => ({ ...definitions, teams: definitions.teams.map((team) => team.id === "jack" ? { ...team, id: "sam" } : team) }), SAM, "team_registry_roster_unsupported"],
   ] as const)("refuses a roster view for %s", (_case, change, connection, code) => {
     const registry = new TeamRegistry(databasePath());
     try {
