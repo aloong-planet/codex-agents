@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import path from "node:path";
 
+import { ConsoleAudit } from "./console-audit.js";
 import { LOGIN_CARD_CONTENT_SECURITY_POLICY, renderLoginCard, type LoginCardNotice } from "./console-login-card.js";
 
 /**
@@ -20,7 +21,6 @@ const COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 const LAST_USED_PERSIST_INTERVAL_MS = 10 * 60 * 1000;
 export const PLUGIN_LABEL = "Codex 插件";
 export const BROWSERS_FILE = "console-browsers.json";
-export const AUDIT_FILE = "console-audit.jsonl";
 
 export type ConsoleActor = "login-link" | "local-command" | "codex-plugin";
 
@@ -34,6 +34,9 @@ export type ConsoleBrowser = {
 
 type StoredBrowser = ConsoleBrowser & { hash: string };
 
+/** What the guard knows about an authorized request; fixture routes in fixture mode carry no browser. */
+export type ConsoleRequestContext = { browser?: ConsoleBrowser };
+export type ConsoleHandler = (req: IncomingMessage, res: ServerResponse, context: ConsoleRequestContext) => void | Promise<void>;
 type Handler = (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
 
 /** A refusal whose message is meant for the owner, such as an unknown browser id. */
@@ -131,6 +134,7 @@ function browserRef(browser: StoredBrowser): { id: string; label: string } {
 export class ConsoleAccess {
   private readonly now: () => number;
   private readonly directory?: string;
+  private readonly audit: ConsoleAudit;
   private browsers: StoredBrowser[] = [];
   private readonly loginLinks = new Map<string, number>();
   private readonly sockets = new Map<string, Set<Socket>>();
@@ -138,9 +142,10 @@ export class ConsoleAccess {
   private lastUsedChanged = false;
 
   /** Without a directory nothing can be authorized; the gate then refuses every protected request. */
-  constructor(options: { directory?: string; now?: () => number } = {}) {
+  constructor(options: { directory?: string; now?: () => number; audit?: ConsoleAudit } = {}) {
     this.now = options.now ?? Date.now;
     if (options.directory !== undefined) this.directory = options.directory;
+    this.audit = options.audit ?? new ConsoleAudit({ ...(options.directory !== undefined ? { directory: options.directory } : {}), now: this.now });
     this.lastPersistAt = this.now();
     this.browsers = this.loadStore();
   }
@@ -171,7 +176,7 @@ export class ConsoleAccess {
     } catch (error) {
       storeError = error;
     }
-    const auditFailed = removed.length > 0 && !this.tryAudit({ by, event: "browser_revoked", browsers: removed.map(browserRef) });
+    const auditFailed = removed.length > 0 && !this.audit.tryAppend({ by, event: "browser_revoked", browsers: removed.map(browserRef) });
     if (storeError) {
       process.stderr.write(`console_browsers_write_failed: ${errorCode(storeError)}\n`);
       throw new ConsoleAccessError(`已收回 ${removed.length} 个浏览器的授权并断开连接，但授权文件写入失败，服务重启后会恢复；请检查状态目录后重试`);
@@ -187,8 +192,11 @@ export class ConsoleAccess {
     return { cookie: `${consoleCookieName(port)}=${value}` };
   }
 
-  /** Wraps a request handler with the Host rule, the login exchange and browser authorization. */
-  guard(handler: Handler, options: { fixtureMode?: boolean } = {}): Handler {
+  /**
+   * Wraps a request handler with the Host rule, the login exchange and browser authorization. The handler receives
+   * the authorized browser, so that audited changes can name it (agent-console::REQ-004).
+   */
+  guard(handler: ConsoleHandler, options: { fixtureMode?: boolean } = {}): Handler {
     return async (req, res) => {
       try {
         const port = req.socket.localPort;
@@ -204,7 +212,7 @@ export class ConsoleAccess {
         }
         // Fixture routes keep their current access in fixture mode; the handler still requires same-origin JSON.
         if (options.fixtureMode && url.pathname.startsWith("/api/fixture/")) {
-          await handler(req, res);
+          await handler(req, res, {});
           return;
         }
         const presented = cookieValues(req.headers.cookie, consoleCookieName(port));
@@ -227,7 +235,7 @@ export class ConsoleAccess {
         this.track(match.browser.id, req.socket);
         this.touch(match.browser);
         if (!isApi && req.method === "GET") res.setHeader("set-cookie", sessionCookie(port, match.value, COOKIE_MAX_AGE_SECONDS));
-        await handler(req, res);
+        await handler(req, res, { browser: publicBrowser(match.browser) });
       } catch (error) {
         process.stderr.write(`console_access_failed: ${errorCode(error)}\n`);
         if (!res.headersSent) refuse(req, res, 500, "请求失败");
@@ -303,7 +311,7 @@ export class ConsoleAccess {
       throw error;
     }
     try {
-      this.appendAudit({
+      this.audit.append({
         by: input.by,
         event: "browser_authorized",
         browser: browserRef(browser),
@@ -424,30 +432,5 @@ export class ConsoleAccess {
     }
     this.lastPersistAt = this.now();
     this.lastUsedChanged = false;
-  }
-
-  private appendAudit(entry: Record<string, unknown>): void {
-    const directory = this.requireDirectory();
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const file = path.join(directory, AUDIT_FILE);
-    const line = `${JSON.stringify({ at: new Date(this.now()).toISOString(), ...entry })}\n`;
-    const descriptor = fs.openSync(file, "a", 0o600);
-    try {
-      fs.writeFileSync(descriptor, line, "utf8");
-      fs.fsyncSync(descriptor);
-    } finally {
-      fs.closeSync(descriptor);
-    }
-    fs.chmodSync(file, 0o600);
-  }
-
-  private tryAudit(entry: Record<string, unknown>): boolean {
-    try {
-      this.appendAudit(entry);
-      return true;
-    } catch (error) {
-      process.stderr.write(`console_audit_write_failed: ${errorCode(error)}\n`);
-      return false;
-    }
   }
 }
