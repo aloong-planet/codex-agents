@@ -1,9 +1,9 @@
 # Agent dispatch
 
-> Status: a Team Leader runs each group request with one Executor, implemented locally (ticket 05 of agent-teams). Several Assignments per request, cross-team work, visibility scopes and the console are specified here and not yet implemented.
+> Status: a Team Leader runs each group request with one Executor (ticket 05 of agent-teams), and each agent sees only its own scope and, for Team Leaders, the group's Team Directory (ticket 06), implemented locally. Several Assignments per request, cross-team work and the console are specified here and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
-> Pending: a plan holds exactly one Assignment, and Executors still recall and capture the group memory; a Team Leader receives no memory and no Team Directory yet.
+> Pending: a plan holds exactly one Assignment.
 > Pending: an Executor is named `执行者 <n>（<profile name>）` in the Team Leader's start message, an interim form. The confirmed form, `<profile noun> <n>` (such as 文案执行者 51), needs an Executor-noun field on Executor profiles, which the team-management page adds.
 
 ## Problem Statement
@@ -128,9 +128,9 @@ The first concrete deliverables remain as follows. Each is produced by the team'
 
 ### agent-dispatch::REQ-012 Visibility and memory scopes
 
-- agent-dispatch::REQ-012/AC-01: Only the Coordinator recalls and captures the group memory. The group memory holds the group's discussion and what the Coordinator and Team Leaders post in the group; private conversations never contribute to it.
+- agent-dispatch::REQ-012/AC-01: Only the Coordinator recalls and captures the group memory. Each finished attempt of a group request is captured once, when its closing or result message is accepted in the group: the request's message with any confirmation or supplement, and everything the Coordinator and Team Leaders posted in the group for that request, in posting order. An attempt that ended cancelled is not captured, and neither are ignored discussion, a proposal its author never confirmed, a clarification that never became a request, or an announcement. Private conversations never contribute to it.
 - agent-dispatch::REQ-012/AC-02: A Team Leader receives only three things: its Brief from the Coordinator, which includes the original message; its own memory, kept per conversation and leader; and the group's Team Directory. It never receives the group memory, another team's content or Executor memory.
-- agent-dispatch::REQ-012/AC-03: An Executor receives only its Team Leader's Brief, its own process, and the memory shared by Executors created from the same Agent Profile in the same conversation.
+- agent-dispatch::REQ-012/AC-03: An Executor receives only its Team Leader's Brief, which carries the original message down the Brief chain of agent-dispatch::REQ-012/AC-02; its own process; and the memory shared by Executors created from the same Agent Profile in the same conversation.
 - agent-dispatch::REQ-012/AC-04: The Coordinator never receives Executor content, only what Team Leaders report to it or post in the group.
 
 ### agent-dispatch::REQ-013 Cross-team cooperation through the Coordinator
@@ -147,7 +147,7 @@ The host requires the original requester's confirmation before acting in exactly
 ### agent-dispatch::REQ-015 Group roster, Team Directory and announcements
 
 - agent-dispatch::REQ-015/AC-01: In a group, the Coordinator routes and assigns only to Agent Teams that accept work in that group ([team-management::REQ-003](team-management.md)). Teams whose onboarding there is incomplete, and teams draining there, receive no new Assignments in that group, including cross-team ones in requests already running. Private requests follow [agent-console::REQ-006](agent-console.md).
-- agent-dispatch::REQ-015/AC-02: Every Team Leader in a group receives that group's Team Directory: the names and responsibilities of the bound teams, and nothing else.
+- agent-dispatch::REQ-015/AC-02: Every Team Leader in a group receives that group's Team Directory: the names and responsibilities of the teams accepting work there ([team-management::REQ-004/AC-02](team-management.md)), and nothing else.
 - agent-dispatch::REQ-015/AC-03: When a team is bound to a group or removed from it, the Coordinator posts an announcement in that group, and every Team Leader's next turn there uses the updated Team Directory. The announcement has its own delivery state; a failed announcement does not undo the binding change.
 
 ### agent-dispatch::REQ-016 Host-enforced Agent Profiles
@@ -215,6 +215,9 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Remove member/group or replace a Team Leader's application credentials with queued work | Revalidate authority; no sender or destination fallback under agent-dispatch::REQ-008/AC-04 |
 | A Team Leader's bot is not in the group when it must post | Report the delivery failure without another identity under agent-dispatch::REQ-008/AC-04 |
 | Team is bound to the group, or removed, while requests run | Announcement under agent-dispatch::REQ-015/AC-03; removed team gets no new Assignments, running ones continue under agent-dispatch::REQ-015/AC-01 |
+| Member asks for, or genuinely mentions, a team bound to the group whose onboarding there is incomplete | No Assignment for that team and no post by its bot; the Coordinator clarifies or routes to an accepting team under agent-dispatch::REQ-015/AC-01 |
+| Requester cancels a request after its start message | Nothing of it enters the group memory, so no memory-derived reminder follows under agent-dispatch::REQ-012/AC-01 |
+| The service starts on group memory curated while Executors still captured their results into it | That memory may hold facts the curator drew from Executor results. It is kept, and the Coordinator may recall those facts; new captures follow agent-dispatch::REQ-012/AC-04 |
 | Owner edits a profile's instructions or skills, or attaches an MCP server, while a request runs | Running request keeps its snapshot under agent-dispatch::REQ-017/AC-01 |
 | Owner unbinds an MCP server, disables a tool or narrows module permissions while a request runs | The next call is refused and audited under agent-dispatch::REQ-017/AC-02 |
 | Brief, discussion, file or MCP result contains instructions to change roles, tools or destination | Treated as data under agent-dispatch::REQ-008/AC-05 and agent-dispatch::REQ-016 |
@@ -246,6 +249,8 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 
 It starts from the existing local configuration with the same four roles and is later edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).
 
+In each group, routing, mention priority, new Assignments and the Team Directory use only the teams whose binding to that group is accepting under the current definitions; a team may be bound to some dispatch groups only, and in any binding state. A request planned after its team stopped accepting work in the group gets no new Assignment there and fails with the team-unavailable report. Whether a retry may rerun an existing Assignment of such a team is decided with removal and draining (team-management::US-004).
+
 **Profile resolution.** One resolution point gives the following for an agent and version:
 
 - the instructions;
@@ -254,15 +259,17 @@ It starts from the existing local configuration with the same four roles and is 
 - the skills;
 - the memory scope.
 
-Turns obtain these only through it. The host-tool view offers the catalog tools the profile allows. The host refuses any other call before it runs, and module permissions keep gating every call. The Coordinator never resolves to host tools. Domain-specific text is removed from shared prompt assembly and moved into the owning team's profiles. Before team behavior is enabled, the initial profiles reproduce today's behavior with one exception: the weather, route, walking, opening-hours and budget-and-schedule rules now reach only Bill's team, while the source-verification rules stay shared.
+Turns obtain these only through it. The host-tool view offers the catalog tools the profile allows. The host refuses any other call before it runs, and module permissions keep gating every call. The Coordinator never resolves to host tools. Domain-specific text is removed from shared prompt assembly and moved into the owning team's profiles. Before team behavior is enabled, the initial profiles reproduce today's behavior with two exceptions: the weather, route, walking, opening-hours and budget-and-schedule rules now reach only Bill's team, while the source-verification rules stay shared; and the code-and-tests example of the goal-scope reply rule now reaches only Jack's team's Executors. Changing a seeded profile makes the next start append a definitions version while no console save exists.
 
 **Coordinator.** The Coordinator remains a tool-free structured-output turn. Its input is:
 
-- the event;
-- every agent's responsibility;
+- the event, which also carries the group's recent discussion: up to the 100 latest human messages of the group before it, 16,000 characters in all;
+- the Coordinator's own responsibility and those of the teams accepting work in that group;
 - the group memory;
 - the group's request list;
 - reports from Team Leaders.
+
+A decision naming a team that does not accept work in the group is refused like an unknown agent, and the Coordinator's clarification goes out instead. A mention of such a team confers no priority, and that team's bot posts nothing for it.
 
 Its decisions are:
 
@@ -275,17 +282,21 @@ The host validates them against the registry before acting.
 
 **Team Leader.** A Team Leader turn is also tool-free. It returns a structured plan: Assignments with profile and Brief, decisions to post, a cross-team request, a summary, or a closing. The host validates the plan under agent-dispatch::REQ-011/AC-03, creates Executors, and sends the Team Leader's group messages with its application.
 
-- Input: its Brief, holding the original message, the latest confirmation or supplement when it differs, and the Coordinator's summary; its team's responsibility; and the IDs and names of its Executor profiles. Its profile resolves to its own instructions and never to host tools.
+- Input: its Brief, holding the original message, the latest confirmation or supplement when it differs, and the Coordinator's summary; its team's responsibility; the IDs and names of its Executor profiles; its own memory, recalled with the Brief's latest text, else its message; and the group's Team Directory. Its profile resolves to its own instructions, its own memory scope and never to host tools.
+- The Team Directory lists every team accepting work in the request's group, its own team included, by team name and responsibility only. Each plan and closing turn takes it from the current definitions, not from the request's definitions version.
 - A refused plan gets one tool-free correction turn in the same session, told why it was refused. A plan still invalid fails the request with the Team Leader's report 「我暂时无法形成有效分工，本次尚未开始处理。请补充需求后明确重试。」 and no Executor. A plan over the Assignment limit gets no correction turn, because trimming it belongs to the original requester (agent-dispatch::REQ-014).
 - Until several Assignments run per request, a plan holds exactly one Assignment.
 - Once the Assignment has its Executor, the Team Leader posts the start message 「我安排<Executor>（<profile name>）处理：<Assignment title>。完成后会在本群汇报。」. The Executor's work starts only after that message is accepted; a start message not confirmed as sent fails the request as before.
 - When the Assignment ends, a second tool-free turn writes the closing message from the Assignment's title, status and result. In a single-team request it is both the team's and the request's closing. If that turn fails, the host posts the Assignment's own result under the Team Leader's identity instead, so no outcome goes unreported.
+- Once the closing is decided, the Team Leader's Brief, its division (Executor, profile name and Assignment title) and the closing are captured into its own memory. A request cancelled before then leaves nothing there. A memory failure never changes the request's outcome.
 - Each turn holds its pool slot only for itself, so a Team Leader never holds a slot while its Executor waits for one. Its session is keyed by leader, conversation, binding, access revision and definitions version, and resumes from its persisted thread.
 
 **Executor.** An Executor turn runs in its own isolated runtime with the profile's host tools, MCP proxy tools and skills. Its result returns to the Team Leader, never to the group directly.
 
 - Its session is keyed by its Assignment, and its runtime is released as soon as its turn ends. An explicit retry reruns the same Assignment, with the same Executor, on that session.
-- It receives the triggering message and its Team Leader's Assignment title and Brief. Files, media, pending choices and reminders it produces go out under the Team Leader's application.
+- It receives the triggering message and its Team Leader's Assignment title and Brief: the Brief chain of agent-dispatch::REQ-012/AC-02, with the message's quote and attachments. It never receives the group discussion or the group memory. Files, media, pending choices and reminders it produces go out under the Team Leader's application.
+- It recalls the memory of its Agent Profile in that conversation, with the title and Brief as the query. After its turn, the title and Brief and its result are captured there, unless the request was cancelled during the turn.
+- Its reply rules carry only domain-neutral text. The code-and-tests example of the goal-scope rule that private chat and legacy group turns keep is in the technical team's seeded Executor profile instead.
 - A pending choice it raises goes out verbatim under the Team Leader's identity. The requester's resolution ends the Assignment, and the Team Leader's closing turn follows.
 
 **Runtime-supplied tools.** A turn's tool list is exactly its host tools, plus web search where the turn allows it. Codex's own tools are never offered ([ADR-0030](../adr/0030-offer-isolated-runtimes-only-granted-tools.md)): code-mode `exec` and `wait`, `apply_patch`, the MCP resource tools, `request_user_input` and sub-agents. This is how agent-dispatch::REQ-016/AC-02 and agent-dispatch::CON-003 apply to the model's tool list. They hold for threads started after that change. A thread saved before it keeps the old tool list in its history and sends it again when resumed; every tool on it is refused with no effect.
@@ -313,9 +324,16 @@ Requests stored before Assignments existed carry no definitions version and keep
 
 - the Coordinator by group;
 - a Team Leader by conversation and leader;
-- Executors by conversation and Agent Profile.
+- Executors by conversation and Agent Profile (team and profile ID).
 
-Recall and capture use only the caller's scope.
+Recall and capture use only the caller's scope. The Team Leader and Executor scopes are separate memory accounts derived from the group's memory account, stable across access revisions and definitions versions. They are curated in the isolated group-memory curator's runtime with no notification route and no reminder ownership, so a planned event there creates no reminder; reminders come only from the group memory. Neither the personal memory curator nor the console's memory panel ever sees them.
+
+The group memory is captured from the group's posts, never from an Executor. A post belongs to a request when it carries the request's own work forward:
+
+- the mentioned team's scope explanation, the Coordinator's reassignment notice, its proposal and its acknowledgement of a supplement to that proposal;
+- the Team Leader's start message, pending choice, and closing or result message, and a re-sent copy of that message.
+
+Replies that refuse a control message, and clarifications without a request, belong to none. Each capture takes the request's accepted posts that no earlier capture took, so an attempt started by a supplement or a retry adds only its own posts. A re-sent report is captured once, when it is accepted.
 
 **MCP and skills.**
 
@@ -346,7 +364,8 @@ Do not substitute Provider calls or fabricated Run state for that route.
 
 - A Team Leader plan is injected per message as one value or a list, one per turn, so a case can drive the correction turn; the production correction loop and parsers still run. Without an injected plan, the fixture plans one Assignment on the team's first preset; without an injected closing, the closing repeats the Executor's result.
 - The fixture-only `WORKFLOW_FIXTURE_COORDINATION_RUNTIME=1` seam makes real main build the Coordinator's and Team Leaders' real runtimes in the shared pool, over the fixture App Server, which answers their turns with the injected outputs and records the tools each thread is offered. It drives the host-tool boundary of agent-dispatch::REQ-016/AC-02 through main's construction. Outside fixture mode, startup refuses the switch.
-- The upgrade case builds pre-Assignment state by running this package at base commit 71ff31d with the current install, then starts the current code on it. It fails, never skips, when that commit cannot be archived, built or booted. The owner may retire it once a deployment has migrated production's requests stored before Assignments.
+- In fixture mode the group and dispatch memory curators record each curation they receive, by curator and memory account, so real-main cases see which scope each turn reached (agent-dispatch::REQ-012). Recall is checked by seeding curated memory through the production memory tool host. The production dispatch curator's tool host, which keeps reminders out of Team Leader and Executor memories, never runs under fixtures; review and a live run cover it.
+- The upgrade case builds pre-Assignment state by running this package at base commit 71ff31d with the current install, then starts the current code on it. It fails, never skips, when that commit cannot be archived, built or booted. The current seeded profiles differ from that commit's, so requests planned after the upgrade record definitions version 2. The owner may retire it once a deployment has migrated production's requests stored before Assignments.
 
 **Profile boundary.** Profile enforcement is tested at the host tool boundary and the memory boundary:
 

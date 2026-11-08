@@ -112,7 +112,7 @@ The content an assigning agent hands to the agent it assigns, which together wit
 _Avoid_: shared context, 交办记录
 
 **Team Directory**:
-The names and responsibilities of the Agent Teams bound to a group, as given to that group's Coordinator and Team Leaders. It is distinct from a Brief and holds no team's work content.
+The names and responsibilities of the Agent Teams accepting work in a group, as given to that group's Team Leaders. It is distinct from a Brief and from the teams merely bound there, and holds no team's work content.
 _Avoid_: roster memory, 团队记忆
 
 **Agent Profile**:
