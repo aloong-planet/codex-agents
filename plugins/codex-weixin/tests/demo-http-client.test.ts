@@ -161,4 +161,56 @@ describe("DemoHttpClient", () => {
       ],
     ]);
   });
+  it("keeps its console credential and asks once for a different one after a 401", async () => {
+    const seen: string[] = [];
+    const credentials = {
+      current: async () => "codex_console_4317=c1",
+      renew: async (rejected: string) => {
+        if (rejected !== "codex_console_4317=c1") throw new Error(`unexpected rejected credential ${rejected}`);
+        return "codex_console_4317=c2";
+      },
+    };
+    const state = () => new Response(
+      JSON.stringify({ phase: "configured", notice: "", accounts: [], targets: [] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+    const responses = [new Response("{}", { status: 401 }), state(), state()];
+    const client = new DemoHttpClient("http://127.0.0.1:4317", async (_input, init) => {
+      seen.push(new Headers(init?.headers).get("cookie") ?? "");
+      return responses.shift()!;
+    }, credentials);
+
+    await expect(client.getState()).resolves.toMatchObject({ modelState: { phase: "configured" } });
+    await client.getState();
+    expect(seen).toEqual(["codex_console_4317=c1", "codex_console_4317=c2", "codex_console_4317=c2"]);
+  });
+
+  it("authorizes again on the next call after its first authorization failed", async () => {
+    let attempts = 0;
+    const client = new DemoHttpClient("http://127.0.0.1:4317", async () => new Response(
+      JSON.stringify({ phase: "configured", notice: "", accounts: [], targets: [] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    ), {
+      current: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("微信 Demo 未运行，无法取得本机授权");
+        return "codex_console_4317=c1";
+      },
+      renew: async () => "codex_console_4317=c2",
+    });
+
+    await expect(client.getState()).rejects.toThrow("微信 Demo 未运行");
+    await expect(client.getState()).resolves.toMatchObject({ modelState: { phase: "configured" } });
+  });
+
+  it("reports the refusal when the renewed credential is refused as well", async () => {
+    const seen: string[] = [];
+    const client = new DemoHttpClient("http://127.0.0.1:4317", async (_input, init) => {
+      seen.push(new Headers(init?.headers).get("cookie") ?? "");
+      return new Response(JSON.stringify({ error: "需要本机授权" }), { status: 401 });
+    }, { current: async () => "codex_console_4317=c1", renew: async () => "codex_console_4317=c2" });
+
+    await expect(client.getState()).rejects.toThrow("微信 Demo 状态请求失败（HTTP 401）");
+    expect(seen).toEqual(["codex_console_4317=c1", "codex_console_4317=c2"]);
+  });
 });

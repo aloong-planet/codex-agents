@@ -1,6 +1,12 @@
 import { once } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+
+import { exchangeLoginLink } from "../e2e/console-session.js";
+import { ConsoleAccess } from "../src/console-access.js";
 
 import {
   DemoService,
@@ -51,6 +57,7 @@ class HttpFakePort implements WeixinChannel {
 
 describe("HTTP server", () => {
   const servers: ReturnType<typeof createDemoServer>[] = [];
+  const directories: string[] = [];
 
   afterEach(async () => {
     await Promise.all(
@@ -59,6 +66,7 @@ describe("HTTP server", () => {
           new Promise<void>((resolve) => server.close(() => resolve())),
       ),
     );
+    for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true, force: true });
   });
 
   async function start(codex?: {
@@ -92,14 +100,21 @@ describe("HTTP server", () => {
       codex,
       dailyNews,
     );
-    const server = createDemoServer(service);
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "http-server-"));
+    directories.push(directory);
+    const access = new ConsoleAccess({ directory });
+    const server = createDemoServer(service, { access });
     servers.push(server);
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("missing address");
     const origin = `http://127.0.0.1:${address.port}`;
-    return { service, origin };
+    // Every settings route requires an authorized browser; these cases log in once and send its cookie.
+    const cookie = await exchangeLoginLink(access.issueLoginLink(address.port).url);
+    const request = (url: string, init: RequestInit = {}) =>
+      fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), cookie } });
+    return { service, origin, request };
   }
 
   it("passes a bounded custom text through the fixture-only inbound endpoint", async () => {
@@ -152,8 +167,8 @@ describe("HTTP server", () => {
       disable: () => { enabled = false; },
       close: () => {},
     };
-    const { origin } = await start(undefined, dailyNews);
-    const post = (path: string, body: unknown = {}) => fetch(`${origin}${path}`, {
+    const { origin, request } = await start(undefined, dailyNews);
+    const post = (path: string, body: unknown = {}) => request(`${origin}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify(body),
@@ -217,9 +232,9 @@ describe("HTTP server", () => {
       refreshModelCatalog: async () => { modelRefreshed = true; },
       close: () => {},
     };
-    const { origin } = await start(codex);
+    const { origin, request } = await start(codex);
 
-    const enabledResponse = await fetch(`${origin}/api/codex/enable`, {
+    const enabledResponse = await request(`${origin}/api/codex/enable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a", target: "user@im.wechat" }),
@@ -229,7 +244,7 @@ describe("HTTP server", () => {
       codex: { status: "idle", threadReady: true },
     });
 
-    const disabledResponse = await fetch(`${origin}/api/codex/disable`, {
+    const disabledResponse = await request(`${origin}/api/codex/disable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a", target: "user@im.wechat" }),
@@ -237,7 +252,7 @@ describe("HTTP server", () => {
     expect(disabledResponse.status).toBe(200);
     await expect(disabledResponse.json()).resolves.toMatchObject({ codex: { status: "disabled" } });
 
-    const openedResponse = await fetch(`${origin}/api/codex/desktop/open`, {
+    const openedResponse = await request(`${origin}/api/codex/desktop/open`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a", target: "user@im.wechat" }),
@@ -246,7 +261,7 @@ describe("HTTP server", () => {
     expect(opened).toBe(true);
     expect(await openedResponse.text()).not.toContain("019fef94");
 
-    const memoryEnabledResponse = await fetch(`${origin}/api/codex/memory/enable`, {
+    const memoryEnabledResponse = await request(`${origin}/api/codex/memory/enable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a" }),
@@ -254,7 +269,7 @@ describe("HTTP server", () => {
     expect(memoryEnabledResponse.status).toBe(200);
     expect(memoryEnabled).toBe(true);
 
-    const reminderTargetResponse = await fetch(`${origin}/api/codex/memory/notification-target`, {
+    const reminderTargetResponse = await request(`${origin}/api/codex/memory/notification-target`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a", target: "user@im.wechat" }),
@@ -262,7 +277,7 @@ describe("HTTP server", () => {
     expect(reminderTargetResponse.status).toBe(200);
     expect(reminderTarget).toBe("user@im.wechat");
 
-    const memoryRetryResponse = await fetch(`${origin}/api/codex/memory/retry-latest-failed`, {
+    const memoryRetryResponse = await request(`${origin}/api/codex/memory/retry-latest-failed`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a" }),
@@ -270,7 +285,7 @@ describe("HTTP server", () => {
     expect(memoryRetryResponse.status).toBe(200);
     expect(memoryRetried).toBe(true);
 
-    const memoryDisabledResponse = await fetch(`${origin}/api/codex/memory/disable`, {
+    const memoryDisabledResponse = await request(`${origin}/api/codex/memory/disable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a" }),
@@ -278,19 +293,19 @@ describe("HTTP server", () => {
     expect(memoryDisabledResponse.status).toBe(200);
     expect(memoryEnabled).toBe(false);
 
-    const modelResponse = await fetch(`${origin}/api/codex/model/configure`, {
+    const modelResponse = await request(`${origin}/api/codex/model/configure`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ accountId: "bot-a", mode: "track", track: "fast", effort: "low" }),
     });
     expect(modelResponse.status).toBe(200);
     expect(modelSelection).toEqual({ mode: "track", track: "fast", effort: "low" });
-    expect((await fetch(`${origin}/api/codex/model/refresh`, {
+    expect((await request(`${origin}/api/codex/model/refresh`, {
       method: "POST", headers: { "content-type": "application/json", origin }, body: "{}",
     })).status).toBe(200);
     expect(modelRefreshed).toBe(true);
 
-    const vaultEnabledResponse = await fetch(`${origin}/api/codex/vault/enable`, {
+    const vaultEnabledResponse = await request(`${origin}/api/codex/vault/enable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: "{}",
@@ -300,7 +315,7 @@ describe("HTTP server", () => {
       error: "旧写权限开关已停用；请在三档权限向导中重新授权",
     });
 
-    const vaultDisabledResponse = await fetch(`${origin}/api/codex/vault/disable`, {
+    const vaultDisabledResponse = await request(`${origin}/api/codex/vault/disable`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: "{}",
@@ -311,8 +326,8 @@ describe("HTTP server", () => {
   });
 
   it("serves public state with no-store and no sensitive fields", async () => {
-    const { origin } = await start();
-    const response = await fetch(`${origin}/api/state`);
+    const { origin, request } = await start();
+    const response = await request(`${origin}/api/state`);
 
     expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toContain("no-store");
@@ -325,8 +340,8 @@ describe("HTTP server", () => {
   });
 
   it("serves automatic first-inbound binding guidance without manual confirmation controls", async () => {
-    const { origin } = await start();
-    const response = await fetch(`${origin}/`);
+    const { origin, request } = await start();
+    const response = await request(`${origin}/`);
     const html = await response.text();
 
     expect(response.status).toBe(200);
@@ -337,7 +352,7 @@ describe("HTTP server", () => {
   });
 
   it("renders all three permission modes and explains an unsupported strict-directory capability", async () => {
-    const { origin } = await start({
+    const { origin, request } = await start({
       getPublicState: () => ({
         status: "disabled",
         threadReady: false,
@@ -365,7 +380,7 @@ describe("HTTP server", () => {
       configurePermissions: () => {},
       close: () => {},
     });
-    const html = await (await fetch(`${origin}/`)).text();
+    const html = await (await request(`${origin}/`)).text();
 
     expect(html).toContain("安全只读");
     expect(html).toContain("增强受控");
@@ -449,8 +464,8 @@ describe("HTTP server", () => {
       },
       close: () => {},
     };
-    const { origin } = await start(codex);
-    const response = await fetch(`${origin}/api/codex/permissions/configure`, {
+    const { origin, request } = await start(codex);
+    const response = await request(`${origin}/api/codex/permissions/configure`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({
@@ -467,27 +482,30 @@ describe("HTTP server", () => {
   });
 
   it("rejects cross-origin writes and accepts an exact same-origin confirmation", async () => {
-    const { origin } = await start();
+    const { origin, request } = await start();
     const payload = {
       accountId: "bot-a",
       target: "user@im.wechat",
       inboundConfirmed: true,
     };
-    const blocked = await fetch(`${origin}/api/session/confirm`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "https://evil.example" },
-      body: JSON.stringify(payload),
-    });
-    expect(blocked.status).toBe(403);
+    const localhostOrigin = origin.replace("127.0.0.1", "localhost");
+    for (const foreign of ["https://evil.example", undefined, "null", localhostOrigin]) {
+      const blocked = await request(`${origin}/api/session/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(foreign === undefined ? {} : { origin: foreign }) },
+        body: JSON.stringify(payload),
+      });
+      expect([foreign, blocked.status]).toEqual([foreign, 403]);
+    }
 
-    const discovery = await fetch(`${origin}/api/session/discover`, {
+    const discovery = await request(`${origin}/api/session/discover`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: "{}",
     });
     expect(discovery.status).toBe(200);
 
-    const allowed = await fetch(`${origin}/api/session/confirm`, {
+    const allowed = await request(`${origin}/api/session/confirm`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify(payload),
@@ -497,8 +515,8 @@ describe("HTTP server", () => {
   });
 
   it("rejects oversized JSON bodies", async () => {
-    const { origin } = await start();
-    const response = await fetch(`${origin}/api/send`, {
+    const { origin, request } = await start();
+    const response = await request(`${origin}/api/send`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ message: "x".repeat(65 * 1024) }),
@@ -507,8 +525,8 @@ describe("HTTP server", () => {
   });
 
   it("updates local aliases without exposing private channel credentials", async () => {
-    const { origin } = await start();
-    const response = await fetch(`${origin}/api/labels`, {
+    const { origin, request } = await start();
+    const response = await request(`${origin}/api/labels`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({
@@ -529,8 +547,8 @@ describe("HTTP server", () => {
   });
 
   it("returns recent inbound targets without returning channel logs", async () => {
-    const { origin } = await start();
-    const response = await fetch(`${origin}/api/session/discover`, {
+    const { origin, request } = await start();
+    const response = await request(`${origin}/api/session/discover`, {
       method: "POST",
       headers: { "content-type": "application/json", origin },
       body: "{}",

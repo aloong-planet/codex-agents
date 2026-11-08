@@ -3,6 +3,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ConsoleAccess } from "./console-access.js";
 import type { DemoService } from "./demo-service.js";
 import type { FixtureModelToolCall } from "./fixture-app-server-transport.js";
 
@@ -149,9 +150,15 @@ function serveStatic(pathname: string, res: ServerResponse): boolean {
 
 export function createDemoServer(
   service: DemoService,
-  options: { fixtureMode?: boolean; channelState?: () => Record<string, unknown>; feishuFixture?: { emit(input: unknown): Promise<void> } } = {},
+  options: {
+    fixtureMode?: boolean;
+    channelState?: () => Record<string, unknown>;
+    feishuFixture?: { emit(input: unknown): Promise<void> };
+    access?: ConsoleAccess;
+  } = {},
 ): http.Server {
-  return http.createServer(async (req, res) => {
+  const access = options.access ?? new ConsoleAccess();
+  return http.createServer(access.guard(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
       if (req.method === "GET" && url.pathname === "/api/state") {
@@ -290,5 +297,5 @@ export function createDemoServer(
       const message = error instanceof Error ? error.message : "请求失败";
       json(res, Number.isInteger(statusCode) ? statusCode : 400, { error: message });
     }
-  });
+  }, { fixtureMode: options.fixtureMode === true }));
 }

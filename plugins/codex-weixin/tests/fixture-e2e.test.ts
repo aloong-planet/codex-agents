@@ -1,28 +1,19 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { startFixtureService, type FixtureService } from "./support/fixture-service.js";
+
 const port = 4328;
 const baseUrl = `http://127.0.0.1:${port}`;
-const demoCwd = path.resolve(process.cwd(), "../../apps/weixin-service");
 const serverEntry = path.resolve(process.cwd(), "dist/server.mjs");
-
-async function waitForFixture(): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`${baseUrl}/api/state`);
-      if (response.ok) return;
-    } catch {
-      // The fixture process is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("fixture Demo did not become ready");
-}
+// The service and the plugin share this state directory, as they share the default one in production; the
+// plugin authorizes through the control channel the service opens there.
+const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-plugin-e2e-"));
 
 function standardResult(value: Awaited<ReturnType<Client["callTool"]>>) {
   if ("toolResult" in value) throw new Error("unexpected task result");
@@ -30,22 +21,17 @@ function standardResult(value: Awaited<ReturnType<Client["callTool"]>>) {
 }
 
 describe("bundled plugin against the real Demo HTTP boundary", () => {
-  let demoProcess: ChildProcess;
+  let service: FixtureService | undefined;
   let transport: StdioClientTransport;
   let client: Client;
 
   beforeAll(async () => {
-    demoProcess = spawn(process.execPath, ["dist/main.js"], {
-      cwd: demoCwd,
-      env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port) },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    await waitForFixture();
+    service = await startFixtureService({ port, stateDirectory });
 
     transport = new StdioClientTransport({
       command: process.execPath,
       args: [serverEntry],
-      env: { ...process.env, WEIXIN_DEMO_BASE_URL: baseUrl } as Record<string, string>,
+      env: { ...process.env, WEIXIN_DEMO_BASE_URL: baseUrl, WEIXIN_DEMO_STATE_DIR: stateDirectory } as Record<string, string>,
       stderr: "pipe",
     });
     client = new Client(
@@ -65,7 +51,8 @@ describe("bundled plugin against the real Demo HTTP boundary", () => {
 
   afterAll(async () => {
     await client?.close();
-    if (demoProcess && !demoProcess.killed) demoProcess.kill("SIGTERM");
+    await service?.stop();
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
   });
 
   it("walks QR, inbound target confirmation, and fixture send through stdio MCP", async () => {
