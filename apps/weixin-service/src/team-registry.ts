@@ -137,7 +137,8 @@ export class TeamRegistry {
    * editable fields changed since `basedOn`, so another team's save or an onboarding step never refuses it. Binding states
    * follow the checked groups: a newly checked group starts onboarding; an unchecked group drains when the team accepts work
    * there and is dropped otherwise; a changed application starts onboarding again in every group it does not drain.
-   * `secret` is written beside the versions, never into one. Returns the saved version and the team's ID.
+   * `secret` is written beside the versions, never into one, and the application's credentials are then checked again
+   * (ticket 11, decision D7). Returns the saved version and the team's ID.
    */
   saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>> }>): Readonly<{ version: DefinitionsVersion; teamId: string }> {
     let teamId = edit.id ?? "";
@@ -175,7 +176,10 @@ export class TeamRegistry {
         bindings };
       const teams = existing ? definitions.teams.map((candidate) => candidate.id === teamId ? team : candidate) : [...definitions.teams, team];
       this.append({ ...definitions, teams }, latest.version, "console");
-      if (options.secret !== undefined && appId) this.database.prepare("INSERT INTO application_secret (app_id, secret) VALUES (?, ?) ON CONFLICT(app_id) DO UPDATE SET secret = excluded.secret").run(appId, options.secret);
+      if (options.secret !== undefined && appId) {
+        this.database.prepare("INSERT INTO application_secret (app_id, secret) VALUES (?, ?) ON CONFLICT(app_id) DO UPDATE SET secret = excluded.secret").run(appId, options.secret);
+        this.database.prepare("DELETE FROM onboarding_outcome WHERE app_id = ? AND step = 'credentials'").run(appId);
+      }
       this.forgetUnusedApplications();
     });
     return { version: this.current()!, teamId };

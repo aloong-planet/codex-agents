@@ -202,6 +202,34 @@ it("stops giving work to a team in a group unchecked from it, announces that it 
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// A team can move to another application and back (ticket 11, decision D5). Going back used to fail the save after it was stored,
+// because the old application's media route was still registered.
+// Coverage gap: media sent after a team's secret is replaced is not driven here; it needs a media-sending workflow. Team media
+// routes resolve the team's current application at each send, the same wiring this case's return to the old application uses.
+it("lets a team go back to an application it used before, and posts with it again", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-application-return-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const { teamId } = await running.post<{ teamId: string }>("/api/teams/save", { basedOn: (await running.get<View>("/api/teams")).version, team: daisy() });
+    const onApplication = (appId: string) => (current: View) => team(current, teamId)?.leader.appId === appId && team(current, teamId)?.bindings[0]?.state === "accepting";
+    let view = await viewUntil(running, onApplication(DAISY_APP));
+    const switchTo = (current: View, appId: string, secret: string) => ({ basedOn: current.version,
+      team: { ...editOf(current, teamId, (edit) => ({ ...edit, leader: { ...edit.leader, appId } })), secret } });
+    await running.post("/api/teams/save", switchTo(view, "cli_eeeeeeeeeeeeeeee", "daisy-other-secret"));
+    view = await viewUntil(running, onApplication("cli_eeeeeeeeeeeeeeee"));
+    const back = await running.send("/api/teams/save", switchTo(view, DAISY_APP, SECRET_SENTINEL));
+    expect(back.status).toBe(200);
+    await viewUntil(running, onApplication(DAISY_APP));
+    await running.post("/api/fixture/inbound", groupMessage("om_daisy_back", "帮我设计商品主图", decision(teamId, "设计商品主图")));
+    const posted = await running.until((state) => (state.agentFixtureOutboxes?.[teamId]?.text.length ?? 0) >= 2);
+    console.log(JSON.stringify({ kind: "team_application_return", commands: ["save 设计团队", "switch application", "switch back", "帮我设计商品主图"],
+      jobs: posted.agentDispatch, outboxes: posted.agentFixtureOutboxes }));
+    expect(posted.agentFixtureOutboxes?.[teamId]?.text.map(({ message }) => message)[0]).toBe("我安排视觉执行者 1（视觉方案）处理：设计商品主图。完成后会在本群汇报。");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 45000);
+
 it("resumes onboarding at startup without checking the credentials again", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-onboarding-resume-"));
   let running: Running | undefined;

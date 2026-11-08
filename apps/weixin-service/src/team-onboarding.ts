@@ -31,11 +31,20 @@ type Started = ReadonlyArray<Readonly<{ teamId: string; chatId: string }>>;
  * every other step runs again on each run. Each run ends by turning finished bindings accepting (team-management::REQ-003).
  */
 export class TeamOnboarding {
+  /** Runs one at a time, so that a save's run and a 重新检查 never add a bot twice or overwrite each other's outcome. */
+  private queue: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly registry: Pick<TeamRegistry, "current" | "onboarding" | "recordOnboarding" | "settleOnboarding" | "secret">,
     private readonly platform: OnboardingPlatform, private readonly coordinator: ApplicationCredentials, private readonly now: () => number = Date.now) {}
 
-  /** Runs the team's pending steps and returns the bindings that started accepting. */
-  async run(teamId: string): Promise<Started> {
+  /** Runs the team's pending steps after any run in progress, and returns the bindings that started accepting. */
+  run(teamId: string): Promise<Started> {
+    const run = this.queue.then(() => this.runNow(teamId));
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runNow(teamId: string): Promise<Started> {
     const team = this.registry.current()?.definitions.teams.find(({ id }) => id === teamId);
     const appId = team?.leader.appId;
     if (!team || !appId) return this.registry.settleOnboarding();

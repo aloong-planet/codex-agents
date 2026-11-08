@@ -405,11 +405,23 @@ const weixinMediaDelivery = directChannel ? ((): MediaDeliveryPort => {
     reconcile: (operationId) => delivery.reconcile(operationId),
   };
 })() : undefined;
-// One media route per conversation and sending identity; a Team Leader saved while the service runs adds its own routes.
+// A Team Leader's media goes through whichever application currently has its App ID: one replaced for a new secret, or created
+// again when a team returns to an App ID it used before. An App ID no team uses has none, so its media fails (agent-dispatch::REQ-008/AC-04).
+const teamMediaTransport = (appId: string): import("./feishu-media-delivery.js").FeishuMediaTransport => {
+  const current = () => {
+    const application = dispatchApplications.get(appId);
+    if (!application) throw new Error("dispatch_application_unavailable");
+    return application.transport;
+  };
+  return { upload: (input) => current().upload(input), sendResource: (input) => current().sendResource(input) };
+};
+// One media route per conversation and sending identity, kept for the service's life; a Team Leader saved while the service
+// runs adds its own routes once per App ID.
+const mediaRoutedApplications = new Set<string>();
 const feishuMediaRoute = (destination: import("./media-delivery.js").MediaDeliveryDestination) => ({
   destination,
   delivery: new FeishuMediaDelivery(feishuConfiguration!, destination.senderAccountId && destination.senderAccountId !== feishuConfiguration!.connection.appId
-    ? dispatchApplications.get(destination.senderAccountId)!.transport : feishuTransport!, durableEffectLedger,
+    ? teamMediaTransport(destination.senderAccountId) : feishuTransport!, durableEffectLedger,
   [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
     feishuInboundMedia!.readableRoot(feishuConfiguration!.owner.deliveryTarget(destination.accountId, destination.target)!)],
   () => startedChannels.has("feishu") && feishuChannel!.state({ ...destination, channel: "feishu" }).enabled, destination),
@@ -418,6 +430,7 @@ const dispatchConversations = () => feishuConfiguration?.owner.conversationAddre
 const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().flatMap((address) => [address,
   ...(feishuChannel!.usesAgentDispatch(address.target) ? feishuConfiguration.dispatch!.agents.map(({ appId }) => ({ ...address, senderAccountId: appId })) : [])]
   .map(feishuMediaRoute)) : [];
+for (const { appId } of feishuConfiguration?.dispatch?.agents ?? []) mediaRoutedApplications.add(appId);
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
   protectedRoots: serviceProtectedRoots(process.env, os.homedir(), path.dirname(privateStatePath), diagnosticDirectory),
   ...(fixtureMode && process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT
@@ -1104,7 +1117,10 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       const application = createDispatchApplication(agent);
       dispatchApplications.set(agent.appId, application);
       channel.setAgentSender(agent.appId, { transport: application.transport, ready: () => application.ready });
-      if (!known) for (const address of dispatchConversations()) mediaRouter?.add(feishuMediaRoute({ ...address, senderAccountId: agent.appId }));
+      if (!mediaRoutedApplications.has(agent.appId)) {
+        mediaRoutedApplications.add(agent.appId);
+        for (const address of dispatchConversations()) mediaRouter?.add(feishuMediaRoute({ ...address, senderAccountId: agent.appId }));
+      }
       if (startedChannels.has("feishu")) void startDispatchApplication(application);
     }
     // An application no team uses any more is closed: work queued under it fails delivery with no other identity (agent-dispatch::REQ-008/AC-04).

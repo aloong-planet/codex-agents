@@ -70,6 +70,19 @@ describe("checking an existing application's credentials (step 4)", () => {
       expect([statuses(registry).credentials, platform.calls]).toEqual([["action", "secret_missing"], []]);
     } finally { registry.close(); }
   });
+
+  // Ticket 11, decision D7: the checks run again after a save that changes the credentials, a replaced secret included.
+  it("checks the credentials again after the secret is replaced, keeping the groups already joined", async () => {
+    const { registry, teamId } = registryWithDaisy();
+    try {
+      const platform = new FixtureOnboardingPlatform();
+      await new TeamOnboarding(registry, platform, SAM).run(teamId);
+      platform.configure({ applications: { [DAISY_APP]: "bad_credentials" } });
+      registry.saveTeam({ ...daisy, id: teamId }, { basedOn: registry.current()!.version, secret: "daisy-wrong-secret" });
+      await new TeamOnboarding(registry, platform, SAM).run(teamId);
+      expect(statuses(registry)).toEqual({ credentials: ["action", "bad_credentials"], joins: { oc_alpha: ["done", undefined], oc_beta: ["done", undefined] } });
+    } finally { registry.close(); }
+  });
 });
 
 describe("joining the bot to each bound group (step 5)", () => {
@@ -98,6 +111,18 @@ describe("joining the bot to each bound group (step 5)", () => {
       platform.configure({ chats: { oc_alpha: chat } });
       await new TeamOnboarding(registry, platform, SAM).run(teamId);
       expect(statuses(registry).joins.oc_alpha).toEqual(expected);
+    } finally { registry.close(); }
+  });
+
+  // A save starts a run and 重新检查 starts another; they must not both add the bot and overwrite each other's outcome.
+  it("runs one team's steps once when two runs overlap", async () => {
+    const { registry, teamId } = registryWithDaisy();
+    try {
+      const platform = new FixtureOnboardingPlatform();
+      const onboarding = new TeamOnboarding(registry, platform, SAM);
+      await Promise.all([onboarding.run(teamId), onboarding.run(teamId)]);
+      expect(platform.calls.map(({ call, chatId }) => chatId ? `${call} ${chatId}` : call))
+        .toEqual(["check", "add oc_alpha", "in_chat oc_alpha", "add oc_beta", "in_chat oc_beta"]);
     } finally { registry.close(); }
   });
 
