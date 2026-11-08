@@ -221,6 +221,7 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Executor needs context its Brief lacks | It reports to its Team Leader; the Team Leader asks the Coordinator under agent-dispatch::REQ-012 |
 | Group content requests private memory or another team's results | Group isolation and visibility scopes under agent-dispatch::REQ-012 and [ADR-0023](../adr/0023-isolate-feishu-group-authority.md) |
 | Many requests start at once | Runtimes beyond the limit wait under agent-dispatch::QR-001/AC-02 |
+| Every pool slot is held by a Team Leader that waits for an Executor's slot | Work that waits for a pool slot while holding one cannot block all progress, so work beyond the limit still runs under agent-dispatch::QR-001/AC-02 |
 | First tasks lack product facts, trip constraints or repository access | Clarify missing facts and report validation truthfully under agent-dispatch::REQ-006 and agent-dispatch::CON-003 |
 | Executor saves or sends a file, waits for a choice, schedules a reminder, then restarts | Team Leader identity and group frozen under agent-dispatch::REQ-010/AC-01 |
 | Dispatch disabled; legacy private/group task becomes due | Preserve legacy behavior under agent-dispatch::REQ-010/AC-02 |
@@ -300,7 +301,7 @@ Recall and capture use only the caller's scope.
 - MCP servers are connected and held by the host service; Executors receive proxy tools ([mcp-catalog](mcp-catalog.md)).
 - Skills are copied from the Skill Library into the Executor's runtime home at creation ([skill-library](skill-library.md)).
 
-**Runtime pool.** Runtimes are held in a bounded pool keyed by agent, conversation, access revision and definitions version, with idle release. Persisted thread identities let Coordinator and Team Leader sessions resume after release.
+**Runtime pool.** Runtimes are held in a bounded pool keyed by agent, conversation, access revision and definitions version, with idle release. The Coordinator's, Team Leaders' and Executors' runtimes share one pool. When work needs a new runtime at the limit, the least recently used idle runtime is released for it at once, instead of at its idle limit. Persisted thread identities let Coordinator and Team Leader sessions resume after release.
 
 **Node runtime.** Deployment and local acceptance use the Node version pinned in the repository's CI configuration, matching the existing service runtime. A runtime upgrade must first verify real permission-worker writes and recovery; a successful model response does not establish filesystem compatibility.
 
