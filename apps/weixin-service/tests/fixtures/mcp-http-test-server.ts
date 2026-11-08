@@ -103,8 +103,8 @@ export async function startAuthorizationServer(options: { clientId: string; clie
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
       return json({
         issuer,
-        // RFC 8414 lists the authorization endpoint as required, and the client SDK's metadata schema insists on it, so it
-        // is published even though only client_credentials is served.
+        // RFC 8414 lets a server that serves no authorization-endpoint grant omit this, but the client SDK's metadata
+        // schema refuses a document without it (invalid_type at authorization_endpoint), so it is published.
         authorization_endpoint: `${issuer}/authorize`,
         token_endpoint: `${issuer}/token`,
         response_types_supported: ["code"],

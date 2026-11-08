@@ -75,6 +75,9 @@ async function connected(catalog: McpCatalog, name: string) {
   return catalog.viewServer(name);
 }
 
+/** Every file directly in the state directory, as text: no secret may survive in any of them. */
+const stateText = (state: string) => fs.readdirSync(state).filter((file) => fs.statSync(path.join(state, file)).isFile()).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
+
 async function callJson(catalog: McpCatalog, tool: string) {
   const result = await catalog.call(tool, {});
   return JSON.parse(result.text);
@@ -292,13 +295,12 @@ describe("changes and deletion", () => {
     const files = testServerFiles(work);
     register(catalog, input("gone", files));
     await connected(catalog, "gone");
-    const stateText = () => fs.readdirSync(state).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
-    expect(stateText()).toContain(SECRET_SENTINEL);
+    expect(stateText(state)).toContain(SECRET_SENTINEL);
 
     await catalog.remove("gone", actor);
     await vi.waitFor(() => expect(isAlive(starts(files)[0]!.pid)).toBe(false), WAIT);
     expect(catalog.view()).toEqual([]);
-    expect(stateText()).not.toContain(SECRET_SENTINEL);
+    expect(stateText(state)).not.toContain(SECRET_SENTINEL);
   });
 
   it("after a restart enabled servers reconnect and reviews persist", async () => {
@@ -425,8 +427,6 @@ async function authorizationServer(options: { dpop?: boolean } = {}): Promise<Au
   return as;
 }
 
-const stateText = (state: string) => fs.readdirSync(state).filter((file) => fs.statSync(path.join(state, file)).isFile()).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
-
 describe("URL servers", () => {
   it("a URL server sends its headers on every request and masks their values in errors", async () => {
     const { open } = setup({ retryMs: 60_000 });
@@ -503,6 +503,25 @@ describe("URL servers", () => {
     await vi.waitFor(() => expect(catalog.viewServer("later")).toMatchObject({ state: "failed", retryAt: expect.any(String) }), WAIT);
     await httpServer({ port });
     await connected(catalog, "later");
+  });
+
+  it.each([
+    ["a failed call", { refreshMs: 0 }],
+    ["the periodic listing", { refreshMs: 200 }],
+  ])("a URL server that stops answering is noticed through %s and retried", async (_case, options) => {
+    const { open } = setup({ retryMs: 200, ...options });
+    const catalog = open();
+    const first = await httpServer();
+    const port = Number(new URL(first.url).port);
+    register(catalog, { name: "gone", transport: "http", url: first.url });
+    await connected(catalog, "gone");
+
+    await first.close();
+    if (options.refreshMs === 0) await expect(catalog.call("mcp__gone__whoami", {})).rejects.toThrow();
+    await vi.waitFor(() => expect(catalog.viewServer("gone")).toMatchObject({ state: "failed", retryAt: expect.any(String) }), { timeout: 3_000, interval: 50 });
+    const back = await httpServer({ port });
+    await connected(catalog, "gone");
+    await vi.waitFor(() => expect(back.requests.length).toBeGreaterThan(0), WAIT);
   });
 
   it("changing transport or URL needs confirmation, and the other transport's secrets leave the disk", async () => {

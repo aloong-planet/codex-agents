@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
-import { Client, ClientCredentialsProvider, DpopSession, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Client, ClientCredentialsProvider, DpopSession, ProtocolError, SdkError, SdkErrorCode, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 import type { ConsoleAudit } from "./console-audit.js";
@@ -235,6 +235,16 @@ function describe(settings: ServerSettings): Record<string, unknown> {
     return { transport: "http", launchLine: settings.url, headerNames: settings.headerNames, ...(settings.oauth ? { oauth: settings.oauth } : {}), dpop: settings.dpop };
   }
   return { transport: "stdio", launchLine: launchLine(settings), envNames: settings.envNames, ...(settings.cwd ? { cwd: settings.cwd } : {}), ...(settings.sandbox ? { sandbox: settings.sandbox } : {}) };
+}
+
+/**
+ * Whether a failed request to a URL server means the server can no longer be reached. A JSON-RPC error is the server
+ * answering, and a timeout may be a slow tool; both keep the connection. A URL server has no process whose exit
+ * announces the loss, so a failed request is how it shows.
+ */
+function connectionLost(error: unknown): boolean {
+  if (error instanceof ProtocolError) return false;
+  return !(error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout);
 }
 
 function transportOf(value: unknown): Transport {
@@ -503,7 +513,11 @@ export class McpCatalog {
     const status = this.statusOf(server, tool);
     if (status.needsUser) throw new McpCallRefused("服务器要求每次调用都由人确认，不提供这类工具");
     if (status.pending) throw new McpCallRefused(`该工具${status.pending === "new" ? "是新增的" : "的定义有变化"}，等待复核`);
-    const result = await connection.client.callTool({ name: toolName, arguments: args }, { timeout: server.timeout * 1000 });
+    const generation = connection.generation;
+    const result = await connection.client.callTool({ name: toolName, arguments: args }, { timeout: server.timeout * 1000 }).catch((error: unknown) => {
+      if (server.transport === "http" && connectionLost(error)) this.reconnectAfterLoss(server.name, generation);
+      throw error;
+    });
     const text = (result.content ?? []).map((block) => (block.type === "text" ? block.text : `[${block.type}]`)).join("\n");
     return { text, isError: result.isError === true };
   }
@@ -755,7 +769,10 @@ export class McpCatalog {
         };
         this.pinFirstListing(name, tools);
         const every = this.options.refreshMs ?? REFRESH_MS;
-        if (every > 0 && !client.getServerCapabilities()?.tools?.listChanged) {
+        // A URL server is listed again even when it announces changes: notifications unrelated to a request travel on
+        // its optional GET stream (MCP Streamable HTTP), and the listing is also how the host notices that the address
+        // stopped answering.
+        if (every > 0 && (server.transport === "http" || !client.getServerCapabilities()?.tools?.listChanged)) {
           connection.refreshTimer = setInterval(() => void this.refresh(name, generation), every);
           connection.refreshTimer.unref();
         }
@@ -834,8 +851,18 @@ export class McpCatalog {
   private async refresh(name: string, generation: number): Promise<void> {
     const connection = this.connections.get(name);
     if (!connection?.client || connection.generation !== generation) return;
-    const listed = await connection.client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS }).catch(() => undefined);
+    const listed = await connection.client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS }).catch((error: unknown) => {
+      if (this.find(name)?.transport === "http" && connectionLost(error)) this.reconnectAfterLoss(name, generation);
+      return undefined;
+    });
     if (listed) this.applyTools(name, generation, listed.tools as ToolDefinition[]);
+  }
+
+  /** A URL server that stopped answering is connected again at once; a failure then retries as after any failure. */
+  private reconnectAfterLoss(name: string, generation: number): void {
+    const connection = this.connections.get(name);
+    if (!connection || connection.generation !== generation || this.closed || !this.find(name)?.enabled) return;
+    void this.connect(name, true).catch(() => {});
   }
 
   private applyTools(name: string, generation: number, tools: ToolDefinition[]): void {
