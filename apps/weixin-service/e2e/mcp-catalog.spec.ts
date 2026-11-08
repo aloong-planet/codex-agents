@@ -51,10 +51,10 @@ test("registers a local program only after confirming its exact command", async 
   writeTools(files.tools, [LOOKUP]);
   await page.goto(`${fixtureServer.url}/console/mcp`);
 
-  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveCount(1);
+  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveText(["团队管理", "MCP 管理"]);
   await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("MCP 管理");
   await expect(page.getByRole("button", { name: "添加服务器" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "返回团队管理" })).toHaveCount(0);
+  await expect(page.locator(".amc-actions").getByRole("link", { name: "返回团队管理" })).toHaveAttribute("href", "/console/teams");
   await expect(page.getByRole("button", { name: "导入 JSON" })).toBeVisible();
   await expect(page.locator("#amc-rows .acv2-empty")).toHaveText(/还没有 MCP 服务器。\s*点「添加服务器」登记本机程序。/);
   await testInfo.attach("empty-table", { body: await page.screenshot(), contentType: "image/png" });

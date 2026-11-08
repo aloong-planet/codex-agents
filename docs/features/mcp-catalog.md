@@ -9,6 +9,7 @@ The owner wants to give agents capabilities beyond module permissions through MC
 ## Capabilities
 
 - MCP 管理 lists every registered server with its name, 本机程序 with the command it runs or 网址 with its address, its state with any error and the time of the next automatic retry, its tool count with the usable count and the tools waiting for review, and the profiles that attach it. With no server registered, the table says so and points to 添加服务器.
+- 「返回团队管理」 leads to the team management page.
 - 添加服务器 opens a form in a drawer. Field labels carry required and optional tags, and explanations sit in info tips:
   - a name of 1–32 letters, digits, `_` or `-`, unique and fixed after creation, which becomes part of every tool name;
   - the connection type, 本机程序（stdio） or 网址（Streamable HTTP）;

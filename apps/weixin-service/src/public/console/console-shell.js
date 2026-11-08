@@ -5,11 +5,15 @@
 (() => {
   // Icon bodies from the owner-confirmed prototype (agent-link's Lucide-style 24px strokes).
   const ICONS = {
+    idcard: '<path d="M13 19a4 4 0 00-8 0"/><path d="M16 10h2"/><path d="M16 14h2"/><circle cx="9" cy="12" r="3"/><rect x="2" y="5" width="20" height="14" rx="2"/>',
     plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   };
-  const PAGES = [{ id: "mcp", label: "MCP 管理", icon: "plug", href: "/console/mcp" }];
+  const PAGES = [
+    { id: "teams", label: "团队管理", icon: "idcard", href: "/console/teams" },
+    { id: "mcp", label: "MCP 管理", icon: "plug", href: "/console/mcp" },
+  ];
   const APP_NAME = "Codex Weixin";
 
   const icon = (name) => `<svg class="acv-i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;

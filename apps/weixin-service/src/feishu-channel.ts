@@ -6,6 +6,7 @@ import type { NotificationChannel, NotificationDestination } from "./notificatio
 import type { DurableInboundStore } from "./durable-inbound-store.js";
 import type { DurableEffectLedger } from "./durable-effect-ledger.js";
 import type { FeishuInboundMedia } from "./feishu-inbound-media.js";
+import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 
 /** Authenticated SDK boundary. start resolves only after its connection is ready. */
 export interface FeishuTransport {
@@ -39,6 +40,9 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   private lastInboundAt: number | undefined;
   private agentDispatcher: ((message: InboundContent) => void) | undefined;
   private agentSenders = new Map<string, { transport: FeishuTransport; ready: () => boolean }>();
+  // The Coordinator and the Team Leaders with a sending application, read on each use so that a team saved while the service
+  // runs is recognized when mentioned and posts with its own application (ticket 11, decision D5).
+  private agentRoster: () => FeishuDispatchConfiguration["agents"] = () => this.config.dispatch?.agents ?? [];
 
   constructor(
     private readonly config: Extract<ChannelStartupEntry, { channel: "feishu" }>,
@@ -87,11 +91,15 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   }
 
   activateInboundDispatch(): void { this.dispatchEnabled = true; this.kick(); }
-  bindAgentDispatcher(dispatcher: (message: InboundContent) => void, senders: ReadonlyMap<string, { transport: FeishuTransport; ready: () => boolean }>): void {
+  bindAgentDispatcher(dispatcher: (message: InboundContent) => void, senders: ReadonlyMap<string, { transport: FeishuTransport; ready: () => boolean }>,
+    agents?: () => FeishuDispatchConfiguration["agents"]): void {
     if (this.started || this.agentDispatcher || !this.config.dispatch) throw new Error("feishu_agent_dispatch_binding_invalid");
     this.agentDispatcher = dispatcher;
     this.agentSenders = new Map(senders);
+    if (agents) this.agentRoster = agents;
   }
+  /** Adds or replaces the sending application of a Team Leader whose application was saved while the service runs. */
+  setAgentSender(appId: string, sender: { transport: FeishuTransport; ready: () => boolean }): void { this.agentSenders.set(appId, sender); }
   usesAgentDispatch(target: string): boolean {
     const chatId = this.config.owner.deliveryTarget(this.config.owner.conversationAddress().accountId, target);
     return chatId !== undefined && this.config.dispatch?.groupChatIds.includes(chatId) === true;
@@ -205,7 +213,7 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
           mentionedAgentIds = [...new Set(mentions.flatMap((value) => {
             const mention = object(value);
             if (mention?.id_type !== "app_id") return [];
-            const agent = this.config.dispatch!.agents.find(({ appId }) => appId === mention.id);
+            const agent = this.agentRoster().find(({ appId }) => appId === mention.id);
             return agent ? [agent.id] : [];
           }))];
         }
@@ -324,7 +332,7 @@ export class FeishuChannel implements ConversationChannel, NotificationChannel {
   private application(destination: { target: string; senderAccountId?: string }): { transport: FeishuTransport; ready(): boolean; generation: string } | undefined {
     if (!destination.senderAccountId) return { transport: this.transport, ready: () => this.ready, generation: this.generation };
     if (!this.usesAgentDispatch(destination.target)) return undefined;
-    const agent = this.config.dispatch?.agents.find((item) => item.appId === destination.senderAccountId);
+    const agent = this.agentRoster().find((item) => item.appId === destination.senderAccountId);
     if (!agent) return undefined;
     if (agent.appId === this.config.connection.appId) return { transport: this.transport, ready: () => this.ready, generation: this.generation };
     const sender = this.agentSenders.get(agent.appId);

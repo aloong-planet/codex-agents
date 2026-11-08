@@ -15,13 +15,14 @@ let telemetryBuilt = false;
 /**
  * Starts the service in fixture mode in its own state directory. The harness authorizes itself through the
  * console control channel, like the owner's login command, and exposes `cookie` for its own state reads and
- * `loginLink()` for browsers.
+ * `loginLink()` for browsers. `channelConfiguration` is written as the service's channel configuration file, and `env`
+ * adds fixture switches for that start.
  */
 export async function startFixtureServer(
   modelMode: string,
   routerMode: string,
   fileScanLimit?: number,
-  options: { stateDirectory?: string; businessDirectory?: string; port?: number } = {},
+  options: { stateDirectory?: string; businessDirectory?: string; port?: number; channelConfiguration?: unknown; env?: Record<string, string> } = {},
 ) {
   if (![modelMode, routerMode].every((mode) => mode === "live" || mode === "fixture")) {
     throw new Error("invalid E2E model mode: use live or fixture");
@@ -34,6 +35,8 @@ export async function startFixtureServer(
   // Business files live outside the state directory, as in production, where file tools refuse the state directory.
   const businessDirectory = options.businessDirectory ?? fs.mkdtempSync(path.join(os.tmpdir(), "weixin-e2e-business-"));
   const traceFile = path.join(directory, "service.log");
+  const channelConfigurationPath = path.join(directory, "channel.json");
+  if (options.channelConfiguration !== undefined) fs.writeFileSync(channelConfigurationPath, JSON.stringify(options.channelConfiguration), { mode: 0o600 });
   const otelDirectory = path.join(directory, "otel");
   const reservation = net.createServer();
   await new Promise<void>((resolve, reject) => {
@@ -53,7 +56,8 @@ export async function startFixtureServer(
       WORKFLOW_SIMULATOR_MODEL: modelMode, WORKFLOW_SIMULATOR_PENDING_ROUTER: routerMode,
       WORKFLOW_FIXTURE_FILE_SCAN_LIMIT: fileScanLimit === undefined ? "" : String(fileScanLimit),
       WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: businessDirectory, WEIXIN_OTEL_DIRECTORY: otelDirectory,
-      WORKFLOW_FIXTURE_TRACE_FILE: traceFile, WEIXIN_OTEL_ENABLED: "1" },
+      WORKFLOW_FIXTURE_TRACE_FILE: traceFile, WEIXIN_OTEL_ENABLED: "1",
+      ...(options.channelConfiguration === undefined ? {} : { CHANNEL_CONFIG_PATH: channelConfigurationPath }), ...options.env },
   });
   fs.closeSync(fd);
   let spawnError: Error | undefined;
