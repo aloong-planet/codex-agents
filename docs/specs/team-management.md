@@ -11,7 +11,7 @@
 
 ## Problem Statement
 
-Adding, changing or removing an Agent Team means editing local files and restarting the service, and every dispatch group gets the same four roles. The owner wants to build a group's roster from the console, onboard a new Team Leader's Feishu identity without the developer console, and give each team its own instructions, tools, MCP servers and skills. The Coordinator and the other Team Leaders must follow those changes without interrupting work in progress.
+Adding, changing or removing an Agent Team meant editing local files and restarting the service, and every dispatch group got the same four roles. The owner wants to build a group's roster from the console, onboard a new Team Leader's Feishu identity without the developer console, and give each team its own instructions, tools, MCP servers and skills. The Coordinator and the other Team Leaders must follow those changes without interrupting work in progress.
 
 ## Solution
 
