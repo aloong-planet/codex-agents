@@ -89,8 +89,9 @@ describe.skipIf(process.env.CODEX_WEIXIN_PROCESS_TEST !== "1")("full service pro
   it.each(["accepted", "running"] as const)("production_resolver_retirement %s notifies once and preserves normal inbound after restart", async (legacy) => {
     const fixture = await startFixture({ legacy, liveMain: true });
     try {
-      // The notifier and channels start after the Codex service reports idle, so the notice
-      // arrives during the rest of startup; wait for it within the fixture start bound.
+      // The notifier and channels start after the Codex service reports idle, so the notice arrives
+      // during the rest of startup: a process wait (tests/support/process-wait.ts), bounded here by
+      // the fixture start bound.
       await expect.poll(async () => (await fixture.state()).fixtureTextOutbox.filter((entry) =>
         entry.message === "之前的文件查找任务已结束。若仍需要这个文件，请重新告诉我。" ), { timeout: 20_000 }).toHaveLength(1);
       const retired = await fixture.state();

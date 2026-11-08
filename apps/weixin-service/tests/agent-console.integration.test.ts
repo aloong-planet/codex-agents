@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { exchangeLoginLink } from "../e2e/console-session.js";
 import { startFixtureServer } from "../e2e/fixture-server.js";
+import { signalProcessGroup } from "./support/process-group.js";
 
 const SERVICE_DIRECTORY = fileURLToPath(new URL("../", import.meta.url));
 const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
@@ -136,7 +137,7 @@ describe("console login command against the running service", () => {
     const stateDirectory = temporaryDirectory("agent-console-state-");
     const server = await startService({ stateDirectory });
     // Kill the service's whole process group, as a crash or `kill -9` would; no shutdown cleanup runs.
-    process.kill(-server.pid, "SIGKILL");
+    signalProcessGroup(server.pid, "SIGKILL");
     const until = Date.now() + 5_000;
     while (Date.now() < until && (await fetch(`${server.url}/api/state`).then(() => true, () => false))) await delay(50);
     expect(fs.existsSync(path.join(stateDirectory, "console-control.json"))).toBe(true);
