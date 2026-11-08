@@ -10,6 +10,9 @@
 //   registry.npmjs.org allowed is not driven: running third-party registry code is not permitted in this test
 //   environment. It needs a manual check with network access.
 // - The child-environment case can show only the absence of keys the parent environment held; it plants four.
+// - URL servers run against local HTTP test servers (fixtures/mcp-http-test-server.ts) on loopback http, which the
+//   rules allow; TLS and real third-party OAuth providers are not driven. DPoP proofs are checked by the test server's
+//   own verifier (self-checked in fixtures/mcp-http-test-server.test.ts), not by a production authorization server.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +22,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { McpCallRefused, McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
-import { SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { freePort, startAuthorizationServer, startHttpTestServer, type AuthorizationServer, type HttpTestServerOptions } from "./fixtures/mcp-http-test-server.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 
 const LOCAL_NPX_PACKAGE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "mcp-local-npx-package");
 
@@ -70,6 +74,9 @@ async function connected(catalog: McpCatalog, name: string) {
   await vi.waitFor(() => expect(catalog.viewServer(name).state).toBe("connected"), WAIT);
   return catalog.viewServer(name);
 }
+
+/** Every file directly in the state directory, as text: no secret may survive in any of them. */
+const stateText = (state: string) => fs.readdirSync(state).filter((file) => fs.statSync(path.join(state, file)).isFile()).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
 
 async function callJson(catalog: McpCatalog, tool: string) {
   const result = await catalog.call(tool, {});
@@ -288,13 +295,12 @@ describe("changes and deletion", () => {
     const files = testServerFiles(work);
     register(catalog, input("gone", files));
     await connected(catalog, "gone");
-    const stateText = () => fs.readdirSync(state).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
-    expect(stateText()).toContain(SECRET_SENTINEL);
+    expect(stateText(state)).toContain(SECRET_SENTINEL);
 
     await catalog.remove("gone", actor);
     await vi.waitFor(() => expect(isAlive(starts(files)[0]!.pid)).toBe(false), WAIT);
     expect(catalog.view()).toEqual([]);
-    expect(stateText()).not.toContain(SECRET_SENTINEL);
+    expect(stateText(state)).not.toContain(SECRET_SENTINEL);
   });
 
   it("after a restart enabled servers reconnect and reviews persist", async () => {
@@ -407,4 +413,256 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     await catalog.remove("npxbox", actor);
     expect(fs.existsSync(own)).toBe(false);
   }, 90_000);
+});
+
+async function httpServer(options: HttpTestServerOptions = {}) {
+  const server = await startHttpTestServer(options);
+  cleanup.push(server.close);
+  return server;
+}
+
+async function authorizationServer(options: { dpop?: boolean } = {}): Promise<AuthorizationServer> {
+  const as = await startAuthorizationServer({ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, ...options });
+  cleanup.push(as.close);
+  return as;
+}
+
+describe("URL servers", () => {
+  it("a URL server sends its headers on every request and masks their values in errors", async () => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const server = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
+    const refusing = await httpServer({ echoHeaders: ["X-Api-Key"] });
+
+    register(catalog, { name: "remote", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
+    register(catalog, { name: "refused", transport: "http", url: refusing.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
+    expect((await connected(catalog, "remote")).server).toEqual({ name: "catalog-http-test-server", version: "2.0.1" });
+    expect(await callJson(catalog, "mcp__remote__whoami")).toEqual({ scheme: "none", scope: null, headers: ["X-Api-Key"] });
+    const seen = server.requests.map((request) => request.headers["X-Api-Key"]);
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(seen)).toEqual(new Set([HEADER_SENTINEL]));
+
+    await vi.waitFor(() => expect(catalog.viewServer("refused").state).toBe("failed"), WAIT);
+    expect(refusing.forbiddenBodies.join("\n")).toContain(HEADER_SENTINEL);
+    const view = catalog.viewServer("refused");
+    expect(view.error).toContain("X-Api-Key=***");
+    expect(JSON.stringify(view)).not.toContain(HEADER_SENTINEL);
+  });
+
+  it("OAuth client_credentials gets a token from the configured issuer and presents it", async () => {
+    const { open } = setup();
+    const catalog = open();
+    const as = await authorizationServer();
+    const server = await httpServer({ authorizationServer: as });
+
+    register(catalog, { name: "docs", transport: "http", url: server.url, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read" } });
+    await connected(catalog, "docs");
+    expect(await callJson(catalog, "mcp__docs__whoami")).toEqual({ scheme: "Bearer", scope: "docs:read", headers: [] });
+    expect(as.tokenRequests).toEqual([{ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read", dpop: false, granted: true }]);
+    const presented = server.requests.filter((request) => request.scheme !== "refused");
+    expect(presented.length).toBeGreaterThanOrEqual(2);
+    for (const request of presented) expect(request).toMatchObject({ scheme: "Bearer", token: as.issued[0]!.token });
+  });
+
+  it("with DPoP the token is bound to the proof key and presented as DPoP", async () => {
+    const { open } = setup();
+    const catalog = open();
+    const as = await authorizationServer({ dpop: true });
+    const server = await httpServer({ authorizationServer: as });
+
+    register(catalog, { name: "bound", transport: "http", url: server.url, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop: true });
+    await connected(catalog, "bound");
+    expect(await callJson(catalog, "mcp__bound__whoami")).toMatchObject({ scheme: "DPoP" });
+    expect(as.tokenRequests).toMatchObject([{ dpop: true, granted: true }]);
+    expect(as.issued).toMatchObject([{ type: "DPoP", jkt: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) }]);
+    const presented = server.requests.filter((request) => request.scheme !== "refused");
+    expect(presented.length).toBeGreaterThanOrEqual(2);
+    for (const request of presented) expect(request).toMatchObject({ scheme: "DPoP", token: as.issued[0]!.token });
+  });
+
+  it("the client secret goes only to the configured issuer", async () => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const configured = await authorizationServer();
+    const decoy = await authorizationServer();
+    const server = await httpServer({ authorizationServer: configured, advertiseIssuer: decoy.issuer });
+
+    register(catalog, { name: "misled", transport: "http", url: server.url, oauth: { issuer: configured.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } });
+    await vi.waitFor(() => expect(catalog.viewServer("misled").state).toBe("failed"), WAIT);
+    expect(catalog.viewServer("misled").error).toBeTruthy();
+    expect(decoy.tokenRequests).toEqual([]);
+    expect(configured.tokenRequests).toEqual([]);
+  });
+
+  it("an unreachable URL fails and is retried until it answers", async () => {
+    const { open } = setup({ retryMs: 200 });
+    const catalog = open();
+    const port = await freePort();
+
+    register(catalog, { name: "later", transport: "http", url: `http://127.0.0.1:${port}/mcp` });
+    await vi.waitFor(() => expect(catalog.viewServer("later")).toMatchObject({ state: "failed", retryAt: expect.any(String) }), WAIT);
+    await httpServer({ port });
+    await connected(catalog, "later");
+  });
+
+  it.each([
+    ["a failed call", { refreshMs: 0 }],
+    // The server announces list changes: a URL server is listed again all the same.
+    ["the periodic listing", { refreshMs: 200 }],
+  ])("a URL server that stops answering is noticed through %s and retried", async (_case, options) => {
+    const { open } = setup({ retryMs: 200, ...options });
+    const catalog = open();
+    const first = await httpServer({ listChanged: true });
+    const port = Number(new URL(first.url).port);
+    register(catalog, { name: "gone", transport: "http", url: first.url });
+    await connected(catalog, "gone");
+
+    await first.close();
+    if (options.refreshMs === 0) await expect(catalog.call("mcp__gone__whoami", {})).rejects.toThrow();
+    await vi.waitFor(() => expect(catalog.viewServer("gone")).toMatchObject({ state: "failed", retryAt: expect.any(String) }), { timeout: 3_000, interval: 50 });
+    const back = await httpServer({ port });
+    await connected(catalog, "gone");
+    await vi.waitFor(() => expect(back.requests.length).toBeGreaterThan(0), WAIT);
+  });
+
+  it("changing transport or URL needs confirmation, and the other transport's secrets leave the disk", async () => {
+    const { work, state, open } = setup();
+    const catalog = open();
+    const files = testServerFiles(work);
+    const first = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
+    const second = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
+    register(catalog, input("moving", files));
+    await connected(catalog, "moving");
+    const pid = starts(files)[0]!.pid;
+
+    const toUrl = { name: "moving", transport: "http", url: first.url, headers: { "X-Api-Key": HEADER_SENTINEL } };
+    expect(catalog.preview(toUrl, "moving")).toEqual({ launchLine: first.url, needsConfirmation: true });
+    expect(() => catalog.update("moving", toUrl, { actor })).toThrow("请先确认将要连接的地址：确认卡片上的地址与当前填写的不一致");
+    expect((await callJson(catalog, "mcp__moving__whoami")).pid).toBe(pid);
+
+    catalog.update("moving", toUrl, { confirmed: first.url, actor });
+    await vi.waitFor(() => expect(catalog.viewServer("moving").server?.name).toBe("catalog-http-test-server"), WAIT);
+    // The URL server's whoami differs from the program's, and lookup is new: both wait for review (REQ-002).
+    expect(Object.fromEntries(catalog.viewServer("moving").tools.map((tool) => [tool.name, tool.pending]))).toEqual({ whoami: "changed", lookup: "new" });
+    catalog.approve("moving", undefined, actor);
+    expect(await callJson(catalog, "mcp__moving__whoami")).toMatchObject({ scheme: "none" });
+    await vi.waitFor(() => expect(isAlive(pid)).toBe(false), WAIT);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    expect(stateText(state)).not.toContain(SECRET_SENTINEL);
+
+    const kept = { ...toUrl, headers: { "X-Api-Key": "••••••" }, timeout: 90 };
+    expect(catalog.preview(kept, "moving").needsConfirmation).toBe(false);
+    catalog.update("moving", kept, { actor });
+    expect(catalog.viewServer("moving")).toMatchObject({ headers: { "X-Api-Key": "••••••" }, timeout: 90 });
+
+    const moved = { ...kept, url: second.url };
+    expect(() => catalog.update("moving", moved, { actor })).toThrow("请先确认将要连接的地址");
+    catalog.update("moving", moved, { confirmed: second.url, actor });
+    await vi.waitFor(() => expect(second.requests.length).toBeGreaterThan(0), WAIT);
+    await connected(catalog, "moving");
+    expect(new Set(second.requests.map((request) => request.headers["X-Api-Key"]))).toEqual(new Set([HEADER_SENTINEL]));
+  }, 20_000);
+
+  it("after a restart a URL server reconnects with a new token, and no token is stored", async () => {
+    const { state, open } = setup();
+    const as = await authorizationServer();
+    const server = await httpServer({ authorizationServer: as });
+    const first = open();
+    register(first, { name: "kept", transport: "http", url: server.url, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } });
+    await connected(first, "kept");
+    await first.close();
+
+    const second = open();
+    second.start();
+    await connected(second, "kept");
+    expect(as.issued).toHaveLength(2);
+    const text = stateText(state);
+    for (const issued of as.issued) expect(text).not.toContain(issued.token);
+    expect(fs.readFileSync(path.join(state, "mcp-secrets.json"), "utf8")).toContain(CLIENT_SECRET_SENTINEL);
+    const others = fs.readdirSync(state).filter((name) => name !== "mcp-secrets.json" && fs.statSync(path.join(state, name)).isFile());
+    expect(others).toEqual(expect.arrayContaining(["mcp-catalog.json", "console-audit.jsonl"]));
+    for (const file of others) expect(fs.readFileSync(path.join(state, file), "utf8")).not.toContain(CLIENT_SECRET_SENTINEL);
+  });
+
+  it("header values and the client secret leave the disk when dropped or deleted", async () => {
+    const { work, state, open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const server = await httpServer();
+    const remote = { name: "remote", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: "http://127.0.0.1:9", clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } };
+    register(catalog, remote);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    expect(stateText(state)).toContain(CLIENT_SECRET_SENTINEL);
+    await catalog.remove("remote", actor);
+    expect(stateText(state)).not.toContain(HEADER_SENTINEL);
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
+
+    register(catalog, remote);
+    expect(stateText(state)).toContain(CLIENT_SECRET_SENTINEL);
+    catalog.update("remote", { ...remote, headers: { "X-Api-Key": "••••••" }, oauth: null }, { actor });
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
+    expect(stateText(state)).toContain(HEADER_SENTINEL);
+    const local = input("remote", testServerFiles(work));
+    catalog.update("remote", local, { confirmed: catalog.preview(local, "remote").launchLine, actor });
+    expect(stateText(state)).not.toContain(HEADER_SENTINEL);
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
+  }, 20_000);
+});
+
+describe("importing from JSON", () => {
+  it("importing registers exactly the confirmed servers, untrusted and unattached", async () => {
+    const { work, state, open } = setup();
+    const catalog = open();
+    const local = testServerFiles(work, "local");
+    const off = testServerFiles(work, "off");
+    const remote = await httpServer();
+    register(catalog, input("taken", testServerFiles(work, "taken")));
+    // Claude Code's shapes: an explicit stdio type with an env object, an http type with headers; Cursor's sse entry.
+    const document = JSON.stringify({
+      mcpServers: {
+        local: { type: "stdio", command: process.execPath, args: testServerArgs(local), env: { SECRET_TOKEN: SECRET_SENTINEL } },
+        remote: { type: "http", url: remote.url, headers: { "X-Api-Key": "${input:key}", "X-Trace": HEADER_SENTINEL } },
+        off: { command: process.execPath, args: testServerArgs(off), disabled: true },
+        taken: { command: "npx", args: ["taken"] },
+        legacy: { type: "sse", url: "http://127.0.0.1:3845/sse" },
+      },
+    });
+
+    const checked = catalog.checkImport(document);
+    expect(checked).toEqual([
+      { name: "local", ok: true, transport: "stdio", line: [process.execPath, ...testServerArgs(local)].join(" "), fill: [], enabled: true },
+      { name: "remote", ok: true, transport: "http", line: remote.url, fill: ["X-Api-Key"], enabled: true },
+      { name: "off", ok: true, transport: "stdio", line: [process.execPath, ...testServerArgs(off)].join(" "), fill: [], enabled: false },
+      { name: "taken", ok: false, reason: "已有同名服务器" },
+      { name: "legacy", ok: false, reason: "SSE 传输，不支持" },
+    ]);
+    const shown = checked.flatMap((entry) => (entry.ok ? [{ name: entry.name, line: entry.line }] : []));
+
+    expect(() => catalog.importServers(document, { confirmed: [...shown, { name: "extra", line: "npx extra" }], actor })).toThrow("要导入的服务器已有变化，请重新检查后再确认");
+    expect(catalog.view().map((server) => server.name)).toEqual(["taken"]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(starts(local)).toEqual([]);
+
+    catalog.importServers(document, { confirmed: shown, actor });
+    expect(catalog.view().map((server) => server.name)).toEqual(["taken", "local", "remote", "off"]);
+    for (const name of ["local", "remote", "off"]) expect(catalog.viewServer(name)).toMatchObject({ trusted: false, attachedProfiles: [] });
+    expect(await connected(catalog, "local")).toMatchObject({ env: { SECRET_TOKEN: "••••••" } });
+    expect(await connected(catalog, "remote")).toMatchObject({ headers: { "X-Api-Key": "", "X-Trace": "••••••" }, dpop: false });
+    expect(starts(local)).toHaveLength(1);
+    expect(catalog.viewServer("off").state).toBe("disabled");
+    expect(starts(off)).toEqual([]);
+
+    const audit = fs.readFileSync(path.join(state, AUDIT_FILE), "utf8");
+    const entry = audit.trim().split("\n").map((line) => JSON.parse(line)).at(-1);
+    expect(entry).toMatchObject({
+      event: "mcp_servers_imported",
+      browser: { id: "b1" },
+      servers: [
+        { server: "local", transport: "stdio", launchLine: [process.execPath, ...testServerArgs(local)].join(" "), envNames: ["SECRET_TOKEN"], enabled: true },
+        { server: "remote", transport: "http", launchLine: remote.url, headerNames: ["X-Api-Key", "X-Trace"], enabled: true },
+        { server: "off", transport: "stdio", enabled: false },
+      ],
+    });
+    expect(audit).not.toContain(SECRET_SENTINEL);
+    expect(audit).not.toContain(HEADER_SENTINEL);
+  }, 20_000);
 });

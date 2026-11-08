@@ -11,9 +11,10 @@ import { McpConfigError } from "./mcp-catalog-rules.js";
  * The console's pages and APIs, mounted by both local servers (the settings demo server and the Feishu status
  * server) inside the authorization guard (agent-console::CON-001). Each console page adds its routes here.
  *
- * - `/console/mcp` and its assets: the MCP 管理 page (mcp-catalog::US-001, US-003, US-004, US-005).
- * - `/api/mcp/...`: the catalog API. No response carries a secret value (mcp-catalog::REQ-001); every change is
- *   audited with the authorized browser (agent-console::REQ-004).
+ * - `/console/mcp` and its assets: the MCP 管理 page (mcp-catalog::US-001 to US-005).
+ * - `/api/mcp/...`: the catalog API, including `/api/mcp/import/check` and `/api/mcp/import` for an `mcpServers`
+ *   document. No response carries a secret value (mcp-catalog::REQ-001); every change is audited with the authorized
+ *   browser (agent-console::REQ-004).
  */
 const CONSOLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "console");
 const MAX_BODY_BYTES = 64 * 1024;
@@ -93,6 +94,14 @@ export function createConsoleRoutes(options: { catalog: McpCatalog }): ConsoleRo
     }
     if (pathname === "/api/mcp/servers") {
       json(res, 200, { server: catalog.register(object(input.server, "服务器配置"), { confirmed: input.confirmed, actor }) });
+      return;
+    }
+    if (pathname === "/api/mcp/import/check") {
+      json(res, 200, { entries: catalog.checkImport(input.text) });
+      return;
+    }
+    if (pathname === "/api/mcp/import") {
+      json(res, 200, { servers: catalog.importServers(input.text, { confirmed: input.confirmed, actor }) });
       return;
     }
     const match = /^\/api\/mcp\/servers\/([^/]+)(?:\/(delete|reconnect|tools|approve))?$/.exec(pathname);

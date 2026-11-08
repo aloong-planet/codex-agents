@@ -38,7 +38,26 @@ export type StdioSettings = {
   sandbox?: SandboxSettings;
 };
 
-export type ServerSettings = StdioSettings & { name: string; timeout: number; trusted: boolean; enabled: boolean };
+export type OAuthSettings = { issuer: string; clientId: string; scope?: string };
+
+/** A URL server's readable configuration. Header values and the OAuth client secret are secrets and live apart from it. */
+export type HttpSettings = {
+  url: string;
+  headerNames: string[];
+  /** OAuth client_credentials; the token is requested from `issuer` only. */
+  oauth?: OAuthSettings;
+  /** Present the OAuth token with DPoP (RFC 9449); requires `oauth`. */
+  dpop: boolean;
+};
+
+export type Transport = "stdio" | "http";
+type Common = { name: string; timeout: number; trusted: boolean; enabled: boolean };
+export type StdioServerSettings = Common & { transport: "stdio" } & StdioSettings;
+export type HttpServerSettings = Common & { transport: "http" } & HttpSettings;
+export type ServerSettings = StdioServerSettings | HttpServerSettings;
+
+/** What a server runs or connects to: the part the owner confirms (mcp-catalog::US-001/AC-06, REQ-002). */
+export type ServerTarget = { transport?: "stdio"; command: string; args: string[] } | { transport: "http"; url: string };
 
 export type ToolDefinition = {
   name: string;
@@ -135,13 +154,13 @@ export function normalizeStdio(
  * Environment values are write-only (mcp-catalog::REQ-001): `KEEP` keeps the saved value, any other text replaces
  * it, and a name left out is removed.
  */
-export function mergeSecrets(input: Record<string, unknown>, saved: Readonly<Record<string, string>> | undefined): Record<string, string> {
+export function mergeSecrets(input: Record<string, unknown>, saved: Readonly<Record<string, string>> | undefined, what = "环境变量"): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [name, value] of Object.entries(input)) {
-    if (typeof value !== "string") throw new McpConfigError(`环境变量 ${name} 的值应为文本`);
+    if (typeof value !== "string") throw new McpConfigError(`${what} ${name} 的值应为文本`);
     if (value === KEEP) {
       const kept = saved?.[name];
-      if (kept === undefined) throw new McpConfigError(`环境变量 ${name} 没有已保存的值，请填写`);
+      if (kept === undefined) throw new McpConfigError(`${what} ${name} 没有已保存的值，请填写`);
       out[name] = kept;
     } else {
       out[name] = value;
@@ -150,19 +169,93 @@ export function mergeSecrets(input: Record<string, unknown>, saved: Readonly<Rec
   return out;
 }
 
+/** Hosts that may use plain http: the service and the server are on this machine (RFC 8252 §7.3). */
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost" || hostname.endsWith(".localhost") || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) || hostname === "[::1]";
+}
+
+/** An https address, or http on a loopback host; header values, secrets and tokens never travel unencrypted. */
+function checkAddress(raw: string, what: string): URL {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new McpConfigError(`${what}无效：${raw}`);
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url.hostname))) throw new McpConfigError(`${what}应以 https:// 开头，本机地址可用 http://：${raw}`);
+  if (url.username || url.password) throw new McpConfigError(`${what}不能包含用户名或密码，请改用请求头`);
+  return url;
+}
+
+/** An HTTP field name (RFC 9110 token). */
+const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+/** Headers that carry the OAuth token, which the service sets itself when OAuth is configured. */
+const TOKEN_HEADERS = new Set(["authorization", "dpop"]);
+
+/**
+ * Validates a URL server's fields (mcp-catalog::US-001/AC-04). Headers may sit beside OAuth, except Authorization and
+ * DPoP, which carry the OAuth token; DPoP needs OAuth. Header values are checked by `mergeSecrets`, the client secret
+ * by `mergeClientSecret`.
+ */
+export function normalizeHttp(input: { url?: unknown; headerNames?: unknown; oauth?: unknown; dpop?: unknown }): HttpSettings {
+  const raw = typeof input.url === "string" ? input.url.trim() : "";
+  if (!raw) throw new McpConfigError("请填写网址");
+  const url = checkAddress(raw, "网址");
+  const headerNames = stringList(input.headerNames, "请求头");
+  const seen = new Set<string>();
+  for (const name of headerNames) {
+    if (!HEADER_NAME.test(name)) throw new McpConfigError(`请求头名称不合法：${name}`);
+    if (seen.has(name.toLowerCase())) throw new McpConfigError(`请求头重复：${name}`);
+    seen.add(name.toLowerCase());
+  }
+  let oauth: OAuthSettings | undefined;
+  if (input.oauth !== undefined && input.oauth !== null && input.oauth !== false) {
+    if (typeof input.oauth !== "object" || Array.isArray(input.oauth)) throw new McpConfigError("OAuth 设置格式不正确");
+    const fields = input.oauth as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+    const issuer = text(fields.issuer);
+    const clientId = text(fields.clientId);
+    const scope = text(fields.scope);
+    if (issuer || clientId || scope) {
+      if (!issuer) throw new McpConfigError("请填写 OAuth 授权服务器");
+      checkAddress(issuer, "OAuth 授权服务器");
+      if (!clientId) throw new McpConfigError("请填写客户端 ID");
+      oauth = { issuer, clientId, ...(scope ? { scope } : {}) };
+    }
+  }
+  if (oauth) for (const name of headerNames) if (TOKEN_HEADERS.has(name.toLowerCase())) throw new McpConfigError(`已填写 OAuth 时，请求头不能包含 ${name}：令牌由 OAuth 取得`);
+  const dpop = input.dpop === true;
+  if (dpop && !oauth) throw new McpConfigError("DPoP 需要配合 OAuth 使用");
+  return { url: url.href, headerNames, ...(oauth ? { oauth } : {}), dpop };
+}
+
+/** The OAuth client secret is write-only (mcp-catalog::REQ-001): `KEEP` keeps the saved one, other text replaces it. */
+export function mergeClientSecret(value: unknown, saved: string | undefined): string {
+  if (value === KEEP) {
+    if (saved === undefined) throw new McpConfigError("客户端密钥没有已保存的值，请填写");
+    return saved;
+  }
+  if (typeof value !== "string" || !value) throw new McpConfigError("请填写客户端密钥");
+  return value;
+}
+
 function shellQuote(word: string): string {
   if (word !== "" && /^[A-Za-z0-9_@%+=:,./-]+$/.test(word)) return word;
   return `'${word.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The exact program the owner confirms, as a POSIX shell would read it (mcp-catalog::US-001/AC-06). */
-export function launchLine(settings: Pick<StdioSettings, "command" | "args">): string {
-  return [settings.command, ...settings.args].map(shellQuote).join(" ");
+/**
+ * The exact program or address the owner confirms (mcp-catalog::US-001/AC-06): a local program as a POSIX shell would
+ * read it, a URL server as the normalized URL it connects to.
+ */
+export function launchLine(target: ServerTarget): string {
+  if (target.transport === "http") return target.url;
+  return [target.command, ...target.args].map(shellQuote).join(" ");
 }
 
-/** A new server, or a change of what it runs, needs the owner to confirm the exact line (mcp-catalog::REQ-002). */
-export function needsConfirmation(previous: Pick<StdioSettings, "command" | "args"> | undefined, next: Pick<StdioSettings, "command" | "args">): boolean {
-  return previous === undefined || launchLine(previous) !== launchLine(next);
+/** A new server, or a change of what it runs or where it connects, needs the owner to confirm it (mcp-catalog::REQ-002). */
+export function needsConfirmation(previous: ServerTarget | undefined, next: ServerTarget): boolean {
+  return previous === undefined || (previous.transport ?? "stdio") !== (next.transport ?? "stdio") || launchLine(previous) !== launchLine(next);
 }
 
 /** Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors and logs. */
@@ -237,7 +330,7 @@ export type LaunchPlan = {
  * A Node.js prefix that fails the readable-directory checks refuses the start instead of widening the sandbox.
  */
 export function launchPlan(
-  settings: Pick<ServerSettings, "name" | "command" | "args" | "cwd" | "sandbox">,
+  settings: Pick<StdioServerSettings, "name" | "command" | "args" | "cwd" | "sandbox">,
   context: {
     homeDirectory: string;
     stateDirectory: string;
@@ -293,4 +386,93 @@ export function toolStatus(tool: ToolDefinition, server: { trusted: boolean; dis
     readOnly: server.trusted && tool.annotations?.readOnlyHint === true,
     mayModify: server.trusted && tool.annotations?.destructiveHint === true,
   };
+}
+
+/** A server the import would register, with its secret values; never sent to the browser. */
+export type ImportedServer =
+  | { transport: "stdio"; name: string; enabled: boolean; command: string; args: string[]; cwd?: string; env: Record<string, string> }
+  | { transport: "http"; name: string; enabled: boolean; url: string; headers: Record<string, string> };
+
+/** One server of an `mcpServers` document: to be imported, or skipped with the reason (mcp-catalog::US-002/AC-01). */
+export type ImportEntry =
+  | {
+      name: string;
+      ok: true;
+      transport: Transport;
+      /** The exact command or address the confirmation card shows. */
+      line: string;
+      /** Keys whose value was only a placeholder such as `${NAME}`: imported without a value, for the owner to fill in. */
+      fill: string[];
+      enabled: boolean;
+      server: ImportedServer;
+    }
+  | { name: string; ok: false; reason: string };
+
+/** A value that is only a placeholder another client would expand, such as `${GITHUB_TOKEN}` or `${input:key}`. */
+const PLACEHOLDER = /^\$\{[^}]*\}$/;
+const NAME_RULE = "只能包含英文字母、数字、_ 和 -，1–32 个字符";
+
+/** Secret values as imported: placeholders become empty values, named in `fill`. */
+function importedValues(value: unknown, what: string, fill: string[]): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) throw new McpConfigError(`${what}格式不正确`);
+  const out: Record<string, string> = {};
+  for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item !== "string") throw new McpConfigError(`${what} ${name} 的值应为文本`);
+    if (PLACEHOLDER.test(item)) fill.push(name);
+    out[name] = PLACEHOLDER.test(item) ? "" : item;
+  }
+  return out;
+}
+
+function importEntry(name: string, value: unknown, exists: (name: string) => boolean, context: SandboxContext): ImportEntry {
+  if (!SERVER_NAME.test(name)) return { name, ok: false, reason: `名称不合法：${NAME_RULE}` };
+  if (exists(name)) return { name, ok: false, reason: "已有同名服务器" };
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { name, ok: false, reason: "格式不正确" };
+  const entry = value as Record<string, unknown>;
+  const type = entry.type === undefined ? undefined : String(entry.type).toLowerCase();
+  if (type === "sse") return { name, ok: false, reason: "SSE 传输，不支持" };
+  if (type !== undefined && !["stdio", "http", "streamable-http", "streamablehttp"].includes(type)) return { name, ok: false, reason: `不支持的连接方式：${String(entry.type)}` };
+  const hasCommand = typeof entry.command === "string" && entry.command.trim() !== "";
+  const hasUrl = typeof entry.url === "string" && entry.url.trim() !== "";
+  const transport: Transport | undefined = type === "stdio" ? (hasCommand ? "stdio" : undefined)
+    : type !== undefined ? (hasUrl ? "http" : undefined)
+    : hasCommand && hasUrl ? undefined : hasCommand ? "stdio" : hasUrl ? "http" : undefined;
+  if (!transport) return { name, ok: false, reason: type === undefined && hasCommand && hasUrl ? "同时填写了命令和网址" : "缺少命令或网址" };
+  const enabled = entry.disabled !== true;
+  const fill: string[] = [];
+  try {
+    if (transport === "stdio") {
+      const env = importedValues(entry.env, "环境变量", fill);
+      const stdio = normalizeStdio({ command: entry.command, args: entry.args, cwd: entry.cwd, envNames: Object.keys(env) }, context);
+      const server: ImportedServer = { transport, name, enabled, command: stdio.command, args: stdio.args, ...(stdio.cwd ? { cwd: stdio.cwd } : {}), env };
+      return { name, ok: true, transport, line: launchLine(stdio), fill, enabled, server };
+    }
+    const headers = importedValues(entry.headers, "请求头", fill);
+    const http = normalizeHttp({ url: entry.url, headerNames: Object.keys(headers) });
+    return { name, ok: true, transport, line: http.url, fill, enabled, server: { transport, name, enabled, url: http.url, headers } };
+  } catch (error) {
+    if (error instanceof McpConfigError) return { name, ok: false, reason: error.message };
+    throw error;
+  }
+}
+
+/**
+ * Checks an `{"mcpServers": {…}}` document (mcp-catalog::US-002/AC-01). Each server is to be imported or skipped with
+ * the reason; a document that is not JSON or has no `mcpServers` object is refused. Other top-level keys (Claude
+ * Desktop keeps its settings beside `mcpServers`) and unknown keys of a server are ignored. Imported servers get no
+ * sandbox, OAuth or timeout; `"disabled": true` imports a server switched off.
+ */
+export function checkImport(text: string, exists: (name: string) => boolean, context: SandboxContext): ImportEntry[] {
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    throw new McpConfigError("不是有效的 JSON");
+  }
+  const servers = document && typeof document === "object" && !Array.isArray(document) ? (document as Record<string, unknown>).mcpServers : undefined;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) throw new McpConfigError("没有找到 mcpServers 对象");
+  const entries = Object.entries(servers as Record<string, unknown>);
+  if (entries.length === 0) throw new McpConfigError("mcpServers 里没有服务器");
+  return entries.map(([name, value]) => importEntry(name, value, exists, context));
 }
