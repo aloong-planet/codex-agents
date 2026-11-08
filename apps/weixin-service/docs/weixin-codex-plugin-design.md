@@ -10,7 +10,9 @@ MCP Apps 内嵌面板。用户在 Codex 对话中打开面板后，可以查看�
 完成标准：
 
 1. Plugin 有有效 `.codex-plugin/plugin.json`、`skills/` 和 bundled `.mcp.json`。
-2. MCP Server 仅连接 `http://127.0.0.1:4317`，不读取 Demo 私有状态文件。
+2. MCP Server 仅连接 `http://127.0.0.1:4317`，不读取 Demo 私有状态文件；唯一例外是本机授权：读取本机控制通道的
+   连接文件 `console-control.json`（套接字路径与每次启动轮换的令牌），并读写插件共用的凭据文件
+   `console-plugin-credential.json`。
 3. `show_weixin_panel` 返回 `text/html;profile=mcp-app` 资源并在 Codex 对话内渲染。
 4. 面板动作通过 MCP `tools/call` 进入服务端代理；组件不直接请求 Demo HTTP API。
 5. 模型可读结果只包含脱敏状态；二维码图片只进入组件私有的工具结果元数据。
@@ -33,14 +35,23 @@ Codex Plugin
   └─ bundled MCP server
        ├─ MCP tools
        ├─ MCP Apps UI resource
-       └─ DemoHttpClient
-                    │ same-origin-shaped local HTTP
-                    ▼
-        http://127.0.0.1:4317
+       └─ DemoHttpClient ──────────────┐
+                    │ same-origin-shaped   │ authorize-plugin
+                    │ local HTTP + cookie  ▼
+                    ▼               state dir/console-control.json
+        http://127.0.0.1:4317       → owner-only Unix socket
                     │
                     ▼
      DemoService → DirectIlinkChannel → Tencent iLink
 ```
+
+本机服务的每个页面和 API 都要求本机授权。插件不是浏览器，因此和工作台登录命令一样走本机控制通道：
+读取状态目录（`WEIXIN_DEMO_STATE_DIR`，默认 `~/Library/Application Support/weixin-ilink-direct-demo`）
+里的 `console-control.json`，经仅本人可用的 Unix 套接字发送 `authorize-plugin`，得到 cookie。所有插件进程共用
+一份凭据，保存在同一状态目录的 `console-plugin-credential.json`（`0600`），所以服务端只有一个「Codex 插件」授权，
+像浏览器授权一样写入审计、可以收回。进程启动时直接用这份凭据，文件不存在才授权；请求被拒（HTTP 401）时先
+重读文件，文件里已是别的进程换来的新凭据就直接用，否则才重新授权并原子替换文件。授权这一步用锁文件互斥，
+几个进程同时启动也只产生一个授权；授权中途退出留下的过期锁会被接管。换来的凭据仍被拒就把错误返回给调用方。
 
 Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 `apps/weixin-service/`。MCP server 使用构建后的单文件 Node 入口，`.mcp.json`
@@ -99,7 +110,7 @@ Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 ## 真实操作序列与失败模式
 
 1. **插件未加载**：当前任务在安装前已创建，看不到工具；要求新建任务，不修改全局配置规避。
-2. **后台离线**：面板显示无法连接 `127.0.0.1:4317`，不启动第二份 Demo，不读取状态文件。
+2. **后台离线**：面板显示无法连接 `127.0.0.1:4317` 或无法取得本机授权，不启动第二份 Demo；除控制通道连接文件外不读取状态文件。
 3. **打开面板**：读取状态失败时显示可恢复错误；成功时只渲染权威快照。
 4. **点击生成二维码**：若已有登录或真实发送进行中，显示 Demo 返回错误；不终止未知流程。
 5. **等待二维码**：只有限次轮询；超时后保留“刷新状态”，不自动再发登录请求。
@@ -115,6 +126,7 @@ Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 
 - MCP server 只允许固定 loopback base URL；环境覆盖也必须通过 loopback 校验。
 - POST 带与 Demo 完全相同的 `Origin`，但不向其他域发送。
+- 本机授权 cookie 保存在状态目录下仅本人可读写的凭据文件中，只发往配置的 loopback 地址；控制令牌只用于本机套接字。两者都不进入工具结果或日志。能读控制令牌的本人进程本来就能换取凭据，共用凭据文件不增加权限。
 - 不返回 token、context token、QR 源 URL、账号秘密、日志或入站正文。
 - `qrDataUrl` 只能是 `data:image/png`；其他 scheme 拒绝进入 UI 元数据。
 - 工具安全注解区分只读、可逆本地状态和外部发送。
@@ -125,8 +137,8 @@ Plugin 源码位于独立仓库的 `plugins/codex-weixin/`；后端位于
 1. 单测：loopback URL、请求 method/origin/body、脱敏快照、二维码私有元数据、错误映射。
 2. MCP 集成：内存 transport 验证 tools/list、resources/read、`show_weixin_panel` 与 action tools。
 3. UI 合约：组件含 MCP Apps 初始化与 `tools/call`，无 `fetch`/XHR/WebSocket，且发送有确认门禁。
-4. fixture 端到端：在 `4318` 启动现有 fixture Demo，MCP stdio 客户端执行显示面板、生成
-   二维码、发现/确认目标、发送，并断言响应不含 QR 源 URL或 token。
+4. fixture 端到端：在 `4328` 启动现有 fixture Demo，与插件共用一个临时状态目录，插件经控制通道取得授权；
+   MCP stdio 客户端执行显示面板、生成二维码、发现/确认目标、发送，并断言响应不含 QR 源 URL或 token。
 5. 全量：两个项目分别 lint、typecheck、unit/integration、build；原 Demo Playwright E2E 保持全绿。
 6. Codex 本地安装：plugin validator、Skill validator、`codex-weixin-local` marketplace 注册和
    `codex-weixin@codex-weixin-local` 安装成功；实际内嵌显示需在安装后的新任务确认。

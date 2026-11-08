@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { authorizeLocalService } from "../e2e/console-session.js";
 import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { CodexServiceStore } from "../src/codex-service-store.js";
 import { WorkflowEngine } from "../src/workflow-engine.js";
@@ -235,8 +236,11 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
   let generation = 0;
   let gateHeld = false;
   const evidence: unknown[] = [];
+  // The settings API requires an authorized browser; the authorization persists across the restarts below.
+  let cookie: string | undefined;
+  const authorized = async () => cookie ??= await authorizeLocalService(directory);
   const state = async (): Promise<State> => {
-    const response = await fetch(`${base}/api/state`, { signal: AbortSignal.timeout(3_000) });
+    const response = await fetch(`${base}/api/state`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(3_000) });
     if (!response.ok) throw new Error(`fixture_state_http_${response.status}`);
     return response.json() as Promise<State>;
   };
@@ -312,7 +316,7 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
     },
     configurePermissions: async (selection: unknown) => {
       const response = await fetch(`${base}/api/workflows/module-permissions/configure`, {
-        method: "POST", headers: { "content-type": "application/json", origin: base }, body: JSON.stringify(selection),
+        method: "POST", headers: { "content-type": "application/json", origin: base, cookie: await authorized() }, body: JSON.stringify(selection),
         signal: AbortSignal.timeout(10_000),
       });
       expect(response.ok).toBe(true);

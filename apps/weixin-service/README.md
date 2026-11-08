@@ -26,7 +26,30 @@ pnpm install
 pnpm start
 ```
 
-Configure the enabled channels below before starting. When Weixin is enabled, open <http://127.0.0.1:4317> for its existing management panel. Local status at <http://127.0.0.1:4317/api/state> includes independent `channels.weixin` and `channels.feishu` enabled/readiness fields. Feishu-only mode has read-only status and reuses saved permissions; there is no new permission editor.
+Configure the enabled channels below before starting. When Weixin is enabled, open <http://127.0.0.1:4317> for its existing management panel. Local status at <http://127.0.0.1:4317/api/state> includes independent `channels.weixin` and `channels.feishu` enabled/readiness fields. Feishu-only mode has read-only status and reuses saved permissions; there is no new permission editor. Both require an authorized browser; see [Local login](#local-login).
+
+## Local login
+
+Every page and API of the local service requires a browser that the owner authorized on this computer. Requests whose Host is not `127.0.0.1` or `localhost` with the service's port are refused, and writes must also come from the same origin. A browser without authorization sees only a card explaining how to log in.
+
+With the service running, run from the repository root, using the same `WEIXIN_DEMO_STATE_DIR` as the service:
+
+```bash
+pnpm --filter @aloong-planet/codex-weixin-service console login            # print a one-time link and open it in the default browser
+pnpm --filter @aloong-planet/codex-weixin-service console login --no-open  # only print it, to paste into another browser
+pnpm --filter @aloong-planet/codex-weixin-service console list             # authorized browsers with their IDs
+pnpm --filter @aloong-planet/codex-weixin-service console revoke <id>      # or `revoke all`
+```
+
+The link is valid for 2 minutes and can be used once. It sets an HttpOnly, SameSite=Strict cookie valid for 400 days and renewed whenever a page opens, so a restart does not require a new login. A revoked browser's open pages disconnect and show the login card. If the service is not running, the command says so.
+
+The command reaches the running service through `console-control.json` and an owner-only Unix socket in the state directory; the token in that file changes on every start. Authorizations are kept in `console-browsers.json`, which stores only a hash of each cookie. The Codex plugin authorizes through the same channel and appears as one entry, 「Codex 插件」: all plugin processes share one credential kept in `console-plugin-credential.json` (`0600`) in the state directory. Revoking that entry ends every plugin process's access; they authorize again as one new entry.
+
+Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command` or `codex-plugin`), the event and the browser's ID and label; it never contains a cookie, link token or hash. Read it with standard tools, for example:
+
+```bash
+tail -n 20 "$HOME/Library/Application Support/weixin-ilink-direct-demo/console-audit.jsonl"
+```
 
 ## Penny private bookkeeping
 
@@ -130,7 +153,7 @@ Use only harmless files in already authorized directories. Record channel accept
 1. Prepare the new release and its locked dependencies before stopping the installed service. Keep its state-directory path, owner memory identity, bindings and task scope unchanged.
 2. Stop the service and verify its listener has closed. Back up the private configuration, startup configuration and the complete state directory while no service is writing to them; keep the backup private.
 3. Set `enabledChannels` to `["weixin", "feishu"]`, remove the old `channel` selector, and point the service launcher at the new release. Preserve existing credentials and file permissions.
-4. Start once and inspect `/api/state`: both channels should be enabled and independently ready, and the core should have a prepared thread. If only one connection is ready, that channel can work; inspect the unavailable channel locally without redirecting its messages or rebinding accounts automatically.
+4. Start once and inspect `/api/state` in an [authorized browser](#local-login): both channels should be enabled and independently ready, and the core should have a prepared thread. If only one connection is ready, that channel can work; inspect the unavailable channel locally without redirecting its messages or rebinding accounts automatically.
 5. Confirm that existing task identities, saved permissions and historical delivery destinations remain intact. Missing task/plan preferences migrate to the bound Feishu destination; accepted and uncertain history is not replayed.
 6. Have the owner test both chats: separate ordinary messages, a saved choice in each chat, a reminder created in each chat and recall of a curated preference. Record actual receipt separately from startup readiness or an API acceptance result.
 

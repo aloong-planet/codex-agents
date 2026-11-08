@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 import type { PublicCodexServiceState } from "../../src/conversation-service.js";
+import { authorizeLocalService } from "../../e2e/console-session.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
 export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
@@ -50,7 +51,10 @@ export async function start(directory: string, extraEnv: Record<string, string> 
   });
   child.stdout?.on("data", (chunk) => { output += String(chunk); });
   child.stderr?.on("data", (chunk) => { output += String(chunk); });
-  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(1000) })).json() as State; }
+  // The local service requires an authorized browser; the test logs in through the control channel like the owner.
+  let cookie: string | undefined;
+  const authorized = async () => cookie ??= await authorizeLocalService(directory);
+  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(1000) })).json() as State; }
   async function until(predicate: (value: State) => boolean, timeout = 15000): Promise<State> {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -69,7 +73,7 @@ export async function start(directory: string, extraEnv: Record<string, string> 
       expect(child.signalCode).toBe("SIGKILL");
     },
     async post(route: string, body: unknown) {
-      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json" }, body: JSON.stringify(body) });
+      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json", cookie: await authorized() }, body: JSON.stringify(body) });
       expect(response.status, await response.clone().text()).toBe(200);
     } };
 }
