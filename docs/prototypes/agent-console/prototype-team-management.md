@@ -34,9 +34,17 @@ The owner chose this layout: the team list on the left, and the selected team's 
 
 - **List.** The list is searchable and can be filtered by group. Each entry shows the team, its state badge, its bound groups, its number of profiles and its active assignments.
 - **New team.** "新增团队" adds an unnamed team to the list and opens it in the editor.
-- **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows only the empty state 「尚未配置派单群」, with no list, editor or "新增团队", and no link (no page enables dispatch yet). Its body states the real steps:
-  - Feishu paired, dispatch not enabled: 「飞书派单目前在本机渠道配置文件中启用：在 <path> 的 feishu 中加入 dispatch，然后重启服务。详细步骤见运维文档《Feishu agent dispatch》。」 `<path>` is the absolute path of the channel configuration file the service loaded; the mock shows the default location.
-  - Feishu not paired: 「飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再在渠道配置文件的 feishu 中加入 dispatch。」
+- **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows the panel 「尚未配置派单群」, with no list, editor or "新增团队".
+  - Feishu paired, dispatch not enabled: the panel holds the dispatch-group form (below).
+  - Feishu not paired: 「飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再回到这里选择派单群。」 Pairing stays in the terminal.
+- **Dispatch groups (ticket 30).** The dispatch-group form and its refusals are drawn ahead of their build in ticket 30; until then the built page shows text with the configuration file's path in the 未配置 state.
+  - The form lists the Feishu groups in the channel's group allowlist, each with a checkbox, by group name, with its chat ID beneath; a group whose name was not read shows its chat ID and 「未取到群名，显示群 ID」.
+  - It opens in the 未配置 panel, and with dispatch configured from 「派单群设置」 in the page header, in the right drawer.
+  - Saving writes the local channel configuration and shows 「已保存，重启服务后生效」. The form then compares 「运行中的服务」 with 「已保存，重启后」, and with dispatch configured a status strip above the team list says the saved change takes effect after a restart, with 「查看派单群设置」.
+  - A refused save shows "无法保存" with one reason:
+    - the Feishu pairing wizard holds the channel configuration;
+    - the configuration file changed after the page loaded it, with 「重新载入」;
+    - an unchecked group that the running service uses still has unfinished dispatch requests, each listed with a link to its record.
 - **Navigation.**
   - "Skill 管理" and "MCP 管理" lead to `prototype-skill-library.html` and `prototype-mcp-catalog.html`.
   - "返回团队总览" leads to `prototype-team-structures.html`, whose "团队管理" button leads here.
@@ -143,7 +151,8 @@ A save based on an outdated version is refused with "重新载入", which reload
 - **保存结果.** 按实际校验 / 校验不通过 / 版本已过期. 按实际校验 checks the edited team: try saving the new team with empty names, or entering Sam's App ID. The other two show those refusals for any team. In the product, validation and the version check decide this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
 - **派单配置.** 已配置 / 未配置 / 未接入飞书. In the product, whether the local channel configuration has Feishu paired and dispatch enabled decides it.
-- **Visual-only actions.** Save, re-check, test message, QR refresh, MCP binding and unbinding, group binding, moving or deleting a scheduled task, and delete give visual feedback only. A refresh restores the mock data.
+- **派单群保存结果.** 按实际校验 / 配对向导占用 / 文件已变更 appears while the dispatch-group form is shown. 按实际校验 refuses unchecking 银河护卫队 or 产品讨论组 with dispatch configured, since both have unfinished requests in the sample. In the product, the pairing wizard's lock and the file comparison decide this.
+- **Visual-only actions.** Save, dispatch-group save, re-check, test message, QR refresh, MCP binding and unbinding, group binding, moving or deleting a scheduled task, and delete give visual feedback only. A refresh restores the mock data.
 
 ## Uncovered dimensions
 
