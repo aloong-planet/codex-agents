@@ -22,7 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { McpCallRefused, McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
-import { freePort, startAuthorizationServer, startHttpTestServer, type AuthorizationServer, type HttpTestServerOptions } from "./fixtures/mcp-http-test-server.js";
+import { freePort, startAuthorizationServer, startHttpTestServer, startRecordingServer, type AuthorizationServer, type HttpTestServerOptions, type RedirectRule } from "./fixtures/mcp-http-test-server.js";
 import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 
 const LOCAL_NPX_PACKAGE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "mcp-local-npx-package");
@@ -421,7 +421,14 @@ async function httpServer(options: HttpTestServerOptions = {}) {
   return server;
 }
 
-async function authorizationServer(options: { dpop?: boolean } = {}): Promise<AuthorizationServer> {
+/** A second origin recording what reaches it; a URL server's headers and tokens must never arrive there. */
+async function recorder() {
+  const second = await startRecordingServer();
+  cleanup.push(second.close);
+  return second;
+}
+
+async function authorizationServer(options: { dpop?: boolean; redirect?: RedirectRule } = {}): Promise<AuthorizationServer> {
   const as = await startAuthorizationServer({ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, ...options });
   cleanup.push(as.close);
   return as;
@@ -449,30 +456,39 @@ describe("URL servers", () => {
     expect(JSON.stringify(view)).not.toContain(HEADER_SENTINEL);
   });
 
-  it("OAuth client_credentials gets a token from the configured issuer and presents it", async () => {
+  /** The configured issuer, on its own origin, receives no configured header (mcp-catalog::REQ-001). */
+  function expectNoConfiguredHeader(as: AuthorizationServer) {
+    expect(as.requests).toContain("POST /token");
+    expect(as.headerNames[as.requests.indexOf("POST /token")]).toContain("authorization");
+    for (const names of as.headerNames) expect(names).not.toContain("x-api-key");
+  }
+
+  it("OAuth client_credentials gets a token from the configured issuer and presents it beside the headers", async () => {
     const { open } = setup();
     const catalog = open();
     const as = await authorizationServer();
-    const server = await httpServer({ authorizationServer: as });
+    const server = await httpServer({ authorizationServer: as, requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
 
-    register(catalog, { name: "docs", transport: "http", url: server.url, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read" } });
+    register(catalog, { name: "docs", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read" } });
     await connected(catalog, "docs");
-    expect(await callJson(catalog, "mcp__docs__whoami")).toEqual({ scheme: "Bearer", scope: "docs:read", headers: [] });
+    expect(await callJson(catalog, "mcp__docs__whoami")).toEqual({ scheme: "Bearer", scope: "docs:read", headers: ["X-Api-Key"] });
     expect(as.tokenRequests).toEqual([{ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read", dpop: false, granted: true }]);
     const presented = server.requests.filter((request) => request.scheme !== "refused");
     expect(presented.length).toBeGreaterThanOrEqual(2);
     for (const request of presented) expect(request).toMatchObject({ scheme: "Bearer", token: as.issued[0]!.token });
+    expectNoConfiguredHeader(as);
   });
 
-  it("with DPoP the token is bound to the proof key and presented as DPoP", async () => {
+  it("with DPoP the token is bound to the proof key and presented as DPoP beside the headers", async () => {
     const { open } = setup();
     const catalog = open();
     const as = await authorizationServer({ dpop: true });
-    const server = await httpServer({ authorizationServer: as });
+    const server = await httpServer({ authorizationServer: as, requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
 
-    register(catalog, { name: "bound", transport: "http", url: server.url, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop: true });
+    register(catalog, { name: "bound", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop: true });
     await connected(catalog, "bound");
-    expect(await callJson(catalog, "mcp__bound__whoami")).toMatchObject({ scheme: "DPoP" });
+    expect(await callJson(catalog, "mcp__bound__whoami")).toMatchObject({ scheme: "DPoP", headers: ["X-Api-Key"] });
+    expectNoConfiguredHeader(as);
     expect(as.tokenRequests).toMatchObject([{ dpop: true, granted: true }]);
     expect(as.issued).toMatchObject([{ type: "DPoP", jkt: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) }]);
     const presented = server.requests.filter((request) => request.scheme !== "refused");
@@ -480,18 +496,118 @@ describe("URL servers", () => {
     for (const request of presented) expect(request).toMatchObject({ scheme: "DPoP", token: as.issued[0]!.token });
   });
 
-  it("the client secret goes only to the configured issuer", async () => {
+  it.each([
+    ["the protected-resource metadata names another issuer", (decoy: AuthorizationServer): HttpTestServerOptions => ({ advertiseIssuer: decoy.issuer })],
+    ["the 401 challenge names protected-resource metadata on another origin", (decoy: AuthorizationServer): HttpTestServerOptions => ({ advertiseResourceMetadata: `${decoy.issuer}/.well-known/oauth-protected-resource/mcp` })],
+  ])("when %s, neither the client secret nor a header value goes there", async (_case, misleading) => {
     const { open } = setup({ retryMs: 60_000 });
     const catalog = open();
     const configured = await authorizationServer();
     const decoy = await authorizationServer();
-    const server = await httpServer({ authorizationServer: configured, advertiseIssuer: decoy.issuer });
+    const server = await httpServer({ authorizationServer: configured, ...misleading(decoy) });
 
-    register(catalog, { name: "misled", transport: "http", url: server.url, oauth: { issuer: configured.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } });
+    register(catalog, { name: "misled", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: configured.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL } });
     await vi.waitFor(() => expect(catalog.viewServer("misled").state).toBe("failed"), WAIT);
-    expect(catalog.viewServer("misled").error).toBeTruthy();
+    // Discovery reached the decoy's origin, carrying no configured header.
+    expect(decoy.requests.length).toBeGreaterThan(0);
+    for (const names of decoy.headerNames) expect(names).not.toContain("x-api-key");
     expect(decoy.tokenRequests).toEqual([]);
     expect(configured.tokenRequests).toEqual([]);
+  });
+
+  it("the SDK's own request headers win over configured headers of the same name", async () => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    // The server SDK refuses a POST whose Accept lacks application/json and text/event-stream.
+    const server = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL } });
+
+    register(catalog, { name: "accepting", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL, Accept: "text/plain" } });
+    await vi.waitFor(() => expect(["connected", "failed"]).toContain(catalog.viewServer("accepting").state), WAIT);
+    expect(catalog.viewServer("accepting")).toMatchObject({ state: "connected" });
+    expect(await callJson(catalog, "mcp__accepting__whoami")).toMatchObject({ scheme: "none" });
+  });
+
+  it.each([
+    ["initialize", 307], ["initialize", 308],
+    ["notifications/initialized", 307], ["notifications/initialized", 308],
+    ["tools/list", 307], ["tools/list", 308],
+    ["tools/call", 307], ["tools/call", 308],
+  ] as const)("a %s answered with %i to another origin fails there and sends that origin nothing", async (rpc, status) => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const second = await recorder();
+    const server = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL }, redirect: (request) => (request.rpc === rpc ? { status, location: `${second.origin}/mcp` } : undefined) });
+
+    register(catalog, { name: "moved", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
+    let line: string;
+    if (rpc === "tools/call") {
+      await connected(catalog, "moved");
+      line = await catalog.call("mcp__moved__whoami", {}).then(() => "", (error: Error) => error.message);
+      // A failed call the server did not answer reconnects at once, to the configured URL.
+      await connected(catalog, "moved");
+    } else {
+      await vi.waitFor(() => expect(catalog.viewServer("moved").state).toBe("failed"), WAIT);
+      line = catalog.viewServer("moved").error ?? "";
+    }
+    expect(server.redirects).toEqual([`POST /mcp -> ${status} ${second.origin}/mcp`]);
+    expect(line).toContain(`${second.origin}/mcp`);
+    expect(line).not.toContain(HEADER_SENTINEL);
+    expect(second.requests).toEqual([]);
+  });
+
+  it.each([
+    [false, 307], [false, 308], [true, 307], [true, 308],
+  ] as const)("an MCP request carrying the token (DPoP %s) redirected with %i to another origin sends that origin nothing", async (dpop, status) => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const second = await recorder();
+    const as = await authorizationServer({ dpop });
+    const server = await httpServer({ authorizationServer: as, redirect: (request) => (request.path === "/mcp" && request.authorized ? { status, location: `${second.origin}/mcp` } : undefined) });
+
+    register(catalog, { name: "moved", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop });
+    await vi.waitFor(() => expect(catalog.viewServer("moved").state).toBe("failed"), WAIT);
+    const line = catalog.viewServer("moved").error ?? "";
+    expect(as.issued).toHaveLength(1);
+    expect(server.redirects).toEqual([`POST /mcp -> ${status} ${second.origin}/mcp`]);
+    expect(line).toContain(`${second.origin}/mcp`);
+    for (const secret of [HEADER_SENTINEL, CLIENT_SECRET_SENTINEL, as.issued[0]!.token]) expect(line).not.toContain(secret);
+    expect(second.requests).toEqual([]);
+  });
+
+  const toSecond = (status: 307 | 308, match: (path: string, method: string) => boolean, second: string): RedirectRule =>
+    (request) => (match(request.path, request.method) ? { status, location: `${second}${request.path}` } : undefined);
+  const oauthRequests = [
+    ["the protected-resource metadata", "mcp"],
+    ["the authorization-server metadata", "issuer"],
+    ["the token request", "token"],
+  ] as const;
+  it.each(oauthRequests.flatMap(([label, which]) => [false, true].flatMap((dpop) => ([307, 308] as const).map((status) => [label, which, dpop, status] as const))))(
+    "%s (at %s, DPoP %s) redirected with %i to another origin sends that origin nothing",
+    async (_label, which, dpop, status) => {
+      const { open } = setup({ retryMs: 60_000 });
+      const catalog = open();
+      const second = await recorder();
+      const atIssuer = which === "issuer" ? (path: string) => path.startsWith("/.well-known/") : (path: string, method: string) => method === "POST" && path === "/token";
+      const as = await authorizationServer({ dpop, ...(which === "mcp" ? {} : { redirect: toSecond(status, atIssuer, second.origin) }) });
+      const server = await httpServer({ authorizationServer: as, ...(which === "mcp" ? { redirect: toSecond(status, (path) => path.startsWith("/.well-known/oauth-protected-resource"), second.origin) } : {}) });
+
+      register(catalog, { name: "moved", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop });
+      await vi.waitFor(() => expect(["connected", "failed"]).toContain(catalog.viewServer("moved").state), WAIT);
+      expect([...server.redirects, ...as.redirects].length).toBeGreaterThan(0);
+      expect(second.requests).toEqual([]);
+    },
+  );
+
+  it("a redirect within the configured origin is followed with the headers", async () => {
+    const { open } = setup({ retryMs: 60_000 });
+    const catalog = open();
+    const server = await httpServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL }, redirect: (request) => (request.rpc === "initialize" && request.path === "/mcp" ? { status: 307, location: "/mcp?hop=1" } : undefined) });
+
+    register(catalog, { name: "hop", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
+    await connected(catalog, "hop");
+    expect(server.redirects).toEqual(["POST /mcp -> 307 /mcp?hop=1"]);
+    expect(server.requests.length).toBeGreaterThanOrEqual(3);
+    for (const request of server.requests) expect(request.headers["X-Api-Key"]).toBe(HEADER_SENTINEL);
   });
 
   it("an unreachable URL fails and is retried until it answers", async () => {

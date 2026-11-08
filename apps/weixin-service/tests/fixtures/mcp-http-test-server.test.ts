@@ -4,7 +4,7 @@
 import { DpopSession } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { startAuthorizationServer, startHttpTestServer, type AuthorizationServer } from "./mcp-http-test-server.js";
+import { startAuthorizationServer, startHttpTestServer, startRecordingServer, type AuthorizationServer } from "./mcp-http-test-server.js";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -67,5 +67,17 @@ describe("the HTTP MCP test server", () => {
     const once = await proof(session);
     expect((await post(server.url, { authorization: `DPoP ${accessToken}`, dpop: once })).status).toBe(200);
     expect((await post(server.url, { authorization: `DPoP ${accessToken}`, dpop: once })).status).toBe(401);
+  });
+
+  it("redirects the requests its rule matches, and the recording origin records the header names that arrive", async () => {
+    const second = await startRecordingServer();
+    cleanup.push(second.close);
+    const server = await startHttpTestServer({ redirect: (request) => (request.rpc === "initialize" ? { status: 307, location: `${second.origin}/mcp` } : undefined) });
+    cleanup.push(server.close);
+
+    // Node's fetch follows the redirect to any origin, keeping custom headers (the catalog's transport must not).
+    expect((await post(server.url, { "x-api-key": "value" })).status).toBe(404);
+    expect(server.redirects).toEqual([`POST /mcp -> 307 ${second.origin}/mcp`]);
+    expect(second.requests).toMatchObject([{ method: "POST", path: "/mcp", headerNames: expect.arrayContaining(["x-api-key"]) }]);
   });
 });
