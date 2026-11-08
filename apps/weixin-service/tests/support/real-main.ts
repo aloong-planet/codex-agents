@@ -9,7 +9,13 @@ import type { PublicCodexServiceState } from "../../src/conversation-service.js"
 import { authorizeLocalService } from "../../e2e/console-session.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
-export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string }> }; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
+export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number };
+export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string; result?: string;
+    definitionsVersion: number | null; assignments: DispatchAssignmentState[] }> };
+  fixtureLeaderRequests?: Array<{ phase: "plan" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
+    assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
+  fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;
+  fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
   penny?: { configured: boolean; ready: boolean; error?: string };
   pennyFixtureTextOutbox?: { chatId: string; message: string }[];
@@ -41,11 +47,12 @@ export async function stop(child: ChildProcess) {
     await new Promise<void>((resolve) => child.once("exit", () => resolve()));
   }
 }
-export async function start(directory: string, extraEnv: Record<string, string> = {}) {
+/** Starts main on `directory`; `packageRoot` runs another checkout of this package, such as an older commit's tree. */
+export async function start(directory: string, extraEnv: Record<string, string> = {}, options: { packageRoot?: string } = {}) {
   const port = await freePort(), url = `http://127.0.0.1:${port}`;
   let output = "";
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
-    cwd: fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"],
+    cwd: options.packageRoot ?? fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port), CHANNEL_CONFIG_PATH: join(directory, "channel.json"),
       WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_SIMULATOR_MODEL: "fixture", WORKFLOW_SIMULATOR_PENDING_ROUTER: "fixture", WEIXIN_OTEL_ENABLED: "0", ...extraEnv },
   });

@@ -7,7 +7,7 @@ import { ChannelTurnAdapter, type ConversationTurnToolControl } from "./channel-
 import { MAIN_REPLY_OUTPUT_SCHEMA, parseMainReply } from "./main-reply-result.js";
 import { AppServerTurnFailure } from "./app-server-turn-driver.js";
 import type { WorkflowHandoffReceipt } from "./workflow-tool-host.js";
-import type { DispatchAgent, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
+import type { DispatchAgent, DispatchAssignment, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
 import type { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { ResolvedAgentProfile } from "./agent-profile.js";
@@ -16,7 +16,7 @@ import type { DynamicToolHost } from "./dynamic-tool-host.js";
 export type DispatchRuntime = { agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">; cwd: string };
 /** The shared tool host as one Executor profile sees it, with the contract hash of what it offers. */
 export type ExecutorToolHost = DynamicToolHost & { contractHash(): string };
-/** A job's Executor profile as resolved for its definitions version. */
+/** An Assignment's Executor profile as resolved for its request's definitions version. */
 export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost }>;
 
 /** Default limits of agent-dispatch::QR-001: running runtimes, idle or busy, and the idle time before release. */
@@ -25,7 +25,10 @@ export const DISPATCH_RUNTIME_IDLE_MS = 5 * 60_000;
 /** Domain-neutral source rules every Executor turn carries; domain rules come only from the Agent Profile. */
 const SHARED_EXECUTOR_RULES = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。交付文件前复核其事实与来源是否相符。";
 
-/** Group authority stays canonical; only the isolated session and outbound application vary by role. */
+/**
+ * Runs one Assignment's Executor. Group authority stays canonical and the Team Leader's application sends its results.
+ * Each Assignment has its own session; its runtime is released as soon as its turn ends (agent-dispatch::QR-001/AC-01).
+ */
 export class CodexDispatchExecutor implements DispatchExecutor {
   private readonly database: DatabaseSync;
   private closing = false;
@@ -34,8 +37,8 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     runtimes: RuntimePool<DispatchRuntime>;
     createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost): DispatchRuntime;
     tools: ConversationTurnToolControl;
-    /** The job's Executor profile as resolved for its definitions version; the only source of its instructions, tools and memory scope. */
-    profile(job: DispatchJob): ExecutorProfileView;
+    /** The Assignment's Executor profile as resolved for its definitions version; the only source of its instructions, tools and memory scope. */
+    profile(job: DispatchJob, assignment: DispatchAssignment): ExecutorProfileView;
     contextRevision(job: DispatchJob): string;
     authorized(job: DispatchJob): boolean;
     model(job: DispatchJob): CodexTurnModel;
@@ -48,7 +51,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
     this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS agent_session (scope TEXT PRIMARY KEY, thread_id TEXT NOT NULL)");
   }
-  async run(job: DispatchJob, signal: AbortSignal): Promise<DispatchExecutionResult> {
+  async run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<DispatchExecutionResult> {
     const role = this.options.agents.find(({ id }) => id === job.agentId);
     if (!role || role.id === COORDINATOR_ID || role.senderAccountId !== job.senderAccountId) throw new Error("dispatch_role_invalid");
     const revision = this.options.contextRevision(job);
@@ -56,13 +59,14 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     if (!eligible()) throw new Error("dispatch_authorization_changed");
     const existing = this.options.existingResult(job);
     if (existing) return existing;
-    const profile = this.options.profile(job);
-    const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash()])).digest("hex");
+    const profile = this.options.profile(job, assignment);
+    const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash(),
+      assignment.id])).digest("hex");
     return this.options.runtimes.use(scope, () => this.options.createRuntime(job, `dispatch-${scope}`, profile.tools),
-      (runtime) => this.runOn(runtime, job, role, profile, scope, eligible, signal), { signal });
+      (runtime) => this.runOn(runtime, job, assignment, role, profile, scope, eligible, signal), { signal, releaseWhenDone: true });
   }
 
-  private async runOn(runtime: DispatchRuntime, job: DispatchJob, role: DispatchAgent, profile: ExecutorProfileView, scope: string, eligible: () => boolean,
+  private async runOn(runtime: DispatchRuntime, job: DispatchJob, assignment: DispatchAssignment, role: DispatchAgent, profile: ExecutorProfileView, scope: string, eligible: () => boolean,
     signal: AbortSignal): Promise<DispatchExecutionResult> {
     const previous = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
     const threadId = await runtime.agent.startOrResume(previous ? String(previous.thread_id) : undefined, runtime.cwd, []);
@@ -77,7 +81,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
       const turn = await runtime.agent.runTurn(threadId, new ChannelTurnAdapter(threadId, event, {
         accountMemory: this.options.memory(job, profile.memoryScope), outboundRoots: [], channelLabel: "飞书", outboundDelivery: true,
         workflowTools: this.options.tools, isClosing: () => !eligible(), recoveryAllowed: eligible,
-        roleInstructions: `你是 ${role.name}。你的职责：${role.responsibility}。你独立完成本次分派的事务：${job.summary}。不要冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` + SHARED_EXECUTOR_RULES + profile.instructions,
+        roleInstructions: `你是 ${role.name} 团队的${assignment.executor}，按能力档「${assignment.profileName}」完成负责人 ${role.name} 交办的这项分工：${assignment.title}。团队职责：${role.responsibility}。负责人交办：${assignment.brief}。你的结果交给 ${role.name} 汇总，不冒充其他 Agent，不要把工作再分派给其他 Agent。只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。` + SHARED_EXECUTOR_RULES + profile.instructions,
       }), undefined, (progress) => { if (signal.aborted && progress.kind === "turn_accepted") interrupt(); },
       { ...this.options.model(job), outputSchema: MAIN_REPLY_OUTPUT_SCHEMA });
       if (turn.owner === "workflow_owned") result = this.receipt(turn.receipt);

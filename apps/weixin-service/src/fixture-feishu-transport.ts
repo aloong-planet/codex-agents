@@ -13,6 +13,8 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   private readonly resources = new Map<string, { bytes: Buffer; contentType: string }>();
   private readonly messages = new Map<string, unknown>();
   private readonly decisions = new Map<string, unknown>();
+  private readonly leaderPlans = new Map<string, unknown[]>();
+  private readonly leaderClosings = new Map<string, unknown>();
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
   private applications = new Map<string, FixtureFeishuTransport>();
@@ -42,6 +44,16 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     if (!this.decisions.has(messageId)) throw new Error("fixture_dispatch_decision_missing");
     return structuredClone(this.decisions.get(messageId));
   }
+  /**
+   * The next injected Team Leader plan for a message, one per turn; the last one repeats once the list is used up.
+   * Undefined when the message injected none, so the fixture Team Leader plans its default.
+   */
+  leaderPlan(messageId: string): unknown {
+    const plans = this.leaderPlans.get(messageId);
+    if (!plans?.length) return undefined;
+    return structuredClone(plans.length > 1 ? plans.shift() : plans[0]);
+  }
+  leaderClosing(messageId: string): unknown { return structuredClone(this.leaderClosings.get(messageId)); }
   dispatchToolQueue(messageId: string): FixtureModelToolCallQueue {
     return { takeFixtureModelToolCall: () => this.dispatchCalls.get(messageId)?.shift(), takeFixtureModelCompletion: () => {
       const completion = this.completions.get(messageId); return completion?.promise;
@@ -115,6 +127,12 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     }
     const event = input.event as { message?: { message_id?: string; chat_id?: string; message_type?: string; content?: string } } | undefined;
     if (input.dispatchDecision !== undefined && event?.message?.message_id) this.decisions.set(event.message.message_id, structuredClone(input.dispatchDecision));
+    if (input.leaderPlan !== undefined && event?.message?.message_id) {
+      const plans = Array.isArray(input.leaderPlan) ? input.leaderPlan : [input.leaderPlan];
+      if (plans.length === 0 || plans.length > 5) throw new Error("fixture_leader_plan_invalid");
+      this.leaderPlans.set(event.message.message_id, structuredClone(plans));
+    }
+    if (input.leaderClosing !== undefined && event?.message?.message_id) this.leaderClosings.set(event.message.message_id, structuredClone(input.leaderClosing));
     if ((input.modelHold === true || input.modelReply !== undefined) && event?.message?.message_id) {
       if (input.modelReply !== undefined && (typeof input.modelReply !== "string" || input.modelReply.length > 64000)) throw new Error("fixture_model_reply_invalid");
       const reply = typeof input.modelReply === "string" ? input.modelReply : JSON.stringify({ message: "这是 fixture Codex 回复。", results: [] });
