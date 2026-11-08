@@ -1276,6 +1276,7 @@ it("keeps group and private memory out of Executor turns, and shares memory per 
     await seedMemory(directory, alphaGroup!, alphaTarget.target, "alpha-seed", "ALPHA_BUSINESS_FACT");
     await seedMemory(directory, betaGroup!, betaTarget.target, "beta-seed", "BETA_BUSINESS_FACT");
     await seedMemory(directory, memoryAccountId(alphaGroup!, { kind: "profile", teamId: "bill", profileId: "executor-1" }), alphaTarget.target, "bill-profile-seed", "BILL_PROFILE_FACT");
+    await seedMemory(directory, memoryAccountId(alphaGroup!, { kind: "profile", teamId: "alice", profileId: "executor-1" }), alphaTarget.target, "alice-profile-seed", "ALICE_ALPHA_PROFILE_FACT");
     // Ignored discussion reaches the Coordinator with the next message, never an Executor.
     await send("om_alpha_discussion", "oc_alpha", "DISCUSSION_MARKER_X1，周末大家有空吗", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" });
     await dispatch("om_alpha_alice", "oc_alpha", "alice", "请整理本周运营要点");
@@ -1297,6 +1298,9 @@ it("keeps group and private memory out of Executor turns, and shares memory per 
     // Only Executors of Bill's preset in this group share its memory; Jack's preset has the same ID in another team.
     expect(JSON.stringify(billAlpha!.input)).toContain("BILL_PROFILE_FACT");
     for (const request of [aliceAlpha!, aliceBeta!, jackAlpha!]) expect(JSON.stringify(request.input)).not.toContain("BILL_PROFILE_FACT");
+    // A preset's memory belongs to one group: Alice's oc_alpha Executor recalls it, her oc_beta Executor does not.
+    expect(JSON.stringify(aliceAlpha!.input)).toContain("ALICE_ALPHA_PROFILE_FACT");
+    for (const request of [aliceBeta!, billAlpha!, jackAlpha!]) expect(JSON.stringify(request.input)).not.toContain("ALICE_ALPHA_PROFILE_FACT");
     await running.close(); running = await start(directory);
     await running.until((state) => state.channels?.feishu?.ready === true);
     await dispatch("om_bill_resumed", "oc_alpha", "bill", "继续规划");

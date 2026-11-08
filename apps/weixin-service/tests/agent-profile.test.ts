@@ -6,8 +6,9 @@ import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } 
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 
 // Resolution and host-tool boundary seams. The shared host is the real WorkflowToolHost over the production catalog,
-// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts;
-// main's Coordinator wiring is a recorded gap there.
+// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts,
+// which also drives main's Coordinator wiring: its runtime and tools in "builds the Coordinator's and the Team Leader's runtimes …", and its
+// memory scope in "gives the Coordinator the group memory, …".
 const definitions: TeamDefinitions = {
   coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: "cli_0123456789abcdef",
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },

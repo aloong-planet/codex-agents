@@ -14,7 +14,7 @@ import type { PendingPresentation } from "./workflow-pending-response-coordinato
  * whose acceptance captures that attempt into the group memory.
  */
 type Notice = { event: InboundContent; agentId: string; senderAccountId: string; text: string; bindingHash: string; presentation?: Omit<PendingPresentation, "acceptedAt">;
-  requestId?: string; memory?: { attempt: number; event: InboundContent } };
+  requestId?: string; memory?: { attempt: number; event: InboundContent; text: string } };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
 export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"]; memoryScope: AgentMemoryScope }>;
@@ -411,7 +411,10 @@ export class AgentDispatch {
     const finished = job.status === "completed" || job.status === "failed";
     const attemptEvent = { ...(job.executionEvent ?? job.event) };
     delete attemptEvent.discussion;
-    const report = { id: job.reportId, notice: { ...notice, requestId: job.id, ...(finished ? { memory: { attempt: job.attempt, event: attemptEvent } } : {}) } };
+    // A confirmation or a proposal's supplement extends the request's message; a later supplement replaces the attempt's
+    // message, so the request's own message goes in front of it (agent-dispatch::REQ-012/AC-01).
+    const text = attemptEvent.text.startsWith(job.event.text) ? attemptEvent.text : `${job.event.text}\n补充要求：${attemptEvent.text}`;
+    const report = { id: job.reportId, notice: { ...notice, requestId: job.id, ...(finished ? { memory: { attempt: job.attempt, event: attemptEvent, text } } : {}) } };
     this.transaction(() => {
       this.queueNotice(report.id, report.notice);
       if (job.status === "completed" && job.supplements?.length) {
@@ -465,9 +468,9 @@ export class AgentDispatch {
         this.database.prepare("UPDATE dispatch_notice SET captured = 1 WHERE request_id = ? AND state = 'accepted' AND captured IS NULL").run(requestId);
       });
       // The attempt's own message: a promoted supplement may already have replaced the request's current one.
-      const { attempt, event } = notice.memory;
+      const { attempt, event, text } = notice.memory;
       await this.options.memory.capture(this.options.memoryScope, { event, senderAccountId: job.senderAccountId,
-        userId: `${job.id}:user:${attempt}`, userText: event.text, assistantId: `${job.id}:assistant:${attempt}`, assistantText: posts.join("\n") });
+        userId: `${job.id}:user:${attempt}`, userText: text, assistantId: `${job.id}:assistant:${attempt}`, assistantText: posts.join("\n") });
     } catch { this.failure("dispatch_group_memory_failed"); }
   }
   private async deliverNotice(id: string, notice: Notice): Promise<SendTextResult> {
