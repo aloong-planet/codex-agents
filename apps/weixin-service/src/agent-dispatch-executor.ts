@@ -7,10 +7,11 @@ import { ChannelTurnAdapter, type ConversationTurnToolControl } from "./channel-
 import { DOMAIN_NEUTRAL_REPLY_INSTRUCTIONS, MAIN_REPLY_OUTPUT_SCHEMA, parseMainReply } from "./main-reply-result.js";
 import { AppServerTurnFailure } from "./app-server-turn-driver.js";
 import type { WorkflowHandoffReceipt } from "./workflow-tool-host.js";
+import type { InboundContent } from "./channel-contract.js";
 import type { DispatchAgent, DispatchAssignment, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
 import type { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID } from "./team-registry.js";
-import type { ResolvedAgentProfile } from "./agent-profile.js";
+import { isProfileToolRefusal, type ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
 
@@ -45,6 +46,16 @@ export const EXECUTOR_RUNTIME_HOME = /^dispatch-([0-9a-f]{64})$/u;
 /** Default limits of agent-dispatch::QR-001: running runtimes, idle or busy, and the idle time before release. */
 export const DISPATCH_RUNTIME_LIMIT = 16;
 export const DISPATCH_RUNTIME_IDLE_MS = 5 * 60_000;
+/**
+ * The message an Assignment's Executor turn receives. Its key keys the turn's side effects (workflow runs, file-query and media
+ * evidence), so each Assignment has its own: `<message key>#executor-<n>`, with the message its latest run received and the
+ * Executor's durable sequence. A retry keeps it; Assignments stored before several ran per request keep the message key.
+ */
+export function executorEvent(job: DispatchJob, assignment: DispatchAssignment): InboundContent {
+  const source = { ...(assignment.input ?? job.executionEvent ?? job.event) };
+  delete source.discussion;
+  return assignment.sequence === undefined ? source : { ...source, key: `${source.key}#executor-${assignment.sequence}` };
+}
 /** Domain-neutral source rules every Executor turn carries; domain rules come only from the Agent Profile. */
 const SHARED_EXECUTOR_RULES = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。交付文件前复核其事实与来源是否相符。";
 
@@ -69,8 +80,9 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     memory(job: DispatchJob, scope: ExecutorProfileView["memoryScope"], query: string): string;
     /** Capture the Assignment the Executor received (`brief`) and its result into the profile's memory. */
     capture(job: DispatchJob, assignment: DispatchAssignment, scope: ExecutorProfileView["memoryScope"], turn: Readonly<{ brief: string; reply: string }>): Promise<void>;
-    existingResult(job: DispatchJob): DispatchExecutionResult | undefined;
-    prepareThread?(job: DispatchJob, threadId: string): void;
+    /** The result of the workflow the Assignment's turn already handed off to, keyed by its Executor event. */
+    existingResult(job: DispatchJob, assignment: DispatchAssignment): DispatchExecutionResult | undefined;
+    prepareThread?(job: DispatchJob, assignment: DispatchAssignment, threadId: string): void;
     /** Where Executor runtime homes are, and how one is compacted to its records (agent-dispatch::QR-002); without it homes are kept whole. */
     homes?: { root: string; compact(home: string, recordedThread: string | undefined): CompactionOutcome };
     report?(code: string): void;
@@ -85,13 +97,23 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     const revision = this.options.contextRevision(job);
     const eligible = () => !this.closing && !signal.aborted && this.options.authorized(job) && this.options.contextRevision(job) === revision;
     if (!eligible()) throw new Error("dispatch_authorization_changed");
-    const existing = this.options.existingResult(job);
+    const existing = this.options.existingResult(job, assignment);
     if (existing) return existing;
     const profile = this.options.profile(job, assignment);
     const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash(),
       assignment.id])).digest("hex");
-    return this.options.runtimes.use(scope, () => this.compacting(this.options.createRuntime(job, `dispatch-${scope}`, profile.tools), scope),
+    // The host knows when it refused a tool call during the turn; a failure post names that cause (agent-dispatch::US-003/AC-03).
+    let refused = false;
+    const tools: ExecutorToolHost = { definitions: () => profile.tools.definitions(), contractHash: () => profile.tools.contractHash(),
+      execute: async (tool, argumentsValue, context) => {
+        const result = await profile.tools.execute(tool, argumentsValue, context);
+        if (isProfileToolRefusal(result)) refused = true;
+        return result;
+      },
+      ...(profile.tools.turnOwner ? { turnOwner: (context) => profile.tools.turnOwner!(context) } : {}) };
+    const result = await this.options.runtimes.use(scope, () => this.compacting(this.options.createRuntime(job, `dispatch-${scope}`, tools), scope),
       (runtime) => this.runOn(runtime, job, assignment, role, profile, scope, eligible, signal), { signal, releaseWhenDone: true });
+    return result.status === "failed" && refused ? { ...result, cause: "tool_refused" } : result;
   }
 
   /**
@@ -137,11 +159,9 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     const threadId = await runtime.agent.startOrResume(previous ? String(previous.thread_id) : undefined, runtime.cwd, []);
     this.database.prepare("INSERT INTO agent_session VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET thread_id = excluded.thread_id").run(scope, threadId);
     if (!eligible()) throw new Error("dispatch_authorization_changed");
-    this.options.prepareThread?.(job, threadId);
+    this.options.prepareThread?.(job, assignment, threadId);
     // The Executor sees its Brief with the triggering message, never the group's discussion (agent-dispatch::REQ-012/AC-03).
-    const source = { ...(job.executionEvent ?? job.event) };
-    delete source.discussion;
-    const event = { ...source, agentId: role.id, dispatchRequestId: job.id, senderAccountId: job.senderAccountId, ...(job.retry ? { dispatchRetry: true } : {}) };
+    const event = { ...executorEvent(job, assignment), agentId: role.id, dispatchRequestId: job.id, senderAccountId: job.senderAccountId, ...(job.retry ? { dispatchRetry: true } : {}) };
     const brief = `${assignment.title}\n${assignment.brief}`;
     const interrupt = () => { void runtime.agent.interruptThread(threadId).catch(() => {}); };
     signal.addEventListener("abort", interrupt);

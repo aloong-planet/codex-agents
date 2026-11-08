@@ -75,12 +75,13 @@ import { FixturePort } from "./fixture-port.js";
 import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
 import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
+import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
 import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
-import { FixtureTeamLeader, fixtureDefaultPlan } from "./fixture-team-leader.js";
+import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement } from "./fixture-team-leader.js";
+import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
 import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
@@ -942,7 +943,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       runtime: (scope, work) => runtimes.use(scope, () => create(scope), ({ agent, cwd }) => work(agent, cwd)), model,
       ...(fixtureCoordinationRuntime ? { prepareThread: (input, phase, threadId, assignments) => answer(threadId, JSON.stringify(phase === "plan"
         ? fixtureFeishu!.leaderPlan(input.fixtureMessageId) ?? fixtureDefaultPlan(input)
-        : fixtureFeishu!.leaderClosing(input.fixtureMessageId) ?? { message: assignments?.[0]?.result ?? "" })) } : {}),
+        : phase === "supplement" ? fixtureFeishu!.leaderSupplement(input.fixtureMessageId) ?? fixtureDefaultSupplement(assignments as readonly LeaderAssignmentView[])
+          : fixtureFeishu!.leaderClosing(input.fixtureMessageId) ?? fixtureDefaultClosing(assignments as readonly LeaderAssignmentReport[]))) } : {}),
     });
   })();
   const teamView = (teamId: string, version: number) => {
@@ -957,8 +959,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     contextRevision,
     profile: executorProfile,
     memory: (job, scope, query) => memory.recall(scope, job.event, query),
-    existingResult: (job) => {
-      const event = job.executionEvent ?? job.event;
+    existingResult: (job, assignment) => {
+      const event = executorEvent(job, assignment);
       const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
       if (!run) return undefined;
       const destination = workflowRunTargets.resolveRunTarget(run.runId);
@@ -975,7 +977,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
       return isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId: job.agentId }, tools);
     },
-    prepareThread: (job, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId)); },
+    prepareThread: (job, assignment, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? executorEvent(job, assignment).messageId, assignment.title)); },
     capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event, senderAccountId: job.senderAccountId,
       userId: `${assignment.id}:user:${assignment.attempt}`, userText: brief, assistantId: `${assignment.id}:assistant:${assignment.attempt}`, assistantText: reply }),
     homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory),
@@ -995,13 +997,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return chatId ? acceptingTeams(definitions, chatId) : [];
     },
     bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory, memoryScope: coordinatorProfile.memoryScope,
-    completedWork: (job) => {
+    completedWork: (job, assignments) => {
       const files = localFileTools.dispatchEvidence(job.id);
       const schedules = scheduledTasks.dispatchEvidence(job.id);
-      const event = job.executionEvent ?? job.event;
-      const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
-      const accepted = run?.effects?.filter((effect) => effect.state === "accepted").length ?? 0;
-      const unknown = run?.effects?.filter((effect) => effect.state === "unknown" || effect.state === "prepared").length ?? 0;
+      // Workflow effects are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
+      const events = assignments.length ? assignments.map((assignment) => executorEvent(job, assignment)) : [job.executionEvent ?? job.event];
+      const effects = [...new Map(events.map((event) => [event.key, event])).values()]
+        .flatMap((event) => workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.effects ?? []);
+      const accepted = effects.filter((effect) => effect.state === "accepted").length;
+      const unknown = effects.filter((effect) => effect.state === "unknown" || effect.state === "prepared").length;
       return `${files.completed ? `已确认完成 ${files.completed} 次本地文件修改。` : ""}${files.unknown ? `另有 ${files.unknown} 次文件操作结果尚未确认，不会自动重复。` : ""}` +
         `${accepted ? `已确认提交 ${accepted} 个文件或媒体附件。` : ""}${unknown ? `有 ${unknown} 个附件的发送结果无法确认，不会重复提交。` : ""}` +
         `${schedules ? `已确认完成 ${schedules} 次定时任务操作。` : ""}`;
