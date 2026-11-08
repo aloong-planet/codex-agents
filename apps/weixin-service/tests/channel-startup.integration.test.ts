@@ -13,6 +13,7 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 import { config, dispatchConfig, freePort, start, stop } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
@@ -942,7 +943,9 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
     await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
       scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
-    const at = new Date(Date.now() + 10000).toISOString();
+    // The reminders must fall due only after the restart. Their due time is wall-clock time in another process, so it leaves the
+    // requests below a wide margin, and the case fails with a reason if they still outlast it, rather than timing out later.
+    const due = Date.now() + 20_000, at = new Date(due).toISOString();
     for (const agentId of ["alice", "bill", "jack"]) {
       const text = `请保存并发回 ${agentId} 计划，稍后在本群提醒，原文：${agentId} 独立提醒`;
       await running.post("/api/fixture/feishu/inbound", {
@@ -975,8 +978,10 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     });
     const managed = await running.until((state) => state.agentFixtureOutboxes?.bill?.media.length === 2 && state.agentDispatch?.jobs.at(-1)?.status === "completed");
     expect(managed.agentFixtureOutboxes?.bill?.media[1]).toMatchObject({ chatId: "oc_alpha", fileName: "managed-reminder.txt", bytesBase64: Buffer.from("运营资料提醒").toString("base64") });
+    expect(Date.now(), "the requests outlasted the reminders' due time, so the first process would deliver them").toBeLessThan(due - 2_000);
     await running.close(); running = await start(directory, env);
-    const delivered = await running.until((state) => ["alice", "bill", "jack"].every((id) => state.agentFixtureOutboxes?.[id]?.text.length === 1));
+    const delivered = await running.until((state) => ["alice", "bill", "jack"].every((id) => state.agentFixtureOutboxes?.[id]?.text.length === 1),
+      Math.max(0, due - Date.now()) + processWaitLimitMs);
     expect(delivered.agentFixtureOutboxes).toEqual({
       alice: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "alice 独立提醒" })], media: [] },
       bill: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "bill 独立提醒" })], media: [] },
@@ -986,7 +991,7 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     expect(delivered.feishuFixtureTextOutbox).toEqual([]);
     expect(delivered.weixinFixtureReplies).toEqual([]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
-}, 30000);
+}, 60000);
 
 it.each([["accepted", "2"], ["rejected", "2"], ["accepted", "取消"]] as const)("resumes a specialist file choice after restart only for its original requester (%s prompt, %s response)", async (promptOutcome, choice) => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-pending-"));
