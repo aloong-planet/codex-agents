@@ -1,6 +1,6 @@
 # ADR-0027: Bind a host-enforced profile to each agent
 
-- Status: Proposed
+- Status: Accepted (2026-11-08)
 
 ## Context
 
@@ -20,7 +20,7 @@ ADR-0026 requires the Coordinator, each Team Leader and each Executor to have it
 
 ## Decision
 
-We adopt **option 1**, pending the evidence listed under Consequences.
+We adopt **option 1**.
 
 Profiles and authority:
 
@@ -32,7 +32,7 @@ Profiles and authority:
 
 Runtimes and sessions:
 
-- Each running agent has its own isolated runtime home. The host writes only that profile's skills into it; host plugins, host skill discovery and the other disabled features stay off.
+- Each running agent has its own isolated runtime home and its own HOME inside it, and Codex's bundled skills are disabled. The host writes only that profile's skills into that home; host plugins and the other disabled features stay off.
 - MCP servers follow the owner's agent-link design:
   - The host service connects and holds every MCP server in the MCP Catalog.
   - An agent receives proxy tools named `mcp__<server>__<tool>` only for the servers its profile attaches.
@@ -59,8 +59,8 @@ Memory scopes:
   - Each running runtime holds about 80 MiB of resident memory when idle and up to about 120 MiB while it starts and runs a turn, so memory, not start-up time, sets the concurrency limit (evidence (b) under Sources). MCP servers do not add to it, because the host holds one connection per server.
   - An MCP server in a profile is a new owner grant outside module permissions. The specification's rule that roles never enable browser accounts or shell execution (agent-dispatch::CON-003) therefore becomes a per-profile owner decision.
   - Shared Executor memory lets one Assignment's process influence later Assignments that use the same profile in that conversation.
-- Neutral: this decision stays proposed until the following are verified on the pinned Codex App Server:
-  - (a) it loads skills from a per-agent home while host skill discovery and plugins remain disabled. On 2026-11-08 this failed with the runtime configuration in use. It held only with a private HOME and bundled skills disabled, which runtimes do not use yet;
+- Neutral: the decision was accepted once two checks held on the pinned Codex App Server (Sources):
+  - (a) it loads skills from a per-agent home while host skills, bundled skills and plugins stay out. On 2026-11-08 this failed with the runtime configuration then in use and held with a private HOME and bundled skills disabled, which every isolated runtime now uses;
   - (b) the per-runtime memory and start-up cost, which sizes the pool. Verified on 2026-11-08.
 
 ## Sources
@@ -71,18 +71,19 @@ Memory scopes:
   - preset Executor profiles per team;
   - shared memory among same-profile Executors;
   - MCP capability only through explicit owner configuration.
-- `apps/weixin-service/src/isolated-model-runtime.ts`: disabled runtime features and skipped host skill discovery.
+- `apps/weixin-service/src/isolated-model-runtime.ts`: disabled runtime features, the runtime's own HOME and disabled bundled skills.
 - The owner's agent-link project at `/Users/loong_zhou/playground/multi-agent`: README section 「MCP（外部工具服务）」, FEATURES section 28 and `agent-link/mcp.ts` (host-managed MCP connections and proxy tools).
 - `apps/weixin-service/src/main.ts`: one tool control for every specialist and one group memory scope.
 - `apps/weixin-service/src/agent-dispatch-executor.ts`: shared prompt tail. Its runtimes, and the coordinator's, come from the bounded pool in `runtime-pool.ts`.
 - Evidence (a), measured on 2026-11-08 with `codex-cli 0.167.0-alpha.3.2`, the executable bundled with the ChatGPT app, which the service selects when `CODEX_BIN` is unset. The repository pins no Codex version. Runtimes were created by `createIsolatedModelRuntime` and spawned as the service spawns them. Model requests went to a loopback fake Responses endpoint, never to a model.
-  - Configuration in use: `skills/list` returned the runtime's own skill, the 34 skills under the real HOME's `.agents/skills` and 5 bundled system skills installed into the runtime's own home. Skipping host skill discovery or not gave the same 40 entries.
+  - Configuration in use before ADR-0027 was accepted: `skills/list` returned the runtime's own skill, the 34 skills under the real HOME's `.agents/skills` and 5 bundled system skills installed into the runtime's own home. Skipping host skill discovery or not gave the same 40 entries.
   - The captured model request listed a skill planted in the HOME's `.agents/skills`, and injected its body when the text named it with `$` or the input carried it as a skill item. It listed the bundled skills too.
   - Candidate configuration, a private HOME under the runtime root plus `skills.bundled.enabled = false`: only the runtime's own skill was listed, and its body was injected when named. The planted skill was not injected, even when named or given as a skill item.
-- Evidence (b), measured on the same date with the same executable and the configuration in use, on a 32 GiB, 10-core arm64 Mac, with the same fake endpoint. Each runtime is one process.
+- Evidence (b), measured on the same date with the same executable and the configuration then in use, on a 32 GiB, 10-core arm64 Mac, with the same fake endpoint. Each runtime is one process.
   - Time from spawn to a ready thread: median 163 ms, max 228 ms over 10 starts on new homes; median 111 ms, max 183 ms over 10 restarts on one home. A restart plus `thread/resume` of a persisted thread: median 73 ms, max 97 ms over 10 runs.
   - Resident memory: 54–55 MiB after `initialize`; 67.3–80.6 MiB idle with a thread; 86.9–100.5 MiB after one turn; a peak of at most 120.3 MiB over those 20 starts, and at most 95.9 MiB with the candidate configuration. Ten turns of 64 KiB input each on one thread reached 100.2 MiB.
   - Not measured: memory during real model turns with tool calls.
+- Evidence (a) re-run with the fix, 2026-11-08, same executable and fake endpoint: each runtime kind that `main.ts` creates (Feishu group, dispatch coordinator, specialist, pending router, group memory curator, Penny) and group research through `codex exec` listed and injected only the skills in its own home. A planted host skill, a symbolic-linked one, one in the host's Codex home and the bundled skills were neither listed nor injected, also when named with `$` or given as a skill item, and the copied login still reached the endpoint. `pnpm --filter @aloong-planet/codex-weixin-service test:isolated-runtime` (`apps/weixin-service/tests/isolated-model-runtime.test.ts`) repeats the check.
 - Pool limits, an owner decision on 2026-11-08 made through a delegate, adopted as the defaults of agent-dispatch::QR-001:
   - 256 MiB is planned per running runtime, about twice the measured peak, to cover real model turns;
   - the pool gets 1/8 of the 32 GiB host, 4 GiB, which allows 16 running runtimes, idle or busy. That is twice the widest request allowed without confirmation (agent-dispatch::REQ-011/AC-02): a Coordinator, 2 Team Leaders and 5 Executors;

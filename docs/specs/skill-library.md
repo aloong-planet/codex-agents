@@ -2,7 +2,7 @@
 
 > Status: specified; not implemented.
 > Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: no agent can load a Skill Library skill. Group runtimes skip host skill discovery, yet they still list the owner's skills under the real HOME's `.agents/skills` and Codex's bundled system skills, and inject one when it is named ([ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md) Sources).
+> Pending: no agent can load a Skill Library skill.
 
 ## Problem Statement
 
@@ -78,7 +78,7 @@ When an Executor is created, the host copies the skills its profile selects, in 
 ## Testing Decisions
 
 - **Library.** Tested at its public interface with real temporary folders: import, the missing-SKILL.md and duplicate-name errors, symbolic-link refusal, binary files, change detection, an unavailable source, versioning and deletion rules.
-- **Runtime boundary.** Executor creation is tested by inspecting the files in the created runtime home: only the profile's skills, in the snapshot's version.
+- **Runtime boundary.** Inspecting the files in the created runtime home tests that the profile's skills are there in the snapshot's version. That no other skill is visible is tested on the real App Server, because what it lists also depends on the runtime's HOME and on Codex's bundled skills: the runtime's skill listing and the model request it builds, captured by a loopback fake model endpoint (`apps/weixin-service/tests/fixtures/isolated-runtime-probe.ts`), contain only the profile's skills, and naming any other skill injects nothing.
 - **Console.** HTTP-boundary tests of the library API with an authorized browser, and Playwright end-to-end tests of import, re-import and delete.
 
 ## Out of Scope
