@@ -13,9 +13,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MEMORY_CURATOR_RUNTIME_PROFILE } from "../src/codex-account-memory-curator.js";
 import { CodexConversation, type CodexConversationOptions } from "../src/codex-conversation.js";
 import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES, type IsolatedModelRuntime } from "../src/isolated-model-runtime.js";
+import { LocalFileTools } from "../src/local-file-tools.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
 import { resolveCodexExecutable, spawnStdioAppServer } from "../src/stdio-app-server-transport.js";
 import { PENDING_RESPONSE_RUNTIME_PROFILE } from "../src/workflow-pending-response-router.js";
+import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 import { AppServerSession, assistantMessage, type BundledSkillSample, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer,
   sampleBundledSkill, skillCatalog } from "./fixtures/isolated-runtime-probe.js";
 
@@ -179,5 +181,31 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     expect(skillCatalog(request)?.sort()).toEqual(["own-home-probe", "own-probe"]);
     expectOnlyOwnSkills(modelInputText(request));
     expect(request.authorization).toBe(`Bearer ${syntheticKey}`);
+  }, 60_000);
+
+  it("a private file grant over the runtime roots cannot add a skill the runtime lists", async () => {
+    // The service's own placement (own-probe, own-home-probe) is the positive control that these roots are listed.
+    const { runtime, runtimeRoot } = runtimeWithOwnSkills("group-model-runtimes", "feishu.group.planting");
+    const tools = new LocalFileTools({ get: () => ({ moduleId: "notes", revision: 1, saved: true,
+      scopes: [{ scopeId: "work", label: "Work", directory: work, read: true, write: true }] }) }, {
+      moduleIds: ["notes"], spoolDirectory: path.join(work, "planting-spool"), protectedRoots: [path.join(work, "group-model-runtimes")] });
+    const trusted: TrustedWorkflowTurn = { eventKey: "planting", accountId: "owner-account", target: "owner@im.wechat", occurredAt: 1,
+      originalTextRef: "text", attachmentRefs: [] };
+    const binding = tools.bindTurn(trusted);
+    try {
+      const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+      const relativeRoot = path.relative(work, runtimeRoot).split(path.sep).join("/");
+      const targets = ["workspace/.agents/skills", "codex-home/skills", "home/.agents/skills"].map((skills) => `${relativeRoot}/${skills}/planted-probe/SKILL.md`);
+      expect(targets).toHaveLength(3);
+      for (const relativePath of targets) {
+        await expect(tools.execute({ toolId: "files.write", toolVersion: 1, arguments: { scopeRef, relativePath, overwrite: false,
+          content: "---\nname: planted-probe\ndescription: planted by a file grant\n---\nPLANTED-BODY\n" } }, trusted), relativePath)
+          .rejects.toThrow(/^local_file_permission_denied$/u);
+      }
+    } finally { await binding.release(); await tools.close(); }
+    const session = await AppServerSession.open(model.route(runtime));
+    try {
+      expect((await session.listSkills(runtime.cwd)).map((skill) => skill.name).sort()).toEqual(["own-home-probe", "own-probe"]);
+    } finally { session.close(); }
   }, 60_000);
 });

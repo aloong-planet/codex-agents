@@ -543,6 +543,40 @@ Stream directory entries, read a bounded metadata window concurrently and keep t
 
 Reuse public File Tools and the fixture-only production ingress. Verify a known latest file beyond the former count boundary, continuation identity/consumption, stable ordering, incomplete-budget behavior, permission changes and specific timeout errors. Explicit real-directory opt-in uses read-only Downloads, independently captured expected identities and fixture outbound delivery with the actual model; report exact replies and Run/Effect/outbox separately from phone receipt. Compare bounded concurrency levels on the same real tree, recording completeness and identity alongside duration; a partial fast scan is not performance success. No UI controls, layout or status presentation change, so the visual prototype gate is not applicable.
 
+## Service-state boundary
+
+### workflow-runs::CON-003 File grants never reach service state
+
+Applies to `files.find`, `files.grep`, `files.read`, `files.edit` and `files.write`, and to send snapshots taken from their references, for every target: the owner's private Weixin and Feishu chats as well as group chats. It extends the protected internal-state boundary of [ADR-0023](../adr/0023-isolate-feishu-group-authority.md) from group targets to every target.
+
+- **workflow-runs::CON-003/AC-01**: The protected set contains:
+  - the state directory (`WEIXIN_DEMO_STATE_DIR`, default `~/Library/Application Support/weixin-ilink-direct-demo`) and everything beneath it, including every isolated runtime root with its workspace, Codex home and HOME, inbound media, artifacts and stores;
+  - the channel configuration (`CHANNEL_CONFIG_PATH`, default `channel.json` in the state directory);
+  - Penny's configuration (`PENNY_CONFIG_PATH`) when set;
+  - the private Codex home (`CODEX_HOME`, default `~/.codex`), which holds the login copied into every isolated runtime;
+  - the diagnostics directory (`WEIXIN_OTEL_DIRECTORY`, default `~/Library/Logs/codex-weixin/otel`);
+  - `~/.agents` and `~/.openclaw`;
+  - the LaunchAgent definition `~/Library/LaunchAgents/com.local.codex-weixin.plist` and its log directory `~/Library/Logs/codex-weixin`.
+
+  A configured relative location is taken from the service's working directory. A member that does not exist yet is still protected when it is later created.
+- **workflow-runs::CON-003/AC-02**: Members of the protected set are outside every file grant, whatever directory the grant names. Find and grep omit them, so no reference to them is issued. Writing to them, and reading through a reference whose path now resolves into them, is refused with the existing permission-denied error `local_file_permission_denied` (failure mode 8), which names no internal path, and leaves nothing on disk. An edit can reach them only through a symlinked directory, which failure mode 28 already refuses. A send candidate persisted before a location joined the set is refused when it is snapshotted.
+- **workflow-runs::CON-003/AC-03**: Everything else under the same grant keeps working: search, read, create, edit and send behave as before, including under a grant on the home directory.
+- **workflow-runs::CON-003/AC-04**: The file tools refuse to start without a protected set, so a missing set fails closed and is never read as "nothing is protected".
+
+### Failure modes and boundaries
+
+A grant contains the state directory; a private request asks to write a skill into a group runtime's `workspace/.agents/skills`, `codex-home/skills` or `home/.agents/skills`; a request targets `state.json`, a configuration file, the Codex home or a LaunchAgent file that does not exist yet; a directory found under a grant is later replaced by a symlink into the set; a candidate listed before the set covered its directory is chosen after a restart. Each is refused under workflow-runs::CON-003/AC-02 while the rest of the grant works under workflow-runs::CON-003/AC-03.
+
+No grant definition in production reaches the protected set today. The notes module grants only the configured vault, and local media grants only `~/Downloads`, `~/Pictures` and `~/Documents`. The boundary is defense in depth against an environment override that places a protected location inside a grant, and against future grant types. It closes the path by which a private turn, acting on the owner's request or on injected content it is processing, could plant a skill or configuration that every later group request would load. The service's own code writes beneath the state directory directly and is not subject to file grants. The private main agent's native workspace write guard is separate from `files.*` and is not covered here.
+
+### Implementation Decisions
+
+One protected set serves group and private targets; `LocalFileTools` requires it at construction. `main.ts` builds it from the environment with `serviceProtectedRoots` (`runtime-paths.ts`). The sandbox worker drops a scope that lies inside the set and checks real paths against it, so symlinks cannot bypass it. A read through a reference that now resolves into the set reports `local_file_permission_denied`, the same code as a refused write.
+
+### Testing Decisions
+
+Unit cases drive the public `LocalFileTools` with the real worker for both a private and a group target. Whole-application coverage reuses the Weixin and Feishu fixture inbound entries with a grant that contains the state directory, the Codex home, both configuration files, the service HOME and the diagnostics directory. The opt-in installed-App-Server probe confirms that a refused plant leaves the runtime's skill listing unchanged. Fixture mode keeps its business files outside the state directory (`WORKFLOW_FIXTURE_BUSINESS_DIRECTORY`, default `<state directory>-business`), as production does. No UI change; prototype exemption.
+
 ## Out of Scope
 
 - 首期 OTel 诊断不部署 Phoenix、Langfuse、Jaeger 或 Collector，不新建诊断 SQLite、独立诊断 Tab、新增全文采集或自动模型归因；后续需求出现时另行评估。
