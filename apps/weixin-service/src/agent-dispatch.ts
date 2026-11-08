@@ -2,15 +2,23 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundContent, SendTextResult } from "./channel-contract.js";
-import type { DispatchAgent, DispatchClassifier, DispatchDelivery, DispatchExecutor, DispatchJob, DispatchPendingResult } from "./agent-dispatch-types.js";
+import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutor, DispatchJob, DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
+import { LeaderOutputError, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
 type Notice = { event: InboundContent; agentId: string; senderAccountId: string; text: string; bindingHash: string; presentation?: Omit<PendingPresentation, "acceptedAt"> };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
+/** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
+export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"] }>;
+const ENDED: ReadonlyArray<DispatchAssignment["status"]> = ["completed", "failed", "cancelled", "interrupted"];
 
-/** One durable intake, independent specialist execution, and independently recorded delivery outcomes. */
+/**
+ * One durable intake and independently recorded delivery outcomes. The Coordinator routes each request to a team; its Team
+ * Leader plans one Assignment in a tool-free turn, an Executor performs it, and the Team Leader closes the request. Requests
+ * stored before Assignments existed carry no definitions version and keep the handling they were stored under.
+ */
 export class AgentDispatch {
   private readonly database: DatabaseSync;
   private started = false;
@@ -21,7 +29,14 @@ export class AgentDispatch {
   constructor(databasePath: string, private readonly options: {
     agents: readonly DispatchAgent[];
     classifier: DispatchClassifier;
+    leader: TeamLeader;
     executor: DispatchExecutor;
+    /** The current team definitions version, recorded on a request when it is first planned. */
+    definitionsVersion(): number;
+    /** A team as its request's definitions version defines it, or undefined when that version has no such team. */
+    team(teamId: string, definitionsVersion: number): DispatchTeamView | undefined;
+    /** The access revision that keys Team Leader sessions. */
+    revision(): string;
     delivery: DispatchDelivery;
     authorized(event: InboundContent): boolean;
     bindingHash(event: InboundContent): string;
@@ -38,6 +53,7 @@ export class AgentDispatch {
       CREATE TABLE IF NOT EXISTS dispatch_input (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, target TEXT NOT NULL, payload TEXT NOT NULL, binding_hash TEXT NOT NULL, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS dispatch_job (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS dispatch_notice (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT);
+      CREATE TABLE IF NOT EXISTS dispatch_assignment (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, request_id TEXT NOT NULL, payload TEXT NOT NULL);
     `);
     if (!this.database.prepare("PRAGMA table_info(dispatch_notice)").all().some((column) => column.name === "accepted_at")) {
       this.database.exec("ALTER TABLE dispatch_notice ADD COLUMN accepted_at INTEGER");
@@ -61,8 +77,19 @@ export class AgentDispatch {
       this.markPresented(JSON.parse(String(row.payload)) as Notice, Number(row.accepted_at));
     }
     for (const job of this.jobs()) if (job.status === "running") {
+      const assignment = this.currentAssignment(job);
+      if (job.definitionsVersion !== undefined && job.cancelRequested) {
+        // The requester's cancellation stands; nothing of a cancelled request runs again after a restart.
+        job.status = "cancelled"; job.result = `已停止继续处理。${this.options.completedWork(job)}已经完成的操作不会自动撤销。`; job.supplements = [];
+        this.endAssignment(job, "cancelled");
+        this.recordResult(job, assignment ? this.closingId(job) : undefined);
+        continue;
+      }
+      // A tool-free Team Leader turn is safe to repeat, so a request cut off before or after its Executor resumes there.
+      if (job.definitionsVersion !== undefined && assignment?.status !== "running") { job.status = "queued"; this.save(job); continue; }
       job.status = "failed"; job.result = `服务中断，本次处理已停止。${this.options.completedWork(job)}已有操作不会自动重复；请核对结果后明确重试。`;
-      this.recordResult(job);
+      if (assignment) { assignment.status = "interrupted"; assignment.result = job.result; this.saveAssignment(assignment); }
+      this.recordResult(job, assignment ? this.closingId(job) : undefined);
     }
     for (const row of this.database.prepare("SELECT id, payload FROM dispatch_notice WHERE state = 'queued' ORDER BY sequence").all()) {
       await this.deliverNotice(String(row.id), JSON.parse(String(row.payload)) as Notice);
@@ -71,8 +98,11 @@ export class AgentDispatch {
   }
 
   getState() {
-    return { jobs: this.jobs().map(({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, event }) =>
-      ({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, accountId: event.accountId, target: event.target, requester: event.senderId })),
+    return { jobs: this.jobs().map(({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, event, definitionsVersion }) =>
+      ({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, accountId: event.accountId, target: event.target, requester: event.senderId,
+        definitionsVersion: definitionsVersion ?? null,
+        assignments: this.assignments(id).map(({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run }) =>
+          ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run })) })),
     notices: this.database.prepare("SELECT id, state FROM dispatch_notice ORDER BY sequence").all() };
   }
 
@@ -82,6 +112,7 @@ export class AgentDispatch {
     for (const worker of this.workers.values()) worker.abort.abort();
     await Promise.allSettled([this.options.classifier.close?.(), this.options.executor.close()]);
     await Promise.allSettled([...this.intake.values(), ...[...this.workers.values()].map(({ operation }) => operation)]);
+    try { this.options.leader.dispose?.(); } catch { this.failure("dispatch_leader_close_failed"); }
     this.database.close();
   }
 
@@ -129,11 +160,20 @@ export class AgentDispatch {
           const agent = this.options.agents.find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = this.jobs().find((job) => job.runRef === pending.runRef && job.event.target === event.target && job.event.senderId === event.senderId);
+          const waiting = original && this.currentAssignment(original);
+          if (original && waiting?.status === "waiting" && (pending.result.status === "completed" || pending.result.status === "failed")) {
+            // The resolved choice ends the Assignment; its Team Leader closes the request instead of the workflow reply going out alone.
+            waiting.status = pending.result.status; waiting.result = pending.result.message;
+            original.status = "queued";
+            this.transaction(() => { this.saveAssignment(waiting); this.save(original); });
+            this.finishInput(event.key); this.kick(); continue;
+          }
           const presentation = pending.result.status === "waiting" && pending.runRef ? this.options.presentation(event, pending.runRef) : undefined;
           const notice = { event, bindingHash, agentId: agent.id, senderAccountId: agent.senderAccountId, text: pending.result.message,
             ...(presentation ? { presentation } : {}) };
           if (original) {
             original.status = pending.result.status; original.result = pending.result.message;
+            if (waiting && pending.result.status === "cancelled") { waiting.status = "cancelled"; waiting.result = pending.result.message; this.saveAssignment(waiting); }
             this.recordResult(original, `${event.key}:pending`, notice);
           } else this.queueNotice(`${event.key}:pending`, notice);
           await this.deliverNotice(`${event.key}:pending`, notice);
@@ -178,6 +218,7 @@ export class AgentDispatch {
             if (job.status === "running" && this.workers.has(job.id)) { this.save(job); this.workers.get(job.id)!.abort.abort(); }
             else {
               job.status = "cancelled"; job.result = `已停止继续处理。${this.options.completedWork(job)}已经完成的操作不会自动撤销。`;
+              this.endAssignment(job, "cancelled");
               const report = this.recordResult(job, `${event.key}:cancelled`);
               await this.deliverNotice(report.id, report.notice);
             }
@@ -188,7 +229,7 @@ export class AgentDispatch {
               job.summary = decision.summary || job.summary;
               job.executionEvent = { ...event, text: `${(job.executionEvent ?? job.event).text}\n补充要求：${event.text}` }; this.save(job);
               await this.coordinate(event, bindingHash, "已补充到建议中。请确认是否开始处理。");
-            } else { job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job); }
+            } else { this.endAssignment(job, "cancelled"); job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job); }
           }
         } else if (decision.kind === "retry" || decision.kind === "retry_report") {
           const job = this.job(decision.requestId!);
@@ -202,7 +243,11 @@ export class AgentDispatch {
               await this.deliverNotice(`${originalId}:retry:${event.key}`, JSON.parse(String(previous.payload)) as Notice);
             } else await this.coordinate(event, bindingHash, "这条汇报已被接收或发送结果无法确认，不能自动重发。业务操作不会重新执行。");
           } else if (job.status === "failed") {
-            job.status = "queued"; job.attempt++; job.retry = true; job.fixtureMessageId = event.messageId; this.save(job);
+            job.status = "queued"; job.attempt++; job.retry = true; job.fixtureMessageId = event.messageId;
+            // A retry reruns the failed Assignment with the same Executor; a request that failed before any Assignment plans again.
+            const failed = this.assignments(job.id).at(-1);
+            if (failed && (failed.status === "failed" || failed.status === "interrupted")) { failed.attempt = job.attempt; failed.status = "queued"; }
+            this.transaction(() => { if (failed?.attempt === job.attempt) this.saveAssignment(failed); this.save(job); });
           } else await this.coordinate(event, bindingHash, "这项请求没有可重试的失败处理；已完成的操作不会重新执行。");
         } else if (decision.kind !== "ignore") {
           await this.coordinate(event, bindingHash, decision.message || "你指的是哪件事，希望得到什么结果？确认后我会交给合适的 Agent。");
@@ -217,30 +262,104 @@ export class AgentDispatch {
 
   private async execute(job: DispatchJob, signal: AbortSignal): Promise<void> {
     if (!this.eligible(job.event, job.bindingHash)) { job.status = "cancelled"; this.save(job); return; }
-    job.status = "running"; this.save(job);
+    job.status = "running"; job.definitionsVersion ??= this.options.definitionsVersion(); this.save(job);
+    let assignment = this.currentAssignment(job);
+    let closing: string | undefined;
     try {
-      const receipt = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`, this.notice(job, `我准备处理：${job.summary}。完成后会在本群汇报。`));
-      if (!receipt.ok) throw new Error("dispatch_receipt_unavailable");
-      if (signal.aborted) throw new Error("dispatch_cancelled");
-      const result = await this.options.executor.run(structuredClone(job), signal);
-      job = this.job(job.id)!;
-      job.status = result.status; job.result = result.message;
-      if (result.runRef) job.runRef = result.runRef;
-      if (result.status === "failed") job.result += this.options.completedWork(job);
+      const team = this.options.team(job.agentId, job.definitionsVersion);
+      if (!team) throw new Error("dispatch_team_unavailable");
+      if (!assignment) {
+        const plan = await this.options.leader.plan(this.leaderInput(job, team));
+        if (signal.aborted) throw new Error("dispatch_cancelled");
+        assignment = this.createAssignment(job, team, plan.assignments[0]!);
+      }
+      if (assignment.status === "queued") {
+        const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`,
+          this.notice(job, `我安排${assignment.executor}（${assignment.profileName}）处理：${assignment.title}。完成后会在本群汇报。`));
+        if (!start.ok) throw new Error("dispatch_receipt_unavailable");
+        if (signal.aborted) throw new Error("dispatch_cancelled");
+        assignment.status = "running"; this.saveAssignment(assignment);
+        const result = await this.options.executor.run(structuredClone(job), structuredClone(assignment), signal);
+        job = this.job(job.id)!; assignment = this.assignment(assignment.id)!;
+        assignment.status = result.status; assignment.result = result.message;
+        if (result.runRef) { assignment.runRef = result.runRef; job.runRef = result.runRef; }
+        this.transaction(() => { this.saveAssignment(assignment!); this.save(job); });
+      }
+      if (assignment.status === "waiting") {
+        // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
+        job.status = "waiting"; job.result = assignment.result!;
+        const report = this.recordResult(job);
+        if (!this.closing) await this.deliverNotice(report.id, report.notice);
+        return;
+      }
+      if (!job.cancelRequested) closing = await this.closeAssignment(job, team, assignment);
+      job.status = assignment.status === "completed" ? "completed" : assignment.status === "cancelled" ? "cancelled" : "failed";
+      job.result = closing ?? assignment.result ?? "";
+      if (job.status === "failed") job.result += this.options.completedWork(job);
     } catch (error) {
       job = this.job(job.id)!;
       job.status = "failed";
-      job.result = error instanceof Error && error.message === "dispatch_receipt_unavailable"
-        ? "接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。"
-        : `${this.closing ? "服务中断，本次处理已停止。" : failureReason(error)}${this.options.completedWork(job)}已完成的操作不会自动重复，请补充信息后明确让我重试。`;
+      job.result = error instanceof LeaderOutputError
+        ? "我暂时无法形成有效分工，本次尚未开始处理。请补充需求后明确重试。"
+        : error instanceof Error && error.message === "dispatch_receipt_unavailable"
+          ? "接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。"
+          : `${this.closing ? "服务中断，本次处理已停止。" : failureReason(error)}${this.options.completedWork(job)}已完成的操作不会自动重复，请补充信息后明确让我重试。`;
+      if (assignment) {
+        assignment = this.assignment(assignment.id)!;
+        if (!ENDED.includes(assignment.status)) { assignment.status = "failed"; assignment.result = job.result; this.saveAssignment(assignment); }
+      }
     }
     if (job.cancelRequested) {
       job.status = "cancelled"; job.result = `已停止继续处理。${this.options.completedWork(job)}已经完成的操作不会自动撤销。`; job.supplements = [];
+      this.endAssignment(job, "cancelled");
     }
     // Delivery is a separate outcome: failure here must never restart completed business work.
-    const report = this.recordResult(job);
+    const report = this.recordResult(job, assignment ? this.closingId(job) : undefined);
     if (!this.closing) await this.deliverNotice(report.id, report.notice);
   }
+
+  /** The Team Leader's closing turn; a failed turn falls back to the Assignment's own result, so no outcome goes unreported. */
+  private async closeAssignment(job: DispatchJob, team: DispatchTeamView, assignment: DispatchAssignment): Promise<string> {
+    const outcome = assignment.status === "completed" ? "已完成" : assignment.status === "cancelled" ? "已停止" : "未能完成";
+    try {
+      return await this.options.leader.close(this.leaderInput(job, team),
+        [{ title: assignment.title, executor: assignment.executor, status: assignment.status, result: assignment.result ?? "" }]);
+    } catch {
+      return `${assignment.executor}「${assignment.title}」${outcome}。${assignment.result ?? ""}`;
+    }
+  }
+
+  private leaderInput(job: DispatchJob, team: DispatchTeamView): LeaderTurnInput {
+    const latest = job.executionEvent && job.executionEvent.text !== job.event.text ? { latest: job.executionEvent.text } : {};
+    return { requestId: job.id, leader: team.leader, profiles: team.profiles,
+      brief: { message: job.event.text, ...latest, summary: job.summary },
+      session: { accountId: job.event.accountId, target: job.event.target, bindingHash: job.bindingHash, revision: this.options.revision(),
+        definitionsVersion: job.definitionsVersion! },
+      fixtureMessageId: job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId };
+  }
+
+  private createAssignment(job: DispatchJob, team: DispatchTeamView, planned: { profileId: string; title: string; brief: string }): DispatchAssignment {
+    const profile = team.profiles.find(({ id }) => id === planned.profileId)!;
+    let assignment!: DispatchAssignment;
+    this.transaction(() => {
+      const id = `${job.id}:assignment:${job.attempt}`;
+      const sequence = Number(this.database.prepare("INSERT INTO dispatch_assignment (id, request_id, payload) VALUES (?, ?, '{}')").run(id, job.id).lastInsertRowid);
+      assignment = { id, requestId: job.id, teamId: job.agentId, profileId: profile.id, profileName: profile.name, executor: `执行者 ${sequence}`,
+        title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt };
+      this.saveAssignment(assignment);
+    });
+    return assignment;
+  }
+
+  /** The Assignment of the request's current attempt, if its Team Leader has planned one. */
+  private currentAssignment(job: DispatchJob): DispatchAssignment | undefined {
+    return this.assignments(job.id).filter(({ attempt }) => attempt === job.attempt).at(-1);
+  }
+  private endAssignment(job: DispatchJob, status: "cancelled"): void {
+    const assignment = this.currentAssignment(job);
+    if (assignment && (!ENDED.includes(assignment.status) || assignment.status === "failed")) { assignment.status = status; this.saveAssignment(assignment); }
+  }
+  private closingId(job: DispatchJob): string { return `${job.id}:closing:${job.attempt}`; }
 
   private recordResult(job: DispatchJob, id = `${job.id}:result:${job.attempt}`, notice = this.notice(job, job.result!, true)): { id: string; notice: Notice } {
     job.reportId = id;
@@ -300,6 +419,13 @@ export class AgentDispatch {
     if (acceptedAt !== null) this.markPresented(notice, acceptedAt);
     return result;
   }
+  private assignments(requestId: string): DispatchAssignment[] {
+    return this.database.prepare("SELECT payload FROM dispatch_assignment WHERE request_id = ? ORDER BY sequence").all(requestId).map((row) => JSON.parse(String(row.payload)) as DispatchAssignment);
+  }
+  private assignment(id: string): DispatchAssignment | undefined {
+    const row = this.database.prepare("SELECT payload FROM dispatch_assignment WHERE id = ?").get(id); return row ? JSON.parse(String(row.payload)) as DispatchAssignment : undefined;
+  }
+  private saveAssignment(assignment: DispatchAssignment) { this.database.prepare("UPDATE dispatch_assignment SET payload = ? WHERE id = ?").run(JSON.stringify(assignment), assignment.id); }
   private jobs(): DispatchJob[] { return this.database.prepare("SELECT payload FROM dispatch_job ORDER BY rowid").all().map((row) => JSON.parse(String(row.payload)) as DispatchJob); }
   private job(id: string): DispatchJob | undefined { const row = this.database.prepare("SELECT payload FROM dispatch_job WHERE id = ?").get(id); return row ? JSON.parse(String(row.payload)) as DispatchJob : undefined; }
   private save(job: DispatchJob) { this.database.prepare("INSERT INTO dispatch_job VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload").run(job.id, JSON.stringify(job)); }
@@ -312,6 +438,7 @@ function failureReason(error: unknown): string {
   const code = error instanceof Error ? error.message : "";
   if (code === "dispatch_authorization_changed") return "权限或可用上下文发生变化，本次处理已停止。";
   if (code === "dispatch_model_unavailable") return "当前模型不可用，本次未能继续处理。";
+  if (code === "dispatch_team_unavailable") return "负责团队当前不可用，本次未能继续处理。";
   if (code.startsWith("main_reply_")) return "模型未返回有效的结果报告，本次处理已停止。";
   return "执行连接中断或处理出错，本次未能完成。";
 }

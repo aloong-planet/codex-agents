@@ -1,13 +1,14 @@
 # Agent dispatch
 
-> Status: one-specialist dispatch is implemented locally and independently reviewed. Team coordination (Team Leaders, Executors and Assignments) is specified here and not yet implemented.
+> Status: a Team Leader runs each group request with one Executor, implemented locally (ticket 05 of agent-teams). Several Assignments per request, cross-team work, visibility scopes and the console are specified here and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
-> Pending: the service still dispatches each Dispatch Request to one specialist that executes it, and shares one group memory scope among specialists. Each specialist turn already takes its instructions and host tools from its team's Executor profile.
+> Pending: a plan holds exactly one Assignment, and Executors still recall and capture the group memory; a Team Leader receives no memory and no Team Directory yet.
+> Pending: an Executor is named `执行者 <n>（<profile name>）` in the Team Leader's start message, an interim form. The confirmed form, `<profile noun> <n>` (such as 文案执行者 51), needs an Executor-noun field on Executor profiles, which the team-management page adds.
 
 ## Problem Statement
 
-Authorized members express work in ordinary group discussion, and a backend decides whether an agent is needed. Today one specialist completes each request alone, and every specialist shares the same group memory, tools and code-defined instructions. As a result:
+Authorized members express work in ordinary group discussion, and a backend decides whether an agent is needed. Under one-specialist dispatch, one specialist completed each request alone, and every specialist shared the same group memory, tools and code-defined instructions. As a result:
 
 - one domain's rules and results reach every other domain;
 - work cannot be divided;
@@ -274,7 +275,18 @@ The host validates them against the registry before acting.
 
 **Team Leader.** A Team Leader turn is also tool-free. It returns a structured plan: Assignments with profile and Brief, decisions to post, a cross-team request, a summary, or a closing. The host validates the plan under agent-dispatch::REQ-011/AC-03, creates Executors, and sends the Team Leader's group messages with its application.
 
+- Input: its Brief, holding the original message, the latest confirmation or supplement when it differs, and the Coordinator's summary; its team's responsibility; and the IDs and names of its Executor profiles. Its profile resolves to its own instructions and never to host tools.
+- A refused plan gets one tool-free correction turn in the same session, told why it was refused. A plan still invalid fails the request with the Team Leader's report 「我暂时无法形成有效分工，本次尚未开始处理。请补充需求后明确重试。」 and no Executor. A plan over the Assignment limit gets no correction turn, because trimming it belongs to the original requester (agent-dispatch::REQ-014).
+- Until several Assignments run per request, a plan holds exactly one Assignment.
+- Once the Assignment has its Executor, the Team Leader posts the start message 「我安排<Executor>（<profile name>）处理：<Assignment title>。完成后会在本群汇报。」. The Executor's work starts only after that message is accepted; a start message not confirmed as sent fails the request as before.
+- When the Assignment ends, a second tool-free turn writes the closing message from the Assignment's title, status and result. In a single-team request it is both the team's and the request's closing. If that turn fails, the host posts the Assignment's own result under the Team Leader's identity instead, so no outcome goes unreported.
+- Each turn holds its pool slot only for itself, so a Team Leader never holds a slot while its Executor waits for one. Its session is keyed by leader, conversation, binding, access revision and definitions version, and resumes from its persisted thread.
+
 **Executor.** An Executor turn runs in its own isolated runtime with the profile's host tools, MCP proxy tools and skills. Its result returns to the Team Leader, never to the group directly.
+
+- Its session is keyed by its Assignment, and its runtime is released as soon as its turn ends. An explicit retry reruns the same Assignment, with the same Executor, on that session.
+- It receives the triggering message and its Team Leader's Assignment title and Brief. Files, media, pending choices and reminders it produces go out under the Team Leader's application.
+- A pending choice it raises goes out verbatim under the Team Leader's identity. The requester's resolution ends the Assignment, and the Team Leader's closing turn follows.
 
 **Runtime-supplied tools.** A turn's tool list is exactly its host tools, plus web search where the turn allows it. Codex's own tools are never offered ([ADR-0030](../adr/0030-offer-isolated-runtimes-only-granted-tools.md)): code-mode `exec` and `wait`, `apply_patch`, the MCP resource tools, `request_user_input` and sub-agents. This is how agent-dispatch::REQ-016/AC-02 and agent-dispatch::CON-003 apply to the model's tool list. They hold for threads started after that change. A thread saved before it keeps the old tool list in its history and sends it again when resumed; every tool on it is refused with no effect.
 
@@ -289,6 +301,13 @@ The existing transition rules carry over to Assignments:
 - An explicit retry keeps the prior attempt and its completed-effect context.
 - Original-requester controls are admitted independently of execution. Existing requester-bound file-choice handling precedes fresh task recognition.
 - Completion and the promotion of a queued supplement are recorded atomically, including completion through a pending file choice. A restart preserves both the previous result notice and the next turn.
+- A promoted supplement starts a new attempt of the request, which its Team Leader plans again with the supplement in the Brief, giving a new Assignment and Executor.
+- An explicit retry reruns the failed Assignment with its Executor; a request that failed before any Assignment is planned again.
+- After a restart, a request cut off in a Team Leader turn repeats that turn, which is tool-free. A running Assignment becomes interrupted and is reported under the Team Leader's identity with the known completed work.
+
+Each request records the definitions version it is first planned under. Assignments are stored apart from requests, and an autoincrement sequence numbers their Executors.
+
+Requests stored before Assignments existed carry no definitions version and keep the handling they were stored under. A proposed or queued one enters planning when it next runs. A running one fails with the interruption report. A waiting one resolves its pending choice through the earlier direct reply. A failed one is planned again on retry. Completed and cancelled ones stay readable. At the first start after the change, the only messages this can post are the interruption report of a request that was running, and notices that the earlier process had queued but not sent.
 
 **Memory scopes.** Scopes are keyed as follows (ADR-0027):
 
@@ -324,6 +343,10 @@ Recall and capture use only the caller's scope.
 Do not substitute Provider calls or fabricated Run state for that route.
 
 **Fixture decisions.** Fixtures take envelope and mention shapes from official Feishu examples and the installed SDK. Real-main dispatch cases inject already-decoded Coordinator decisions and Team Leader plans, exercising production parsing, validation and effects. Separate public tests for the Coordinator and Team Leader wrappers keep the production wrapper and substitute only the external runtime response. They cover tool-free invocation, JSON decoding, ownership and size rejection, and thread release. Neither fixture establishes live semantic accuracy.
+
+- A Team Leader plan is injected per message as one value or a list, one per turn, so a case can drive the correction turn; the production correction loop and parsers still run. Without an injected plan, the fixture plans one Assignment on the team's first preset; without an injected closing, the closing repeats the Executor's result.
+- The fixture-only `WORKFLOW_FIXTURE_COORDINATION_RUNTIME=1` seam makes real main build the Coordinator's and Team Leaders' real runtimes in the shared pool, over the fixture App Server, which answers their turns with the injected outputs and records the tools each thread is offered. It drives the host-tool boundary of agent-dispatch::REQ-016/AC-02 through main's construction. Outside fixture mode, startup refuses the switch.
+- The upgrade case builds pre-Assignment state by running this package at base commit 71ff31d with the current install, then starts the current code on it. It fails, never skips, when that commit cannot be archived, built or booted. The owner may retire it once a deployment has migrated production's requests stored before Assignments.
 
 **Profile boundary.** Profile enforcement is tested at the host tool boundary and the memory boundary:
 

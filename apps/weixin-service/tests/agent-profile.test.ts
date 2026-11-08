@@ -12,7 +12,7 @@ const definitions: TeamDefinitions = {
   coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: "cli_0123456789abcdef",
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },
   dispatchGroups: ["oc_alpha"],
-  teams: [{ id: "bill", teamName: "生活团队", responsibility: "生活", leader: { name: "Bill", appId: "cli_2222222222222222", profile: { instructions: "", hostTools: [] } },
+  teams: [{ id: "bill", teamName: "生活团队", responsibility: "生活", leader: { name: "Bill", appId: "cli_2222222222222222", profile: { instructions: "负责人规则", hostTools: ["files.write"] } },
     executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] }],
     bindings: [{ chatId: "oc_alpha", state: "accepting" }] }],
 };
@@ -30,6 +30,8 @@ describe("agent profile resolution", () => {
   it.each([
     ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
       { instructions: "协调规则", hostTools: [], memoryScope: "group" }],
+    ["a Team Leader with its own instructions, no host tools and no memory, even when its profile lists tools", { role: "leader", teamId: "bill" } as const, PRODUCTION_TOOL_IDS,
+      { instructions: "负责人规则", hostTools: [], memoryScope: "none" }],
     ["an Executor's host tools as its allowlist intersected with the catalog", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
       ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: "group" }],
   ])("resolves %s", (_case, agent, catalog, expected) => {

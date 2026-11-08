@@ -8,9 +8,8 @@ import { RuntimePool } from "../src/runtime-pool.js";
 // - main.ts passes the default limits (16 runtimes, 5 idle minutes) to the pool; no fixture case fills 16 slots or lives
 //   5 minutes. Re-test condition: a live run or a fixture case that fills the pool. The values themselves are asserted in
 //   agent-dispatch-executor.test.ts.
-// - No production Executor passes releaseWhenDone yet, so "an Executor's runtime is released when its Assignment ends" is
-//   shown only at this interface. Re-test condition: the ticket that adds Executors passes the option and tests the release.
-// - Nested waits (a Team Leader holding a slot while it waits for an Executor) do not exist yet; that ticket owns them too.
+// - Executors pass releaseWhenDone; the release at the end of an Assignment is tested in agent-dispatch-executor.test.ts.
+// - Nested waits (a Team Leader holding a slot while it waits for an Executor) are tested in agent-dispatch.test.ts.
 
 type FakeRuntime = { key: string; closed: boolean; close: () => Promise<void> };
 
