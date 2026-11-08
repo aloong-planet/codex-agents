@@ -108,6 +108,8 @@ The round speech-bubble path follows the official [Lucide MessageCircle SVG](htt
   - what each choice does.
 
   The choices are 按计划执行, 精简到上限内 (keep the lead team and the first other team, up to 5 Assignments) and 取消事务. No Executor is created before a choice. The sample P-2400 in Bill's conversation has 6 Assignments across 3 teams.
+
+  For a group request the question is Sam's post in the group instead: the planned Assignments with their profiles, the limits, and the three replies 按计划执行, 精简到上限内 (with the same rule) and 取消这项事务, which the original requester sends in the group. The group sample R-2393 shows it in its group-report timeline: Bill's plan has 6 Assignments in one team, and no Executor exists yet.
 - **A team being deleted.** Its leader card shows a 删除中 badge. Its conversation shows a notice and stays open for discussion, but text without a selected request gets an explanation instead of a private-request creation card. Sam's leader choice for a new private request leaves it out.
 - **Supplementing an active request.**
   - The confirmation card shows the exact requirements, the answering leader and that leader's active assignments.
@@ -130,7 +132,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   In the product, actual execution results drive these transitions.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
-- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the nine sample requests. These include one partially failed group request and three private requests: one running, one partially failed and one waiting for an over-limit confirmation.
+- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the ten sample requests. These include one partially failed group request, one group request waiting for an over-limit confirmation, and three private requests: one running, one partially failed and one waiting for an over-limit confirmation.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.
   - Sam's leader selection demonstrates the coordination handoff.
@@ -146,7 +148,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   - Sam's briefs to leaders and the cross-team result handoff, which appear only as report text;
   - real private and memory storage paths;
   - durable request mutation and channel delivery.
-- Controls are not modeled per assignment: supplement, confirmation and cancellation apply to the request, and retry reruns its failed and interrupted assignments. Cancelling or retrying a group request in the group itself is not modeled.
+- Controls are not modeled per assignment: supplement, confirmation and cancellation apply to the request, and retry reruns its failed and interrupted assignments. Cancelling or retrying a group request in the group itself, and the requester's reply to the over-limit question there, are not modeled.
 - The following are not modeled:
   - large organizations, and requests with many assignments, which widen the tree;
   - concurrent file modifications;

@@ -2,8 +2,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_EXIT_WAIT_MS, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT,
-  type DispatchRuntime } from "../src/agent-dispatch-executor.js";
+import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_EXIT_WAIT_MS, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent,
+  type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
 import type { DispatchAssignment, DispatchJob } from "../src/agent-dispatch-types.js";
 import { compactRuntimeHome } from "../src/runtime-home-compaction.js";
 import { RuntimePool } from "../src/runtime-pool.js";
@@ -204,4 +204,48 @@ it("keeps a released home whole and reports it when its thread's rollout is miss
 it("defaults to 16 running runtimes and release after 5 idle minutes", () => {
   expect(DISPATCH_RUNTIME_LIMIT).toBe(16);
   expect(DISPATCH_RUNTIME_IDLE_MS).toBe(300_000);
+});
+
+// Each Executor turn keys its side effects (workflow runs, file-query and media evidence) to its own Assignment.
+it.each([
+  ["a planned Assignment", {}, { sequence: 7 }, "request-one#executor-7", "帮我整理商品文案"],
+  ["its retry", {}, { sequence: 7, attempt: 1 }, "request-one#executor-7", "帮我整理商品文案"],
+  ["a rerun on a supplement", {}, { sequence: 7, attempt: 1, input: { ...job("om_supplement").event, text: "补充：改成下午" } }, "om_supplement#executor-7", "补充：改成下午"],
+  ["an Assignment stored before several ran per request", {}, {}, "request-one", "帮我整理商品文案"],
+  ["an Assignment stored before, on a promoted supplement", { executionEvent: { ...job("om_late").event, text: "补充：加一项" } }, {}, "om_late", "补充：加一项"],
+] satisfies Array<[string, Partial<DispatchJob>, Partial<DispatchAssignment>, string, string]>)("keys the Executor turn of %s", (_case, request, part, key, text) => {
+  const event = executorEvent({ ...job("request-one"), ...request }, { ...assignment("request-one:assignment:0:1"), ...part });
+  expect({ key: event.key, text: event.text }).toEqual({ key, text });
+});
+
+it.each([
+  ["names a refused tool call as the cause of a failure", true, '{"message":"编辑工具不可用，未修改。","results":[{"subject":"修改","status":"blocked"}]}', "tool_refused"],
+  ["leaves the cause to the Executor's report when no call was refused", false, '{"message":"缺少商品成色。","results":[{"subject":"文案","status":"blocked"}]}', undefined],
+])("%s", async (_case, refuse, reply, cause) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-refusal-")); directories.push(directory);
+  const agent = conversation("thread-1", reply);
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: ({ agent: owned }) => owned.close() });
+  let offered: ExecutorToolHost | undefined;
+  // The runtime calls the tool host it was given during its turn, as the App Server does for a model's tool call.
+  agent.runTurn.mockImplementation(async () => {
+    await offered!.execute("edit", {}, { threadId: "thread-1", turnId: "turn-1", namespace: refuse ? "files" : "notes" });
+    return { owner: "model_owned", finalText: reply };
+  });
+  const executor = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
+    agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }], runtimes,
+    createRuntime: (_job, scope, tools) => { offered = tools; return { agent, cwd: `/isolated/${scope}` }; },
+    tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools: { definitions: () => [], contractHash: () => "contract-1",
+      // The refusal shape of the profile tool host for a call outside the profile's allowlist.
+      execute: async (_tool, _arguments, context) => context?.namespace === "files"
+        ? { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ ok: false, error: { code: "agent_profile_tool_refused", retryable: false, action: "stop" } }) }] }
+        : { success: true, contentItems: [{ type: "inputText", text: "{}" }] } } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined,
+  });
+  try {
+    const result = await executor.run(job("request-one"), assignment("request-one:assignment:0:1"), new AbortController().signal);
+    expect(result.status).toBe("failed");
+    expect(result.cause).toBe(cause);
+  } finally { await executor.close(); }
 });

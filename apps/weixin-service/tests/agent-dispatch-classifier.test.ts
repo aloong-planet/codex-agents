@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { CodexDispatchClassifier } from "../src/agent-dispatch-classifier.js";
+import { CodexDispatchClassifier, parseDispatchDecision } from "../src/agent-dispatch-classifier.js";
 import type { DispatchClassificationInput } from "../src/agent-dispatch-types.js";
 import type { CodexConversation } from "../src/codex-conversation.js";
 import type { AppServerTurnResult } from "../src/app-server-turn-driver.js";
@@ -73,4 +73,17 @@ it("keeps the shared Coordinator prompt free of team-domain examples", async () 
   const prompt = contract(String(external.runTurn.mock.calls[0]![1]));
   expect(prompt).toContain("不得捏造对话中没有的事实、条件或位置");
   for (const term of ["商品", "旅行", "项目位置"]) expect(prompt).not.toContain(term);
+});
+
+// The requester's choice on a plan over the limits is a control of an existing request, like a confirmation (agent-dispatch::REQ-011/AC-02).
+it.each([
+  ["a listed request", { requestId: "request-one", agentId: null }, undefined],
+  ["a team instead of a request", { requestId: null, agentId: "alice" }, "dispatch_decision_invalid"],
+  ["a team beside the request", { requestId: "request-one", agentId: "alice" }, "dispatch_decision_invalid"],
+  ["an unlisted request", { requestId: "request-two", agentId: null }, "dispatch_request_unknown"],
+])("accepts trim only as a control of an existing request: %s", (_case, target, error) => {
+  const listed = { ...input, requests: [{ id: "request-one", agentId: "alice", summary: "整理商品文案", status: "waiting" as const, awaiting: "over_limit" as const }] };
+  const value = { kind: "trim", ...target, summary: "", message: "" };
+  if (error) expect(() => parseDispatchDecision(value, listed)).toThrow(error);
+  else expect(parseDispatchDecision(value, listed)).toEqual(value);
 });
