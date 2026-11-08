@@ -34,7 +34,9 @@ The owner chose this layout: the team list on the left, and the selected team's 
 
 - **List.** The list is searchable and can be filtered by group. Each entry shows the team, its state badge, its bound groups, its number of profiles and its active assignments.
 - **New team.** "新增团队" adds an unnamed team to the list and opens it in the editor.
-- **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows only the empty state 「尚未配置派单群」 with the line 「在本机渠道配置里启用飞书派单后，团队会出现在这里。」, with no list, editor or "新增团队".
+- **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows only the empty state 「尚未配置派单群」, with no list, editor or "新增团队", and no link (no page enables dispatch yet). Its body states the real steps:
+  - Feishu paired, dispatch not enabled: 「飞书派单目前在本机渠道配置文件中启用：在 <path> 的 feishu 中加入 dispatch，然后重启服务。详细步骤见运维文档《Feishu agent dispatch》。」 `<path>` is the absolute path of the channel configuration file the service loaded; the mock shows the default location.
+  - Feishu not paired: 「飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再在渠道配置文件的 feishu 中加入 dispatch。」
 - **Navigation.**
   - "Skill 管理" and "MCP 管理" lead to `prototype-skill-library.html` and `prototype-mcp-catalog.html`.
   - "返回团队总览" leads to `prototype-team-structures.html`, whose "团队管理" button leads here.
@@ -140,7 +142,7 @@ A save based on an outdated version is refused with "重新载入", which reload
 - **移除中的分工与待确认.** 未结束 / 已结束 appears while the selected team has a removal in progress. 已结束 simulates the active assignments finishing and the waiting requests being answered. In the product, the assignments and the requesters decide this.
 - **保存结果.** 按实际校验 / 校验不通过 / 版本已过期. 按实际校验 checks the edited team: try saving the new team with empty names, or entering Sam's App ID. The other two show those refusals for any team. In the product, validation and the version check decide this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
-- **派单配置.** 已配置 / 未配置. In the product, whether the local channel configuration enables Feishu dispatch decides it.
+- **派单配置.** 已配置 / 未配置 / 未接入飞书. In the product, whether the local channel configuration has Feishu paired and dispatch enabled decides it.
 - **Visual-only actions.** Save, re-check, test message, QR refresh, MCP binding and unbinding, group binding, moving or deleting a scheduled task, and delete give visual feedback only. A refresh restores the mock data.
 
 ## Uncovered dimensions
