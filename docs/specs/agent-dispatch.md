@@ -334,7 +334,7 @@ Recall and capture use only the caller's scope.
 **MCP and skills.**
 
 - MCP servers are connected and held by the host service; Executors receive proxy tools ([mcp-catalog](mcp-catalog.md)).
-- Skills are copied from the Skill Library into the Executor's runtime home at creation ([skill-library](skill-library.md)).
+- Skills are copied from the Skill Library into the Executor's runtime home whenever its runtime is created, a retry's included, because a released home keeps only its rollouts ([skill-library](skill-library.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)).
 
 **Runtime pool.** Runtimes are held in a bounded pool keyed by agent, conversation, access revision and definitions version, with idle release. The Coordinator's, Team Leaders' and Executors' runtimes share one pool. When work needs a new runtime at the limit, the least recently used idle runtime is released for it at once, instead of at its idle limit. A released runtime keeps its slot until its App Server process has exited, or until a bounded wait ends. Persisted thread identities let Coordinator and Team Leader sessions resume after release.
 
