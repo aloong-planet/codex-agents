@@ -400,6 +400,9 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
 // Executor home compaction (agent-dispatch::QR-002). In fixture mode the fixture App Server writes a rollout for each Executor
 // thread it starts, so homes compact as in production. Gap: it does not resume from that rollout; resume after compaction is
 // shown on the installed App Server in isolated-runtime-compaction.test.ts, which CI cannot run.
+// Gap: the startup sweep is shown to finish before the service is ready, with no queued work at start; no case orders it
+// against `agentDispatch.start()`. Retest condition: a restart case with a queued retry whose failed attempt's home was left
+// uncompacted, asserting the sweep compacts that home before the retry's Executor runtime is created on it.
 const executorHomes = (directory: string) => readdirSync(join(directory, "group-model-runtimes")).filter((name) => /^dispatch-[0-9a-f]{64}$/u.test(name))
   .map((name) => join(directory, "group-model-runtimes", name));
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
