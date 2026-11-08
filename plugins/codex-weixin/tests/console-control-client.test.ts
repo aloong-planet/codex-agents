@@ -1,3 +1,6 @@
+// Coverage gap: the 15 s wait for a live lock held longer than its 10 s stale limit is not driven (it would take
+// 15 s and needs a lock holder that never finishes); the stale-lock takeover and the release after a failed
+// authorization are driven below.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
