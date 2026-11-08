@@ -175,9 +175,8 @@ const privateStatePath = fixtureMode
       : fs.mkdtempSync(path.join(os.tmpdir(), "weixin-demo-fixture-")), "state.json")
   : resolvePrivateStatePath(process.env, os.homedir());
 // Fixture mode is an explicit, non-network test entry. Production requires an explicit selector and owner binding.
-const channelConfiguration = fixtureMode && !process.env.CHANNEL_CONFIG_PATH ? undefined : loadChannelStartupConfiguration(
-  process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json"),
-);
+const channelConfigurationPath = path.resolve(process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json"));
+const channelConfiguration = fixtureMode && !process.env.CHANNEL_CONFIG_PATH ? undefined : loadChannelStartupConfiguration(channelConfigurationPath);
 const durableInboundStore = new DurableInboundStore(
   path.join(path.dirname(privateStatePath), "inbound.sqlite"),
 );
@@ -1222,7 +1221,8 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
 const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
 // The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
 const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
-const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}) });
+const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}),
+  dispatchSetup: { configurationPath: channelConfigurationPath, feishu: Boolean(channelConfiguration?.entries.some((entry) => entry.channel === "feishu")) } });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),

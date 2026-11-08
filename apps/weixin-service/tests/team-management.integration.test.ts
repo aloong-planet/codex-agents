@@ -274,15 +274,17 @@ it("refuses a host tool removed from a profile at the next call of a request adm
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-it("answers the team API without Feishu dispatch, saying that no dispatch group is configured", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "team-no-dispatch-"));
-  let running: Running | undefined;
-  try {
-    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
-    running = await start(directory);
-    expect(await running.get<View>("/api/teams")).toEqual({ configured: false });
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
-}, 30000);
+// The empty state names the configuration file the service loaded and whether Feishu is paired, so its text can say where dispatch is enabled.
+it.each([["Weixin only", "weixin", false], ["Feishu without dispatch", "feishu", true]] as const)(
+  "answers the team API without Feishu dispatch (%s), saying where dispatch would be enabled", async (_, channel, feishu) => {
+    const directory = mkdtempSync(join(tmpdir(), "team-no-dispatch-"));
+    let running: Running | undefined;
+    try {
+      writeFileSync(join(directory, "channel.json"), JSON.stringify(config(channel)));
+      running = await start(directory);
+      expect(await running.get<View>("/api/teams")).toEqual({ configured: false, feishu, configurationPath: join(directory, "channel.json") });
+    } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+  }, 30000);
 
 it("refuses a team on Penny's application, read from Penny's configuration", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-penny-application-"));

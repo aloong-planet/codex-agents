@@ -16,17 +16,21 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team
  * - `/api/mcp/...`: the catalog API, including `/api/mcp/import/check` and `/api/mcp/import` for an `mcpServers`
  *   document. No response carries a secret value (mcp-catalog::REQ-001); every change is audited with the authorized
  *   browser (agent-console::REQ-004).
- * - `/api/teams/...`: team management (team-management spec). Without Feishu dispatch the view says so and saves are refused.
+ * - `/console/teams` and its assets: the 团队管理 page (team-management spec).
+ * - `/api/teams/...`: team management. Without Feishu dispatch the view says so, with where dispatch would be enabled, and saves are refused.
  *   No response carries an App Secret (team-management::CON-001); every change is audited.
  */
 const CONSOLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "console");
 const MAX_BODY_BYTES = 64 * 1024;
 const ASSETS: Record<string, { file: string; type: string }> = {
   "/console/mcp": { file: "mcp.html", type: "text/html; charset=utf-8" },
+  "/console/teams": { file: "team.html", type: "text/html; charset=utf-8" },
   "/console/console.css": { file: "console.css", type: "text/css; charset=utf-8" },
   "/console/console-shell.js": { file: "console-shell.js", type: "text/javascript; charset=utf-8" },
   "/console/mcp.css": { file: "mcp.css", type: "text/css; charset=utf-8" },
   "/console/mcp.js": { file: "mcp.js", type: "text/javascript; charset=utf-8" },
+  "/console/team.css": { file: "team.css", type: "text/css; charset=utf-8" },
+  "/console/team.js": { file: "team.js", type: "text/javascript; charset=utf-8" },
 };
 
 export type ConsoleRoutes = {
@@ -87,13 +91,16 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
   team_registry_group_unknown: [400, "所属群不在派单群里"],
 };
 
-export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement }): ConsoleRoutes {
-  const { catalog, teams } = options;
+/** Where dispatch would be enabled, for the team page's empty state: the channel configuration file the service loaded, and whether Feishu is paired. */
+export type DispatchSetup = Readonly<{ configurationPath: string; feishu: boolean }>;
+
+export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchSetup?: DispatchSetup }): ConsoleRoutes {
+  const { catalog, teams, dispatchSetup } = options;
 
   async function teamsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
     const actor = context.browser ? { browser: context.browser } : {};
     if (pathname === "/api/teams" && req.method === "GET") {
-      json(res, 200, teams ? await teams.view() : { configured: false });
+      json(res, 200, teams ? await teams.view() : { configured: false, ...dispatchSetup });
       return;
     }
     if (req.method !== "POST") throw new RequestError(404, "未找到");
