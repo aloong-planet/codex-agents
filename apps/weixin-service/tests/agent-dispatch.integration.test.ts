@@ -34,8 +34,6 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
-// - Plans name only their own team's presets until cross-team work exists, so the trim that keeps the first other team is
-//   covered at the unit level only, and the limit of two teams by no case yet; ticket 08 adds the real-main path.
 // - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
 //   the fixture injects both.
 
@@ -713,7 +711,7 @@ it("runs a plan's three Assignments with one Executor each, each with its own wo
     const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && jackTexts(state).length === 3);
     console.log(JSON.stringify({ kind: "dispatch_three_assignments", command: "写周报和月报并发给我，再整理要点", jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes,
       runs: sendRuns(result) }));
-    expect(jackTexts(result).slice(0, 2)).toEqual(["我安排执行者 1（能力档 1）处理：写周报；执行者 2（能力档 1）处理：写月报；执行者 3（能力档 1）处理：整理要点。完成后会在本群汇报。",
+    expect(jackTexts(result).slice(0, 2)).toEqual(["我安排：\n执行者 1（能力档 1）处理：写周报\n执行者 2（能力档 1）处理：写月报\n执行者 3（能力档 1）处理：整理要点\n完成后会在本群汇报。",
       "先写周报和月报，再整理要点"]);
     // Each Executor's send is its own workflow run; one shared key would make the second a duplicate of the first.
     expect(sendRuns(result).map(({ status }) => status)).toEqual(["succeeded", "succeeded"]);
@@ -774,7 +772,7 @@ it("cancels the unfinished Assignments of a request and reports the completed on
     await running.post("/api/fixture/feishu/inbound", groupMessage("om_cancel_three_stop", "都停下", control(busy.agentDispatch!.jobs[0]!.id, "cancel")));
     const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && jackTexts(state).length === 2);
     console.log(JSON.stringify({ kind: "dispatch_cancel_three", commands: ["写周报，核对数据，再整理要点", "都停下"], jobs: cancelled.agentDispatch, outboxes: cancelled.agentFixtureOutboxes }));
-    expect(jackTexts(cancelled)[1]).toBe("已停止继续处理。已完成：执行者 1「写周报」；已停止：执行者 2「核对数据」、执行者 3「整理要点」。" +
+    expect(jackTexts(cancelled)[1]).toBe("已停止继续处理：\n执行者 1「写周报」已完成\n执行者 2「核对数据」已停止\n执行者 3「整理要点」已停止\n" +
       "已确认完成 1 次本地文件修改。已确认提交 1 个文件或媒体附件。已经完成的操作不会自动撤销。");
     expect(cancelled.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "cancelled", "cancelled"]);
     expect(readFileSync(join(business, "demo-vault", "weekly.txt"), "utf8")).toBe("内容 weekly.txt");
@@ -803,7 +801,7 @@ it("reruns the Assignments a supplement affects, each with the supplement and it
     const done = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && state.agentDispatch.jobs[0].assignments.some(({ attempt }) => attempt === 1) && jackTexts(state).length === 4);
     console.log(JSON.stringify({ kind: "dispatch_supplement_keys", commands: ["写周报和月报，再整理要点", "补充：周报和月报都另存为文件发给我"], jobs: done.agentDispatch,
       outboxes: done.agentFixtureOutboxes, leader: done.fixtureLeaderRequests, runs: sendRuns(done) }));
-    expect(jackTexts(done)[2]).toBe("我安排执行者 1（能力档 1）处理：写周报；执行者 2（能力档 1）处理：写月报。完成后会在本群汇报。");
+    expect(jackTexts(done)[2]).toBe("我安排：\n执行者 1（能力档 1）处理：写周报\n执行者 2（能力档 1）处理：写月报\n完成后会在本群汇报。");
     // Only the two affected Executors ran again, each on the supplement; the third received nothing.
     const reruns = done.fixtureModelRequests!.slice(3).map(({ input }) => JSON.stringify(input));
     expect(reruns).toHaveLength(2);
@@ -838,29 +836,5 @@ it("reports interrupted Assignments after a crash and closes the request", async
     expect(recovered.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "interrupted", "interrupted"]);
     expect(recovered.fixtureModelRequests).toEqual([]);
     expect(recovered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["close"]);
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
-}, 30000);
-
-it("trims a plan over the limits when its requester asks", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "dispatch-over-limit-"));
-  let running: Running | undefined;
-  const titles = ["分工1", "分工2", "分工3", "分工4", "分工5", "分工6"];
-  try {
-    dispatchConfig(directory);
-    running = await start(directory);
-    await running.post("/api/fixture/inbound", groupMessage("om_over_limit", "把这件事分六步做", decision("jack", "分六步完成"), { leaderPlan: divided(titles) }));
-    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && state.fixtureTextOutbox?.length === 1);
-    // The Coordinator asks under its own application; no Executor has started.
-    expect(waiting.fixtureTextOutbox?.[0]?.message).toBe(`Jack 的计划有 6 项分工、涉及 1 个团队，超出上限（每件事务最多 5 项分工、2 个团队），尚未开始执行：\n${
-      titles.map((title, index) => `${index + 1}. 能力档 1：${title}`).join("\n")}\n请回复「按计划执行」「精简到上限内」（保留负责团队和第一个协作团队，按计划顺序最多 5 项）或「取消这项事务」。`);
-    expect(waiting.fixtureModelRequests).toEqual([]);
-    expect(jackTexts(waiting)).toEqual([]);
-    await running.post("/api/fixture/inbound", groupMessage("om_over_limit_trim", "精简到上限内", control(waiting.agentDispatch!.jobs[0]!.id, "trim")));
-    const done = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && jackTexts(state).length === 2);
-    console.log(JSON.stringify({ kind: "dispatch_over_limit_trim", commands: ["把这件事分六步做", "精简到上限内"], jobs: done.agentDispatch, outboxes: done.agentFixtureOutboxes,
-      coordinator: done.fixtureTextOutbox }));
-    expect(jackTexts(done)[0]).toBe(`我安排${titles.slice(0, 5).map((title, index) => `执行者 ${index + 1}（能力档 1）处理：${title}`).join("；")}。完成后会在本群汇报。`);
-    expect(done.fixtureModelRequests).toHaveLength(5);
-    expect(done.agentDispatch?.jobs[0]?.assignments.map(({ title }) => title)).toEqual(titles.slice(0, 5));
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);

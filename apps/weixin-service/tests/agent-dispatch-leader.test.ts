@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexTeamLeader, exceedsLimits, LeaderOutputError, parseLeaderClosing, parseLeaderPlan, parseLeaderSupplement, planWithCorrection, trimToLimits,
+import { CodexTeamLeader, LeaderOutputError, parseLeaderClosing, parseLeaderPlan, parseLeaderSupplement, planWithCorrection,
   type LeaderTurnInput } from "../src/agent-dispatch-leader.js";
 import type { AppServerTurnResult } from "../src/app-server-turn-driver.js";
 import { RuntimePool } from "../src/runtime-pool.js";
@@ -24,7 +24,7 @@ describe("Team Leader plan validation", () => {
   });
 
   it.each([
-    ["twenty Assignments", plan("trip", 20), 20, 0],
+    ["ten Assignments, the ceiling", plan("trip", 10), 10, 0],
     ["five decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五"] }, 1, 5],
   ])("accepts a plan at its largest: %s", (_case, value, assignments, decisions) => {
     const parsed = parseLeaderPlan(value, bill);
@@ -39,22 +39,9 @@ describe("Team Leader plan validation", () => {
     ["missing decisions", { assignments: plan("trip").assignments }],
     ["six decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五", "六"] }],
     ["an empty decision", { ...plan("trip"), decisions: ["  "] }],
-    ["twenty-one Assignments", plan("trip", 21)],
+    ["eleven Assignments, over the ceiling", plan("trip", 11)],
   ])("refuses %s", (_case, value) => {
     expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid" }));
-  });
-
-  // The request's limits: 5 Assignments and 2 teams; a trim keeps the lead team, the first other team and the first five in plan order.
-  const items = (teams: string) => [...teams].map((teamId, index) => ({ teamId, title: `${teamId}${index + 1}` }));
-  it.each([
-    ["five Assignments of one team", "LLLLL", false],
-    ["six Assignments of one team", "LLLLLL", true],
-    ["three teams", "LBC", true],
-  ])("checks the request limits for %s", (_case, teams, exceeded) => {
-    expect(exceedsLimits(items(teams))).toBe(exceeded);
-  });
-  it("trims a plan to the lead team, the first other team and five Assignments in plan order", () => {
-    expect(trimToLimits(items("LBCLBLC"), "L").map(({ title }) => title)).toEqual(["L1", "B2", "L4", "B5", "L6"]);
   });
 
   const supplementOf = (affected: number[], assignments = plan("trip").assignments.slice(0, 0)) => ({ affected, assignments, decisions: [] as string[] });
@@ -66,6 +53,7 @@ describe("Team Leader plan validation", () => {
     ["a repeated position", supplementOf([1, 1]), "leader_plan_invalid"],
     ["an answer affecting nothing", supplementOf([]), "leader_plan_invalid"],
     ["a new Assignment on another team's preset", supplementOf([], plan("code").assignments), "leader_plan_invalid"],
+    ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid"],
   ])("decodes or refuses a supplement answer: %s", (_case, value, expected) => {
     if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3)).toThrow(expect.objectContaining({ code: expected }));
     else expect(parseLeaderSupplement(value, bill, 3)).toEqual(expected);
@@ -84,6 +72,7 @@ describe("Team Leader plan validation", () => {
   it.each([
     ["corrects an invalid plan once", [JSON.stringify(plan("code")), JSON.stringify(plan("trip"))], { result: plan("trip") }, 2],
     ["refuses a plan still invalid after one correction", ["{broken", "{broken"], { error: "leader_plan_invalid" }, 2],
+    ["has a plan over the ceiling merged in its correction turn", [JSON.stringify(plan("trip", 11)), JSON.stringify(plan("trip", 10))], { result: plan("trip", 10) }, 2],
   ])("%s", async (_case, outputs, expected, turns) => {
     const refusals: Array<string | undefined> = [];
     const turn = vi.fn(async (refusal?: LeaderOutputError) => { refusals.push(refusal?.reason); return outputs[refusals.length - 1]!; });
@@ -92,7 +81,7 @@ describe("Team Leader plan validation", () => {
     else await expect(outcome).rejects.toThrow(expected.error);
     expect(turn).toHaveBeenCalledTimes(turns);
     expect(refusals[0]).toBeUndefined();
-    if (turns === 2) expect(refusals[1]).toMatch(/profileId "code" 不是本团队的预设能力档|输出不是有效的 JSON/u);
+    if (turns === 2) expect(refusals[1]).toMatch(/profileId "code" 不是本团队的预设能力档|输出不是有效的 JSON|这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工/u);
   });
 });
 

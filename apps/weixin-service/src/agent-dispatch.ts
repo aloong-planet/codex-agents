@@ -5,8 +5,7 @@ import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
   DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { ASSIGNMENT_LIMIT, exceedsLimits, LeaderOutputError, TEAM_LIMIT, trimToLimits, type LeaderPlanAssignment, type LeaderTurnInput,
-  type TeamLeader } from "./agent-dispatch-leader.js";
+import { LeaderOutputError, type LeaderPlanAssignment, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
@@ -51,9 +50,13 @@ export function requestOutcome(statuses: readonly AssignmentStatus[]): "complete
 /** An Executor's name, from its durable sequence. */
 function executorName(sequence: number): string { return `执行者 ${sequence}`; }
 const executorLabel = (assignment: DispatchAssignment) => `${assignment.executor}（${assignment.profileName}）`;
-/** The Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01). */
+/**
+ * The Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01). Several
+ * Assignments go one per line, as every group post with several items does.
+ */
 function startMessage(assignments: readonly DispatchAssignment[]): string {
-  return `我安排${assignments.map((assignment) => `${executorLabel(assignment)}处理：${assignment.title}`).join("；")}。完成后会在本群汇报。`;
+  const items = assignments.map((assignment) => `${executorLabel(assignment)}处理：${assignment.title}`);
+  return items.length === 1 ? `我安排${items[0]}。完成后会在本群汇报。` : `我安排：\n${items.join("\n")}\n完成后会在本群汇报。`;
 }
 /** The message an Assignment's Executor receives; group discussion never travels with it. */
 function inputOf(event: InboundContent): InboundContent {
@@ -227,7 +230,7 @@ export class AgentDispatch {
       }
       const input = { event: mentioned ? { ...event, mentionedAgentIds: mentioned } : event, agents: agents.map(({ id, name, responsibility }) => ({ id, name, responsibility })),
         requests: this.jobs().filter((job) => job.event.target === event.target && job.event.senderId === event.senderId)
-          .slice(-20).map(({ id, agentId, summary, status, overLimit }) => ({ id, agentId, summary, status, ...(overLimit ? { awaiting: "over_limit" as const } : {}) })),
+          .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })),
         memory: this.options.memory.recall(this.options.memoryScope, event, event.text) };
       try {
         const pending = await this.options.pending?.(event);
@@ -280,13 +283,9 @@ export class AgentDispatch {
             summary: decision.summary, status: decision.kind === "propose" ? "proposed" : "queued", attempt: 0 });
           if (decision.kind === "propose") await this.coordinate(event, bindingHash,
             `要不要请 ${agent.name} 帮你${decision.summary}？请回复这条建议确认，或告诉我暂时不用。`, event.key);
-        } else if (decision.kind === "confirm" || decision.kind === "decline" || decision.kind === "trim") {
+        } else if (decision.kind === "confirm" || decision.kind === "decline") {
           const job = this.job(decision.requestId!);
-          const own = job && job.event.senderId === event.senderId && job.event.target === event.target && this.eligible(job.event, job.bindingHash);
-          if (own && job.status === "waiting" && job.overLimit && decision.kind !== "decline") {
-            // Only the original requester's choice runs a plan over the limits, as proposed or trimmed (agent-dispatch::REQ-014).
-            job.overLimit.choice = decision.kind === "trim" ? "trim" : "run"; job.status = "queued"; this.save(job);
-          } else if (!own || job.status !== "proposed" || decision.kind === "trim") {
+          if (!job || job.status !== "proposed" || job.event.senderId !== event.senderId || job.event.target !== event.target || !this.eligible(job.event, job.bindingHash)) {
             await this.coordinate(event, bindingHash, "这条建议现在无法确认，请说明要处理的事务。");
           } else {
             job.status = decision.kind === "confirm" ? "queued" : "cancelled";
@@ -311,7 +310,7 @@ export class AgentDispatch {
             }
           } else {
             if ((job.supplements?.length ?? 0) >= 20) await this.coordinate(event, bindingHash, "这项请求已有多条补充待处理，请等当前处理结束后再补充。");
-            else if (job.status === "running" || job.status === "queued" || job.overLimit) { (job.supplements ??= []).push(event); this.save(job); }
+            else if (job.status === "running" || job.status === "queued") { (job.supplements ??= []).push(event); this.save(job); }
             else if (job.status === "proposed") {
               job.summary = decision.summary || job.summary;
               job.executionEvent = { ...event, text: `${(job.executionEvent ?? job.event).text}\n补充要求：${event.text}` }; this.save(job);
@@ -365,7 +364,7 @@ export class AgentDispatch {
     try {
       const team = this.options.team(job.agentId, job.definitionsVersion);
       if (!team) throw new Error("dispatch_team_unavailable");
-      if (!(await this.divide(job, team, signal))) return;
+      await this.divide(job, team, signal);
       job = this.job(job.id)!;
       const starting = this.assignments(job.id).filter(({ attempt, status }) => attempt === job.attempt && status === "queued");
       if (starting.length) {
@@ -411,23 +410,20 @@ export class AgentDispatch {
   }
 
   /**
-   * Gives the attempt its Assignments: a new request's plan, the requester's choice on a plan over the limits, or a promoted
-   * supplement's answer. False when the request now waits for its requester's choice on the limits.
+   * Gives the attempt its Assignments: a new request's plan or a promoted supplement's answer. The Team Leader's turns keep
+   * the request within its ceiling of Assignments (agent-dispatch::REQ-011/AC-02).
    */
-  private async divide(job: DispatchJob, team: DispatchTeamView, signal: AbortSignal): Promise<boolean> {
+  private async divide(job: DispatchJob, team: DispatchTeamView, signal: AbortSignal): Promise<void> {
     const assignments = this.assignments(job.id);
-    if (job.overLimit?.choice) { this.applyChoice(job, team); return true; }
-    if (assignments.some(({ attempt }) => attempt === job.attempt)) return true;
+    if (assignments.some(({ attempt }) => attempt === job.attempt)) return;
     // A team that stopped accepting work in this group since admission gets no new Assignment there (agent-dispatch::REQ-015/AC-01).
     const accepting = () => { if (!this.options.roster(job.event).some(({ id }) => id === job.agentId)) throw new Error("dispatch_team_unavailable"); };
     if (!assignments.length) {
       accepting();
       const plan = await this.options.leader.plan(this.leaderInput(job, team));
       if (signal.aborted) throw new Error("dispatch_cancelled");
-      const planned = plan.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
-      if (exceedsLimits(planned)) { await this.askOverLimit(job, team, { assignments: planned, decisions: plan.decisions }); return false; }
-      this.addAssignments(job, team, planned, [], plan.decisions);
-      return true;
+      this.addAssignments(job, team, plan.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId })), [], plan.decisions);
+      return;
     }
     // A promoted supplement: the lead Team Leader decides which Assignments it affects (agent-dispatch::REQ-007/AC-04).
     const answer = await this.options.leader.supplement(this.leaderInput(job, team), assignments.map((assignment, index) =>
@@ -435,48 +431,8 @@ export class AgentDispatch {
     (job.executionEvent ?? job.event).text);
     if (signal.aborted) throw new Error("dispatch_cancelled");
     const added = answer.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
-    // Only new Assignments can take the request past its limits; rerunning the ones its requester already accepted cannot.
     if (added.length) accepting();
-    if (added.length && exceedsLimits([...assignments.filter(({ status }) => status !== "cancelled"), ...added])) {
-      await this.askOverLimit(job, team, { assignments: added, decisions: answer.decisions, affected: answer.affected }); return false;
-    }
     this.addAssignments(job, team, added, answer.affected, answer.decisions);
-    return true;
-  }
-
-  /** Holds a division over the limits for the original requester's choice; the Coordinator asks in the group (agent-dispatch::REQ-011/AC-02). */
-  private async askOverLimit(job: DispatchJob, team: DispatchTeamView, held: NonNullable<DispatchJob["overLimit"]>): Promise<void> {
-    job = this.job(job.id)!;
-    // In plan order: the request's Assignments first, then the held ones, which are the only ones not yet started.
-    const existing = this.assignments(job.id).filter(({ status }) => status !== "cancelled");
-    const items = [...existing, ...held.assignments.map((planned) =>
-      ({ teamId: planned.teamId, title: planned.title, profileName: team.profiles.find(({ id }) => id === planned.profileId)?.name ?? planned.profileId }))];
-    const teams = new Set(items.map(({ teamId }) => teamId)).size;
-    const limits = `超出上限（每件事务最多 ${ASSIGNMENT_LIMIT} 项分工、${TEAM_LIMIT} 个团队），`;
-    const opening = existing.length
-      ? `${team.leader.name} 按补充调整后的计划共有 ${items.length} 项分工、涉及 ${teams} 个团队，${limits}新增的分工尚未开始执行：`
-      : `${team.leader.name} 的计划有 ${items.length} 项分工、涉及 ${teams} 个团队，${limits}尚未开始执行：`;
-    const listed = items.map(({ profileName, title }, index) => `${index + 1}. ${profileName}：${title}`).slice(existing.length);
-    const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
-    const id = `${job.id}:over-limit:${job.attempt}`;
-    const notice: Notice = { event: job.event, bindingHash: job.bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, requestId: job.id,
-      text: `${opening}\n${listed.join("\n")}\n请回复「按计划执行」「精简到上限内」（保留负责团队和第一个协作团队，按计划顺序最多 ${ASSIGNMENT_LIMIT} 项）或「取消这项事务」。` };
-    // The question is queued with the wait, so a stop between the two cannot leave a request waiting on a question never posted.
-    this.transaction(() => { job.overLimit = held; job.status = "waiting"; this.save(job); this.queueNotice(id, notice); });
-    await this.deliverNotice(id, notice);
-  }
-
-  /** Applies the requester's choice on a held division: as proposed, or trimmed to the lead team, the first other team and five Assignments. */
-  private applyChoice(job: DispatchJob, team: DispatchTeamView): void {
-    const held = job.overLimit!;
-    let kept: PlannedAssignment[] = held.assignments;
-    if (held.choice === "trim") {
-      const existing = this.assignments(job.id).filter(({ status }) => status !== "cancelled").map(({ teamId }) => ({ teamId, planned: undefined }));
-      const trimmed = trimToLimits([...existing, ...held.assignments.map((planned) => ({ teamId: planned.teamId, planned }))], job.agentId);
-      kept = trimmed.flatMap(({ planned }) => planned ? [planned] : []);
-    }
-    delete job.overLimit;
-    this.addAssignments(job, team, kept, held.affected ?? [], held.decisions);
   }
 
   /**
@@ -501,7 +457,6 @@ export class AgentDispatch {
       }
       const current = this.job(job.id)!;
       if (decisions.length) current.decisions = { attempt: job.attempt, texts: [...decisions] }; else delete current.decisions;
-      delete current.overLimit;
       this.save(current);
     });
   }
@@ -600,11 +555,13 @@ export class AgentDispatch {
       }
     });
     const assignments = this.assignments(job.id);
-    const listed = (list: readonly DispatchAssignment[]) => list.map(({ executor, title }) => `${executor}「${title}」`).join("、");
-    const done = assignments.filter(({ status }) => status === "completed");
-    const parts = assignments.length > 1 ? [done.length ? `已完成：${listed(done)}` : "", stopped.length ? `已停止：${listed(stopped)}` : ""].filter(Boolean).join("；") : "";
-    job.status = "cancelled"; job.supplements = []; delete job.overLimit;
-    job.result = `已停止继续处理。${parts ? `${parts}。` : ""}${this.options.completedWork(job, assignments)}已经完成的操作不会自动撤销。`;
+    const evidence = `${this.options.completedWork(job, assignments)}已经完成的操作不会自动撤销。`;
+    job.status = "cancelled"; job.supplements = [];
+    if (assignments.length <= 1) { job.result = `已停止继续处理。${evidence}`; return; }
+    // One line per Assignment, as every group post with several items.
+    const outcome = (assignment: DispatchAssignment) => assignment.status === "completed" ? "已完成"
+      : assignment.status === "failed" || assignment.status === "interrupted" ? "未能完成" : "已停止";
+    job.result = `已停止继续处理：\n${assignments.map((assignment) => `${assignment.executor}「${assignment.title}」${outcome(assignment)}`).join("\n")}\n${evidence}`;
   }
 
   private hasAttemptAssignments(job: DispatchJob): boolean { return this.assignments(job.id).some(({ attempt }) => attempt === job.attempt); }

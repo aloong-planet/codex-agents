@@ -4,7 +4,7 @@ import type { SendTextResult } from "./channel-contract.js";
 export type DispatchAgentDefinition = { id: string; name: string; responsibility: string };
 export type DispatchAgent = DispatchAgentDefinition & { senderAccountId: string };
 export type DispatchDecision = {
-  kind: "ignore" | "clarify" | "dispatch" | "propose" | "confirm" | "decline" | "supplement" | "cancel" | "retry" | "retry_report" | "trim";
+  kind: "ignore" | "clarify" | "dispatch" | "propose" | "confirm" | "decline" | "supplement" | "cancel" | "retry" | "retry_report";
   agentId: string | null;
   requestId: string | null;
   summary: string;
@@ -31,12 +31,6 @@ export type DispatchJob = {
   definitionsVersion?: number;
   /** Decisions the Team Leader posts after the start message of `attempt` (agent-dispatch::US-003/AC-03). */
   decisions?: { attempt: number; texts: string[] };
-  /**
-   * A plan, or a supplement's new Assignments with the positions it affects, that would exceed the request's limits; it waits
-   * for the original requester's choice (agent-dispatch::REQ-011/AC-02). `choice` is set once the requester answers.
-   */
-  overLimit?: { assignments: Array<{ teamId: string; profileId: string; title: string; brief: string }>; decisions: string[]; affected?: number[];
-    choice?: "run" | "trim" };
 };
 /** One part of a Dispatch Request, performed by exactly one Executor created from one of the team's preset profiles. */
 export type DispatchAssignment = {
@@ -64,8 +58,7 @@ export type DispatchAssignment = {
 export type DispatchClassificationInput = {
   event: InboundContent;
   agents: readonly DispatchAgentDefinition[];
-  /** `awaiting` marks a request waiting for its requester's choice on a plan over the limits. */
-  requests: Array<Pick<DispatchJob, "id" | "agentId" | "summary" | "status"> & { awaiting?: "over_limit" }>;
+  requests: Array<Pick<DispatchJob, "id" | "agentId" | "summary" | "status">>;
   memory: string;
 };
 export interface DispatchClassifier { classify(input: DispatchClassificationInput): Promise<DispatchDecision>; close?(): void | Promise<void>; }
