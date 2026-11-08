@@ -6,7 +6,8 @@ import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } 
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 
 // Resolution and host-tool boundary seams. The shared host is the real WorkflowToolHost over the production catalog,
-// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Real-main wiring is in agent-dispatch.integration.test.ts.
+// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts;
+// main's Coordinator wiring is a recorded gap there.
 const definitions: TeamDefinitions = {
   coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: "cli_0123456789abcdef",
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },
@@ -26,13 +27,13 @@ function sharedHost() {
 const offered = (tools: ProfileToolHost) => tools.definitions().flatMap((namespace) => "tools" in namespace ? namespace.tools.map(({ name }) => `${namespace.name}.${name}`) : []);
 
 describe("agent profile resolution", () => {
-  it("resolves the Coordinator with no host tools and the group memory, even when its profile lists tools", () => {
-    expect(resolveAgentProfile(definitions, { role: "coordinator" }, PRODUCTION_TOOL_IDS)).toEqual({ instructions: "协调规则", hostTools: [], memoryScope: "group" });
-  });
-
-  it("resolves an Executor's host tools as its allowlist intersected with the catalog", () => {
-    expect(resolveAgentProfile(definitions, { role: "executor", teamId: "bill", profileId: "executor-1" }, ["files.read", "schedules.create", "files.write"]))
-      .toEqual({ instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: "group" });
+  it.each([
+    ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
+      { instructions: "协调规则", hostTools: [], memoryScope: "group" }],
+    ["an Executor's host tools as its allowlist intersected with the catalog", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
+      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: "group" }],
+  ])("resolves %s", (_case, agent, catalog, expected) => {
+    expect(resolveAgentProfile(definitions, agent, catalog)).toEqual(expected);
   });
 
   it.each([["an unknown team", "nobody", "executor-1"], ["an unknown Executor profile", "bill", "missing"]])("refuses %s", (_case, teamId, profileId) => {

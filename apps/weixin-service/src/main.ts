@@ -845,8 +845,9 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
     : (() => {
       if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-      // Built without host tools: the Coordinator's session never receives business tools, as its resolved profile states (agent-dispatch::CON-003).
-      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
+      // The runtime's tools come from the resolved profile, which never gives the Coordinator business tools (agent-dispatch::CON-003).
+      const coordinatorTools = coordinatorProfile.hostTools.length ? new ProfileToolHost(workflowToolHost, workflowToolCatalog, coordinatorProfile.hostTools) : undefined;
+      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported }, [], false, coordinatorTools);
       return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorProfile.instructions);
     })();
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {

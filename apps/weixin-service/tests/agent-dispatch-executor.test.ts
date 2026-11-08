@@ -31,7 +31,7 @@ function job(id: string): DispatchJob {
 const directories: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-function executorWith(runtimes: RuntimePool<DispatchRuntime>, conversations: Array<ReturnType<typeof conversation>>) {
+function executorWith(runtimes: RuntimePool<DispatchRuntime>, conversations: Array<ReturnType<typeof conversation>>, contract = () => "contract-1") {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-")); directories.push(directory);
   const scopes: string[] = [];
   const executor = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
@@ -40,13 +40,28 @@ function executorWith(runtimes: RuntimePool<DispatchRuntime>, conversations: Arr
     runtimes,
     createRuntime: (_job, scope) => { scopes.push(scope); return { agent: conversations[scopes.length - 1]!, cwd: `/isolated/${scope}` }; },
     tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
-    profile: () => ({ instructions: "", memoryScope: "group", tools: { definitions: () => [], contractHash: () => "contract-1",
+    profile: () => ({ instructions: "", memoryScope: "group", tools: { definitions: () => [], contractHash: contract,
       execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
     contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
     memory: () => "", capture: async () => {}, existingResult: () => undefined,
   });
   return { executor, scopes };
 }
+
+it("starts a new runtime instead of resuming the old thread when the profile's tool contract changes", async () => {
+  const conversations = [conversation("thread-1"), conversation("thread-2")];
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 1000, close: ({ agent }) => agent.close() });
+  let contract = "contract-1";
+  const { executor, scopes } = executorWith(runtimes, conversations, () => contract);
+  try {
+    await expect(executor.run(job("request-one"), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    contract = "contract-2";
+    await expect(executor.run(job("request-two"), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(scopes).toHaveLength(2);
+    expect(scopes[1]).not.toBe(scopes[0]);
+    expect(conversations[1]!.startOrResume.mock.calls[0]![0]).toBeUndefined();
+  } finally { await executor.close(); }
+});
 
 it("resumes a released specialist session from its persisted thread on a new runtime", async () => {
   vi.useFakeTimers();

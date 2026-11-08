@@ -8,8 +8,11 @@ import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures.
-// Fixture mode substitutes the Coordinator's decisions, so its runtime's tool-free construction is covered by agent-profile.test.ts
-// and agent-dispatch-classifier.test.ts, not here. Registry versions are saved through TeamRegistry, the store's own public class.
+// Registry versions are saved through TeamRegistry, the store's own public class.
+// Gap: fixture mode replaces the whole Coordinator classifier, so main's Coordinator wiring has no test. That wiring is its runtime built
+// from the resolved host tools (none) and its profile instructions passed to the classifier. Resolution and the classifier wrapper are tested
+// separately (agent-profile.test.ts, agent-dispatch-classifier.test.ts). Closing the gap needs a live run, or a fixture mode that builds the
+// real classifier over the fixture transport.
 
 it("keeps travel rules in Bill's turn only, with the shared facts-and-sources check in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -26,10 +29,11 @@ it("keeps travel rules in Bill's turn only, with the shared facts-and-sources ch
     const alice = inputs.filter((input) => input.includes("你是 Alice")), bill = inputs.filter((input) => input.includes("你是 Bill"));
     expect([alice.length, bill.length]).toEqual([1, 1]);
     for (const input of [alice[0]!, bill[0]!]) expect(input).toContain("交付文件前复核其事实与来源是否相符");
-    expect(alice[0]).not.toContain("出行路线");
-    expect(alice[0]).not.toContain("预算和时间安排");
-    expect(bill[0]).toContain("出行路线须逐段核对站名、线路和换乘站");
-    expect(bill[0]).toContain("交付文件前复核预算和时间安排是否自洽");
+    // One fragment from each Bill-only rule group: weather, route, walking, opening hours, budget and schedule.
+    for (const fragment of ["天气等持续更新的信息", "出行路线", "步行入口", "开放时间、预约要求", "预算和时间安排"]) {
+      expect(alice[0]).not.toContain(fragment);
+      expect(bill[0]).toContain(fragment);
+    }
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
