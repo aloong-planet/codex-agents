@@ -690,12 +690,14 @@ it("bounds each prerequisite result and all of them together, in plan order", ()
   expect(bounded.map(({ position, title, executor }) => `${position}:${title}:${executor}`)).toEqual(["1:分工 1:执行者 1", "2:分工 2:执行者 2", "3:分工 3:执行者 3", "4:分工 4:执行者 4"]);
 });
 
-it("starts a dependent Assignment only after its prerequisite completes, with that prerequisite's final result and no post of its own", async () => {
+it("starts a dependent Assignment only after its prerequisite completes, with that prerequisite's bounded final result and no post of its own", async () => {
   const gate = deferred();
   const seen: Seen[] = [];
+  // The prerequisite's result is longer than one prerequisite may pass on.
+  const long = `整理文案完成${"长".repeat(4100)}`;
   const executor: DispatchExecutor = { run: async (_job, assignment, _signal, prerequisites) => {
     seen.push({ run: assignment.title, prerequisites: structuredClone(prerequisites) });
-    if (assignment.title === "整理文案") await gate.promise;
+    if (assignment.title === "整理文案") { await gate.promise; return { status: "completed", message: long }; }
     return { status: "completed", message: `${assignment.title}完成` };
   }, close: () => {} };
   const reports: Reports[] = [];
@@ -709,7 +711,7 @@ it("starts a dependent Assignment only after its prerequisite completes, with th
   gate.resolve();
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
   expect(seen).toEqual([{ run: "整理文案", prerequisites: [] }, { run: "准备问答", prerequisites: [] },
-    { run: "核对价格", prerequisites: [{ position: 1, title: "整理文案", executor: "执行者 1", result: "整理文案完成" }] }]);
+    { run: "核对价格", prerequisites: [{ position: 1, title: "整理文案", executor: "执行者 1", result: `整理文案完成${"长".repeat(3994)}…（结果过长，以下已截断）` }] }]);
   expect(messages(deliveries)).toEqual([awaiting, "已收尾。"]);
   expect(reports[0]?.map(({ position, status, dependsOn }) => ({ position, status, dependsOn }))).toEqual([
     { position: 1, status: "completed", dependsOn: [] }, { position: 2, status: "completed", dependsOn: [1] }, { position: 3, status: "completed", dependsOn: [] }]);
@@ -877,4 +879,69 @@ it("cancels the running and waiting Assignments of a request and names the one a
     "执行者 1（能力档 1）的分工「整理文案」未能完成：执行者报告无法完成。其余分工继续处理。",
     "已停止继续处理：\n执行者 1「整理文案」未能完成\n执行者 2「核对价格」未开始\n执行者 3「准备问答」已停止\n执行者 4「发布商品」已停止\n已经完成的操作不会自动撤销。"]);
   expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["failed", "blocked", "cancelled", "cancelled"]);
+});
+
+it("names in a retry's start message only the prerequisites a dependent still waits for", async () => {
+  const seen: Seen[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment, _signal, prerequisites) => {
+    seen.push({ run: `${assignment.title}:${assignment.attempt}`, prerequisites: structuredClone(prerequisites) });
+    if (assignment.title === "核对价格" && assignment.attempt === 0) return { status: "failed", message: "价格页无法访问" };
+    return { status: "completed", message: `${assignment.title}完成${assignment.attempt}` };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(dependent([[], [], [1, 2]])), executor, deliveries);
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("partially_failed"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "failed", "blocked"]);
+  dispatch.admit(event("two", "retry:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  // Position 1 completed in the first attempt, so the retry's line names only position 2.
+  expect(messages(deliveries).at(-2)).toBe("我安排：\n执行者 2（能力档 2）处理：核对价格\n执行者 3（能力档 1）处理：准备问答（等 2 完成后开始）\n完成后会在本群汇报。");
+  expect(seen.at(-1)).toEqual({ run: "准备问答:1", prerequisites: [{ position: 1, title: "整理文案", executor: "执行者 1", result: "整理文案完成0" },
+    { position: 2, title: "核对价格", executor: "执行者 2", result: "核对价格完成1" }] });
+});
+
+it("keeps not started, on a retry, a dependent whose prerequisite's choice the requester cancelled", async () => {
+  const runs: string[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    runs.push(assignment.title);
+    return assignment.title === "整理文案" ? { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" } : { status: "completed", message: "价格已核对。" };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(dependent([[], [1]])), executor, deliveries, { pending: choosing("cancelled") });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "choose:1"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("failed"), { timeout: 2000, interval: 10 });
+  const before = deliveries.length;
+  dispatch.admit(event("three", "retry:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.attempt).toBe(1), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("failed"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // No start message names an Assignment that cannot start; only the closing follows.
+  expect(messages(deliveries).slice(before)).toEqual(["已收尾。"]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "blocked"]);
+  expect(runs).toEqual(["整理文案"]);
+});
+
+it("reruns a dependent that never started when a supplement reruns its superseded prerequisite", async () => {
+  const seen: Seen[] = [];
+  const executor: DispatchExecutor = { run: async (job, assignment, _signal, prerequisites) => {
+    seen.push({ run: `${assignment.title}:${assignment.attempt}:${(assignment.input ?? job.executionEvent ?? job.event).text}`, prerequisites: structuredClone(prerequisites) });
+    if (assignment.title === "整理文案" && assignment.attempt === 0) return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    return { status: "completed", message: `${assignment.title}完成${assignment.attempt}` };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(dependent([[], [1]])), executor, deliveries);
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  // The supplement supersedes the waiting prerequisite, leaving its dependent not started; the answer (affectFirst) reruns the prerequisite.
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  expect(seen).toEqual([{ run: "整理文案:0:alice", prerequisites: [] }, { run: "整理文案:1:supplement:one", prerequisites: [] },
+    { run: "核对价格:1:supplement:one", prerequisites: [{ position: 1, title: "整理文案", executor: "执行者 1", result: "整理文案完成1" }] }]);
+  expect(messages(deliveries).slice(-2)).toEqual(["我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格（等 1 完成后开始）\n完成后会在本群汇报。", "已收尾。"]);
 });

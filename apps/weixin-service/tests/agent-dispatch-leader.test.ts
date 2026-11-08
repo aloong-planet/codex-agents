@@ -44,10 +44,9 @@ describe("Team Leader plan validation", () => {
     ["eleven Assignments, over the ceiling", plan("trip", 11)],
     ["a dependency on position 0", depending([[], [0]])],
     ["a dependency on a position past the plan", depending([[], [], [4]])],
+    // A cycle needs a later reference, so this row is also the cycle case: the earlier-only rule refuses it through that reference.
     ["a dependency on a later position", depending([[], [3], []]), "第 2 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 1）"],
     ["a dependency on its own position", depending([[1], []]), "第 1 项分工的 dependsOn 只能为空"],
-    // A cycle needs a later reference, so the earlier-only rule refuses it through that reference.
-    ["a cycle between positions 1 and 2", depending([[2], [1]]), "第 1 项分工的 dependsOn 只能为空"],
     ["a repeated dependency", depending([[], [], [1, 1]]), "第 3 项分工的 dependsOn 不能重复"],
   ])("refuses %s", (_case, value, reason?: string) => {
     expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid", ...(reason ? { reason } : {}) }));
