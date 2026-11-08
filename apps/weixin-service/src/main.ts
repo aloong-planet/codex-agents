@@ -76,7 +76,9 @@ import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { RuntimePool } from "./runtime-pool.js";
-import { COORDINATOR_ID, TeamRegistry } from "./team-registry.js";
+import { COORDINATOR_ID, TeamRegistry, type DefinitionsVersion } from "./team-registry.js";
+import { ProfileToolHost, resolveAgentProfile, type ResolvedAgentProfile } from "./agent-profile.js";
+import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
@@ -189,12 +191,14 @@ const workflowToolCatalog = createProductionWorkflowToolCatalog({
   schedules: true,
 });
 // Every reader of the dispatch roster takes it from the team registry; local `feishu.dispatch` only feeds the registry's import.
+// Dispatch turns resolve their profiles from the definitions version current at startup; nothing saves versions at runtime yet.
+let teamDefinitions: DefinitionsVersion | undefined;
 const feishuConfiguration = (() => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
   if (!entry?.dispatch) return entry;
   const registry = new TeamRegistry(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
   try {
-    registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
+    teamDefinitions = registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
     return Object.freeze({ ...entry, dispatch: registry.roster(entry.connection) });
   } finally { registry.close(); }
 })();
@@ -663,7 +667,8 @@ const codexAgent: CodexAgent = new CodexConversation(
     onConnectionFailure: (error) => diagnostics?.checkpoint("app_server.connection", { status: "closed", errorCode: error.message }),
   },
 );
-const isolatedConversation = (scope: string, options: ConstructorParameters<typeof CodexConversation>[5], readableRoots: string[] = [], main = false) => {
+const isolatedConversation = (scope: string, options: ConstructorParameters<typeof CodexConversation>[5], readableRoots: string[] = [], main = false,
+  tools: DynamicToolHost | undefined = main ? workflowToolHost : undefined) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
   const runtime = createIsolatedModelRuntime({ root: groupRuntimeRoot, scope, readableRoots,
     ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
@@ -674,7 +679,7 @@ const isolatedConversation = (scope: string, options: ConstructorParameters<type
           fixtureModelRequests.push(request); if (fixtureModelRequests.length > 20) fixtureModelRequests.shift();
         })
       : spawnStdioAppServer(codexExecutable, ISOLATED_MODEL_DISABLED_FEATURES, runtime),
-    600_000, main ? workflowToolHost : undefined, undefined, 300_000,
+    600_000, tools, undefined, 300_000,
     { ...options, permissionProfile: runtime.permissionProfile });
   return { agent, cwd: runtime.cwd, runtimeWorkspaceRoots: [] };
 };
@@ -818,20 +823,38 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     if (!selected?.available) throw new Error("dispatch_model_unavailable");
     return { model: selected.model, effort: selected.effort };
   };
-  const memory = (event: import("./channel-contract.js").InboundContent) => accountMemory.recall(configuration.owner.memoryScope(event.accountId, event.target), event.text);
+  const definitions = teamDefinitions!.definitions, catalogToolIds = workflowToolCatalog.memberIds();
+  // Every resolved scope is the group memory until per-agent visibility scopes exist.
+  const memoryAccount = (scope: ResolvedAgentProfile["memoryScope"], event: import("./channel-contract.js").InboundContent) =>
+    scope === "group" ? configuration.owner.memoryScope(event.accountId, event.target) : undefined;
+  const coordinatorProfile = resolveAgentProfile(definitions, { role: "coordinator" }, catalogToolIds);
+  const memory = (event: import("./channel-contract.js").InboundContent) => accountMemory.recall(memoryAccount(coordinatorProfile.memoryScope, event)!, event.text);
+  // Building a profile's tool view compiles its tool schemas (about 50 ms), so one view is kept per distinct tool set.
+  const toolViews = new Map<string, ProfileToolHost>();
+  const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob) => {
+    const profileId = definitions.teams.find(({ id }) => id === job.agentId)?.executorProfiles[0]?.id ?? "";
+    const resolved = resolveAgentProfile(definitions, { role: "executor", teamId: job.agentId, profileId }, catalogToolIds);
+    const key = JSON.stringify(resolved.hostTools);
+    let tools = toolViews.get(key);
+    if (!tools) { tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools); toolViews.set(key, tools); }
+    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools };
+  };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: ({ agent }) => agent.close() });
   const classifier = fixtureMode && !fixtureLiveMainModel
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
     : (() => {
       if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
-      return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model);
+      // The runtime's tools come from the resolved profile, which never gives the Coordinator business tools (agent-dispatch::CON-003).
+      const coordinatorTools = coordinatorProfile.hostTools.length ? new ProfileToolHost(workflowToolHost, workflowToolCatalog, coordinatorProfile.hostTools) : undefined;
+      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported }, [], false, coordinatorTools);
+      return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorProfile.instructions);
     })();
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
     agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
     contextRevision: () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); },
-    memory: (job) => memory(job.event),
+    profile: executorProfile,
+    memory: (job, scope) => accountMemory.recall(memoryAccount(scope, job.event)!, job.event.text),
     existingResult: (job) => {
       const event = job.executionEvent ?? job.event;
       const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
@@ -843,17 +866,17 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return { status: rendered.outcome === "succeeded" ? "completed" : rendered.outcome === "needs_input" ? "waiting" : "failed",
         message: rendered.reply, runRef: run.runId };
     },
-    createRuntime: (job, scope) => {
+    createRuntime: (job, scope, tools) => {
       const chatId = configuration.owner.deliveryTarget(job.event.accountId, job.event.target);
       if (!chatId) throw new Error("dispatch_group_unbound");
       const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
       fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
-      return isolatedConversation(scope, { serviceName: `feishu_agent_${job.agentId}`, webSearch: "live", structuredOutputSupported: appServerCapabilities.structuredOutputSupported, automaticRecovery: true }, [mediaRoot], true);
+      return isolatedConversation(scope, { serviceName: `feishu_agent_${job.agentId}`, webSearch: "live", structuredOutputSupported: appServerCapabilities.structuredOutputSupported, automaticRecovery: true }, [mediaRoot], true, tools);
     },
     prepareThread: (job, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId)); },
-    capture: async (job, reply) => {
+    capture: async (job, scope, reply) => {
       const event = job.executionEvent ?? job.event;
-      await accountMemory.captureTurn({ accountId: configuration.owner.memoryScope(job.event.accountId, job.event.target), target: job.event.target,
+      await accountMemory.captureTurn({ accountId: memoryAccount(scope, job.event)!, target: job.event.target,
         userEntry: { source: { eventKey: event.key, target: event.target, senderAccountId: job.senderAccountId }, id: `${job.id}:user:${job.attempt}`, text: event.text, createdAt: event.receivedAt, status: "completed" },
         assistantEntry: { id: `${job.id}:assistant:${job.attempt}`, text: reply, createdAt: Date.now(), status: "completed" } });
     },
