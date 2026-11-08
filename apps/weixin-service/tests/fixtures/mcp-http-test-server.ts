@@ -7,9 +7,13 @@
 // - startHttpTestServer: one MCP endpoint at /mcp. It can require fixed headers, answer 403 echoing the header values
 //   it received (so that they reach the client's error text), or require OAuth tokens from an authorization server,
 //   presented as Bearer or, for DPoP-bound tokens, as DPoP with a fresh proof. Its protected-resource metadata names the
-//   authorization server, or `advertiseIssuer` when a case needs it to name another one.
+//   authorization server, or `advertiseIssuer` when a case needs it to name another one; its 401 challenge names its own
+//   metadata, or `advertiseResourceMetadata`.
+// - startRecordingServer: a second origin that records the method, path and header names (never values) of every
+//   request reaching it, for cases that check what leaves the configured origins.
 //
-// Both record what reached them. Self-checks: mcp-http-test-server.test.ts.
+// The first two can answer chosen requests with a redirect (`redirect`), recorded in `redirects`. All record what
+// reached them. Self-checks: mcp-http-test-server.test.ts.
 import crypto from "node:crypto";
 import { once } from "node:events";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
@@ -49,6 +53,35 @@ async function listen(handler: Handler, port = 0): Promise<{ origin: string; clo
 const json = (value: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...headers } });
 
+/** A request as a redirect rule sees it: `rpc` is the JSON-RPC method of an MCP POST. */
+export type RedirectProbe = { method: string; path: string; rpc?: string; authorized: boolean };
+/** Answers the request with this redirect instead of serving it, or serves it when it returns nothing. */
+export type RedirectRule = (request: RedirectProbe) => { status: 301 | 302 | 303 | 307 | 308; location: string } | undefined;
+
+async function redirected(rule: RedirectRule | undefined, request: Request): Promise<Response | undefined> {
+  if (!rule) return undefined;
+  const url = new URL(request.url);
+  const rpc = request.method === "POST" && url.pathname === "/mcp"
+    ? await request.clone().json().then((body: { method?: unknown }) => (typeof body?.method === "string" ? body.method : undefined), () => undefined)
+    : undefined;
+  const to = rule({ method: request.method, path: `${url.pathname}${url.search}`, ...(rpc ? { rpc } : {}), authorized: request.headers.has("authorization") });
+  return to && new Response(null, { status: to.status, headers: { location: to.location } });
+}
+
+/** A request that reached the recording server: its header names, lower-cased, never their values. */
+export type RecordedRequest = { method: string; path: string; headerNames: string[] };
+
+/** A second loopback origin that records every request reaching it and answers 404. */
+export async function startRecordingServer(): Promise<{ origin: string; requests: RecordedRequest[]; close: () => Promise<void> }> {
+  const requests: RecordedRequest[] = [];
+  const { origin, close } = await listen(async (request) => {
+    const url = new URL(request.url);
+    requests.push({ method: request.method, path: `${url.pathname}${url.search}`, headerNames: [...request.headers.keys()].sort() });
+    return new Response("not found", { status: 404 });
+  });
+  return { origin, requests, close };
+}
+
 /** RFC 7638 thumbprint of an EC public key. */
 function thumbprint(jwk: { crv?: string; kty?: string; x?: string; y?: string }): string {
   return b64url(sha256(JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y })));
@@ -87,6 +120,10 @@ export type AuthorizationServer = {
   dpop: boolean;
   /** Every request that reached it, as `METHOD path`. */
   requests: string[];
+  /** The header names of each request in `requests`, in the same order. */
+  headerNames: string[][];
+  /** Requests answered by the `redirect` rule, as `METHOD path -> status location`. */
+  redirects: string[];
   tokenRequests: TokenRequest[];
   issued: IssuedToken[];
   /** DPoP proof identifiers already used, shared with the resource servers that accept its tokens. */
@@ -94,12 +131,18 @@ export type AuthorizationServer = {
   close: () => Promise<void>;
 };
 
-export async function startAuthorizationServer(options: { clientId: string; clientSecret: string; dpop?: boolean }): Promise<AuthorizationServer> {
-  const as: Omit<AuthorizationServer, "issuer" | "close"> = { dpop: options.dpop === true, requests: [], tokenRequests: [], issued: [], seenProofs: new Set() };
+export async function startAuthorizationServer(options: { clientId: string; clientSecret: string; dpop?: boolean; redirect?: RedirectRule }): Promise<AuthorizationServer> {
+  const as: Omit<AuthorizationServer, "issuer" | "close"> = { dpop: options.dpop === true, requests: [], headerNames: [], redirects: [], tokenRequests: [], issued: [], seenProofs: new Set() };
   let issuer = "";
   const { origin, close } = await listen(async (request) => {
     const url = new URL(request.url);
     as.requests.push(`${request.method} ${url.pathname}`);
+    as.headerNames.push([...request.headers.keys()].sort());
+    const moved = await redirected(options.redirect, request);
+    if (moved) {
+      as.redirects.push(`${request.method} ${url.pathname} -> ${moved.status} ${moved.headers.get("location")}`);
+      return moved;
+    }
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-authorization-server") {
       return json({
         issuer,
@@ -157,6 +200,8 @@ export type HttpTestServer = {
   requests: McpRequestRecord[];
   /** Bodies of the 403 answers sent in `echoHeaders` mode. */
   forbiddenBodies: string[];
+  /** Requests answered by the `redirect` rule, as `METHOD path -> status location`. */
+  redirects: string[];
   close: () => Promise<void>;
 };
 
@@ -169,10 +214,14 @@ export type HttpTestServerOptions = {
   authorizationServer?: AuthorizationServer;
   /** The issuer the protected-resource metadata names, when it must differ from `authorizationServer`. */
   advertiseIssuer?: string;
+  /** The protected-resource metadata URL a 401 challenge names, when it must differ from this server's own. */
+  advertiseResourceMetadata?: string;
   /** Announce `tools.listChanged`, as a server that would notify on its GET stream (which this one does not offer). */
   listChanged?: boolean;
   /** Listen on this port, for a case that first finds the URL unreachable. */
   port?: number;
+  /** Answers matching requests (MCP or protected-resource metadata) with a redirect; they are recorded in `redirects`. */
+  redirect?: RedirectRule;
 };
 
 const TOOLS = [
@@ -181,7 +230,7 @@ const TOOLS = [
 ];
 
 export async function startHttpTestServer(options: HttpTestServerOptions = {}): Promise<HttpTestServer> {
-  const record = { requests: [] as McpRequestRecord[], forbiddenBodies: [] as string[] };
+  const record = { requests: [] as McpRequestRecord[], forbiddenBodies: [] as string[], redirects: [] as string[] };
   const as = options.authorizationServer;
   let origin = "";
   const resourceMetadata = () => `${origin}/.well-known/oauth-protected-resource/mcp`;
@@ -199,7 +248,7 @@ export async function startHttpTestServer(options: HttpTestServerOptions = {}): 
     if (!as) return { scheme: "none" };
     const challenge = (error?: string) => new Response(JSON.stringify({ error: error ?? "invalid_token" }), {
       status: 401,
-      headers: { "content-type": "application/json", "www-authenticate": `${as.dpop ? "DPoP" : "Bearer"} resource_metadata="${resourceMetadata()}"${error ? `, error="${error}"` : ""}` },
+      headers: { "content-type": "application/json", "www-authenticate": `${as.dpop ? "DPoP" : "Bearer"} resource_metadata="${options.advertiseResourceMetadata ?? resourceMetadata()}"${error ? `, error="${error}"` : ""}` },
     });
     const [scheme, token] = (request.headers.get("authorization") ?? "").split(" ");
     const issued = as.issued.find((item) => item.token === token);
@@ -216,6 +265,11 @@ export async function startHttpTestServer(options: HttpTestServerOptions = {}): 
 
   const { origin: listening, close } = await listen(async (request) => {
     const url = new URL(request.url);
+    const moved = await redirected(options.redirect, request);
+    if (moved) {
+      record.redirects.push(`${request.method} ${url.pathname}${url.search} -> ${moved.status} ${moved.headers.get("location")}`);
+      return moved;
+    }
     if (request.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource/mcp") {
       if (!as) return new Response("not found", { status: 404 });
       return json({ resource: `${origin}/mcp`, authorization_servers: [options.advertiseIssuer ?? as.issuer], bearer_methods_supported: ["header"] });

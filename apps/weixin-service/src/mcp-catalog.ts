@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 
-import { Client, ClientCredentialsProvider, DpopSession, ProtocolError, SdkError, SdkErrorCode, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { Client, ClientCredentialsProvider, DpopSession, ProtocolError, SdkError, SdkErrorCode, StreamableHTTPClientTransport, type FetchLike } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 import type { ConsoleAudit } from "./console-audit.js";
@@ -48,7 +48,8 @@ import {
  *   holds environment values, header values and OAuth client secrets. Both are owner-only and replaced atomically;
  *   after a deletion, or a change of transport, no state file holds the dropped secrets.
  * - OAuth access tokens and DPoP keys live in memory only, one set per connection: a reconnection or a restart
- *   requests a new token. The client secret is sent only to the configured issuer (the SDK's `expectedIssuer`).
+ *   requests a new token. The client secret is sent only to the configured issuer (the SDK's `expectedIssuer`);
+ *   header values only to the configured URL's origin, and no redirect leaves that origin.
  * - A server's first tool listing is pinned. Later new or changed definitions wait for the owner's review.
  * - After a failure the host retries from 30 seconds, doubling up to 10 minutes. Servers that do not announce
  *   tool-list changes are listed again every 10 minutes.
@@ -212,6 +213,21 @@ class HostClientCredentials extends ClientCredentialsProvider {
     this.session ??= DpopSession.create();
     return this.session;
   }
+}
+
+/**
+ * The fetch of a URL server's transport: it adds the configured headers only to requests for the configured URL's
+ * origin (mcp-catalog::REQ-001). The SDK also uses this fetch for OAuth discovery, which goes where the server's
+ * metadata or 401 challenge points, so `requestInit.headers` would carry the values to any origin they name. A header
+ * the request already carries is kept, so the SDK's own `Authorization`, session and protocol headers win.
+ */
+function originBoundFetch(origin: string, headers: Readonly<Record<string, string>>): FetchLike {
+  return (url, init) => {
+    if (new URL(url).origin !== origin) return fetch(url, init);
+    const merged = new Headers(init?.headers);
+    for (const [name, value] of Object.entries(headers)) if (!merged.has(name)) merged.set(name, value);
+    return fetch(url, { ...init, headers: merged });
+  };
 }
 
 /** A stored server's secrets taken out of `secrets`, or all of them replaced by `own`. */
@@ -813,8 +829,16 @@ export class McpCatalog {
       const provider = server.oauth && own.clientSecret !== undefined
         ? new HostClientCredentials({ clientId: server.oauth.clientId, clientSecret: own.clientSecret, ...(server.oauth.scope ? { scope: server.oauth.scope } : {}), expectedIssuer: server.oauth.issuer }, server.dpop)
         : undefined;
+      const url = new URL(server.url);
       // A client_credentials client cannot widen its scope by asking again, so a scope challenge is an error.
-      return new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers: own.headers }, ...(provider ? { authProvider: provider } : {}), onInsufficientScope: "throw" });
+      // `redirectPolicy: "same-origin"` is the SDK's default, pinned here so that a change of default cannot move the
+      // connection, its headers or its token to an address the owner did not confirm (mcp-catalog::REQ-002).
+      return new StreamableHTTPClientTransport(url, {
+        fetch: originBoundFetch(url.origin, own.headers),
+        redirectPolicy: "same-origin",
+        ...(provider ? { authProvider: provider } : {}),
+        onInsufficientScope: "throw",
+      });
     }
     const plan = launchPlan(server, {
       homeDirectory: this.homeDirectory,
