@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ConsoleAccess } from "./console-access.js";
+import type { ConsoleRoutes } from "./console-routes.js";
 import type { DemoService } from "./demo-service.js";
 import type { FixtureModelToolCall } from "./fixture-app-server-transport.js";
 
@@ -155,11 +156,14 @@ export function createDemoServer(
     channelState?: () => Record<string, unknown>;
     feishuFixture?: { emit(input: unknown): Promise<void> };
     access?: ConsoleAccess;
+    /** Console pages and APIs, served inside the same guard. */
+    consoleRoutes?: ConsoleRoutes;
   } = {},
 ): http.Server {
   const access = options.access ?? new ConsoleAccess();
-  return http.createServer(access.guard(async (req, res) => {
+  return http.createServer(access.guard(async (req, res, context) => {
     try {
+      if (await options.consoleRoutes?.handle(req, res, context)) return;
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
       if (req.method === "GET" && url.pathname === "/api/state") {
         json(res, 200, { ...service.getPublicState(), ...options.channelState?.() });
