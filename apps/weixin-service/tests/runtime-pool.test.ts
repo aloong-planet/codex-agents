@@ -2,9 +2,15 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { RuntimePool } from "../src/runtime-pool.js";
 
 // The pool is tested at its public interface (agent-dispatch Testing Decisions: concurrency limit, idle release and resume).
-// Gaps: main.ts puts the coordinator's classifier runtime into the same pool, but fixture mode replaces the classifier,
-// so that wiring is exercised only by a live coordinator run. Nested waits (a Team Leader holding a slot while it waits
-// for an Executor) do not exist yet; the ticket that adds Executors owns them.
+// Gaps:
+// - main.ts puts the coordinator's classifier runtime into the same pool, but fixture mode replaces the classifier, so that
+//   wiring is exercised only by a live coordinator run.
+// - main.ts passes the default limits (16 runtimes, 5 idle minutes) to the pool; no fixture case fills 16 slots or lives
+//   5 minutes. Re-test condition: a live run or a fixture case that fills the pool. The values themselves are asserted in
+//   agent-dispatch-executor.test.ts.
+// - No production Executor passes releaseWhenDone yet, so "an Executor's runtime is released when its Assignment ends" is
+//   shown only at this interface. Re-test condition: the ticket that adds Executors passes the option and tests the release.
+// - Nested waits (a Team Leader holding a slot while it waits for an Executor) do not exist yet; that ticket owns them too.
 
 type FakeRuntime = { key: string; closed: boolean; close: () => Promise<void> };
 
@@ -50,35 +56,56 @@ it("lets work beyond the limit wait for a slot and runs every piece of work", as
   expect(maxLive()).toBe(2);
 });
 
-it("shares one runtime among concurrent work on the same key and counts it once", async () => {
-  const { pool, create, created } = harness(1);
+it("shares one runtime among concurrent work on the same key, running the work at once and counting the runtime once", async () => {
+  const { pool, create, created } = harness(2);
   const first = deferred(), second = deferred();
-  const shared = [pool.use("s", create("s"), () => first.promise), pool.use("s", create("s"), () => second.promise)];
+  const started: string[] = [];
+  const shared = [
+    pool.use("s", create("s"), async () => { started.push("first"); await first.promise; }),
+    pool.use("s", create("s"), async () => { started.push("second"); await second.promise; }),
+  ];
+  await settle();
+  expect(started).toEqual(["first", "second"]);
   const other = pool.use("t", create("t"), async () => "t-done");
   await settle();
-  expect(created.map(({ key }) => key)).toEqual(["s"]);
-  first.resolve();
-  await settle();
-  expect(created.map(({ key }) => key)).toEqual(["s"]);
-  second.resolve();
-  await expect(Promise.all(shared)).resolves.toEqual([undefined, undefined]);
+  expect(created.map(({ key }) => key)).toEqual(["s", "t"]);
   await expect(other).resolves.toBe("t-done");
-  expect(created.map(({ key, closed }) => [key, closed])).toEqual([["s", true], ["t", false]]);
+  first.resolve(); second.resolve();
+  await Promise.all(shared);
 });
 
-it("releases the least recently used idle runtime for waiting work before the idle limit", async () => {
+it("releases the least recently used idle runtime, not the oldest, for waiting work before the idle limit", async () => {
   const { pool, create, created, closeGates, maxLive } = harness(2);
   await pool.use("a", create("a"), async () => {});
   await pool.use("b", create("b"), async () => {});
+  await pool.use("a", create("a"), async () => {});
   const closing = deferred();
-  closeGates.set("a", closing.promise);
+  closeGates.set("b", closing.promise);
   const waiting = pool.use("c", create("c"), async () => "c-done");
   await settle();
   expect(created.map(({ key, closed }) => [key, closed])).toEqual([["a", false], ["b", false]]);
   closing.resolve();
   await expect(waiting).resolves.toBe("c-done");
-  expect(created.map(({ key, closed }) => [key, closed])).toEqual([["a", true], ["b", false], ["c", false]]);
+  expect(created.map(({ key, closed }) => [key, closed])).toEqual([["a", false], ["b", true], ["c", false]]);
   expect(maxLive()).toBe(2);
+});
+
+it("makes work that arrives while its key's runtime is closing wait for the close and run on a new runtime", async () => {
+  const { pool, create, created, closeGates } = harness(2, 1000);
+  await pool.use("a", create("a"), async () => {});
+  const closing = deferred();
+  closeGates.set("a", closing.promise);
+  await vi.advanceTimersByTimeAsync(1000);
+  const used: FakeRuntime[] = [];
+  const again = pool.use("a", create("a"), async (runtime) => { used.push(runtime); return "a-again"; });
+  await settle();
+  expect(created).toHaveLength(1);
+  closeGates.delete("a");
+  closing.resolve();
+  await expect(again).resolves.toBe("a-again");
+  expect(created).toHaveLength(2);
+  expect(used).toEqual([created[1]]);
+  expect(created[0]!.closed).toBe(true);
 });
 
 it("releases an idle runtime after the idle limit, counted from the end of its last work, and creates it again when needed", async () => {
