@@ -56,12 +56,13 @@ An expanded record shows these parts, in order:
 1. The result.
 2. A path line: the route from Sam to the lead leader, each cross-team assignment from Sam on the lead leader's request, and the identities that report.
 3. The assignment list. Each entry shows the executor, the responsible leader, the capability profile, a cross-team marker, the status and the result.
-4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it. A post keeps its line breaks: a post with several items, such as a start message naming several Executors, a closing covering several Assignments or a cancel report, shows each item on its own line, as the group receives it. The cancelled group sample R-2394 shows the cancel report.
+4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it. A post keeps its line breaks: a post with several items, such as a start message naming several Executors, a closing covering several Assignments or a cancel report, shows each item on its own line, as the group receives it. The cancelled group sample R-2394 shows the cancel report. In a start message, an Assignment that waits for others names them after its title, as 「（等 2 完成后开始）」; it gets no start post of its own when it starts later (sample R-2392).
+
+   Delivery: ticket 07 of agent-teams delivers the one-item-per-line posts. Ticket 31 delivers dependencies between Assignments: the 「（等 … 完成后开始）」 annotation and the 未开始（前项失败） state of sample R-2392.
    - Leaders post the start message naming who does which assignment, team-internal decisions, progress, and the closing message.
    - Sam posts cross-team assignments.
    - Private requests have no group-report timeline.
-   Assignment states are 执行中, 待确认, 已完成, 失败, 已中断 and 已取消. A failed Assignment shows its cause; an interrupted one says it was reported rather than replayed. The sample request R-2391 has one completed, one failed and one interrupted Assignment: it is 部分失败, its closing report names both problems, and its result says a retry redoes only those two.
-   A request still waiting for an over-limit confirmation shows its pending plan here instead of Assignments.
+   Assignment states are 执行中, 待确认, 已完成, 失败, 已中断, 已取消 and 未开始（前项失败）, the last for an Assignment whose prerequisite failed; it never started, so no Executor ended. A failed Assignment shows its cause; an interrupted one says it was reported rather than replayed. The sample request R-2391 has one completed, one failed and one interrupted Assignment: it is 部分失败, its closing report names both problems, and its result says a retry redoes only those two.
 5. The original message.
 6. A chat action for each involved leader.
 7. Storage links.
@@ -102,14 +103,6 @@ The round speech-bubble path follows the official [Lucide MessageCircle SVG](htt
   - 重试失败的分工, when it is 部分失败 or 失败. Its confirmation card lists only the failed and interrupted Assignments, and says completed ones are not redone and completed actions are not replayed.
 
   For a group request the summary instead says that cancelling and retrying happen in the group, with the lead leader; the private conversation discusses, supplements and confirms.
-- **Over-limit confirmation.** When a leader's plan for a private request exceeds 5 Assignments or 2 teams, the chat shows a card:
-  - the planned Assignments with their teams and profiles;
-  - the limits;
-  - what each choice does.
-
-  The choices are 按计划执行, 精简到上限内 (keep the lead team and the first other team, up to 5 Assignments) and 取消事务. No Executor is created before a choice. The sample P-2400 in Bill's conversation has 6 Assignments across 3 teams.
-
-  For a group request the question is Sam's post in the group instead: the planned Assignments with their profiles, the limits, and the three replies 按计划执行, 精简到上限内 (with the same rule) and 取消这项事务, which the original requester sends in the group. The group sample R-2393 shows it in its group-report timeline: Bill's plan has 6 Assignments in one team, and no Executor exists yet.
 - **A team being deleted.** Its leader card shows a 删除中 badge. Its conversation shows a notice and stays open for discussion, but text without a selected request gets an explanation instead of a private-request creation card. Sam's leader choice for a new private request leaves it out.
 - **Supplementing an active request.**
   - The confirmation card shows the exact requirements, the answering leader and that leader's active assignments.
@@ -132,7 +125,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   In the product, actual execution results drive these transitions.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
-- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the eleven sample requests. These include one partially failed group request, one cancelled group request, one group request waiting for an over-limit confirmation, and three private requests: one running, one partially failed and one waiting for an over-limit confirmation.
+- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the ten sample requests. These include two partially failed group requests (R-2391, and R-2392 with an Assignment that did not start), one cancelled group request (R-2394), and two private requests: one running and one partially failed.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.
   - Sam's leader selection demonstrates the coordination handoff.
@@ -148,7 +141,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   - Sam's briefs to leaders and the cross-team result handoff, which appear only as report text;
   - real private and memory storage paths;
   - durable request mutation and channel delivery.
-- Controls are not modeled per assignment: supplement, confirmation and cancellation apply to the request, and retry reruns its failed and interrupted assignments. Cancelling or retrying a group request in the group itself, and the requester's reply to the over-limit question there, are not modeled.
+- Controls are not modeled per assignment: supplement, confirmation and cancellation apply to the request, and retry reruns its failed and interrupted assignments. Cancelling or retrying a group request in the group itself is not modeled.
 - The following are not modeled:
   - large organizations, and requests with many assignments, which widen the tree;
   - concurrent file modifications;
@@ -156,5 +149,9 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   - message transport failures.
 
   Wide trees pan at a minimum readable scale, and the mobile drawer covers the workspace.
-- Restart recovery and capacity limits require implementation-level lifecycle decisions and verification. This page shows their visible results only: an interrupted Assignment, partial failure, retry and the over-limit confirmation.
+- Restart recovery and capacity limits require implementation-level lifecycle decisions and verification. This page shows their visible results only: an interrupted Assignment, partial failure and retry.
 - Penny's message bodies, amounts, screenshots and per-transaction counts are excluded from the mock data and from search.
+
+## Invalidated conclusions
+
+- The over-limit confirmation no longer holds, in the private conversation or in the group: a request waits for no confirmation of its Assignments or teams. A plan over ten Assignments is merged by its Team Leader in one correction turn and otherwise fails (agent-dispatch::REQ-011/AC-02). Copies of this page that show a 「超出分工上限」 card or Sam's over-limit question are superseded.
