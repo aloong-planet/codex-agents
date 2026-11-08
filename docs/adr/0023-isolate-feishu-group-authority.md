@@ -43,3 +43,16 @@ Group model sessions use isolated configuration, disable inherited host memory a
 [ADR-0026](0026-coordinate-group-work-through-isolated-teams.md) divides a dispatch group's agents into a Coordinator, Team Leaders and task-created Executors. Within such a group, the curated group memory above is visible only to the Coordinator. Every other agent sees only the brief it is handed plus its own memory scope, and the owner's private conversations with the Coordinator or Team Leaders never write to group memory. [ADR-0027](0027-bind-host-enforced-agent-profiles.md) (proposed) lets owner-configured, per-agent MCP servers and skills enter that agent's isolated runtime, while inherited host plugins and skill discovery stay disabled. The conversation, requester, file, task and revocation boundaries above are unchanged.
 
 2026-11-08 follow-up: skipping host skill discovery did not keep the owner's skills out of group runtimes. The App Server still listed the real HOME's `.agents/skills` and Codex's bundled skills, and injected one when a member named it with `$<skill>`. Every isolated runtime now also gets its own HOME inside its runtime root and runs with bundled skills disabled. Threads saved before this change keep the earlier skill catalog, and the body of any skill named in them, in their history and send it again when resumed; it stays with the audience that already saw it, and the file paths it lists are no longer readable. Threads started after the change carry none of it. [ADR-0027](0027-bind-host-enforced-agent-profiles.md), called proposed above, was accepted on 2026-11-08; its Sources hold the evidence.
+
+2026-11-08 follow-up, tool surface: disabling Codex features did not keep runtime-supplied tools out of isolated runtimes. On the pinned App Server, the binary's model catalog puts an isolated runtime in code mode. In tests with that catalog, each runtime kind was offered:
+- `exec`, with `apply_patch` and the MCP resource tools nested inside;
+- `wait` and `request_user_input`;
+- Codex's sub-agent tools.
+
+None of these could write a file or read an MCP resource under the "group" profile, but `spawn_agent` created live sub-agent threads with their own model requests. A read-only production check found none had ever been created.
+
+Under [ADR-0029](0029-offer-isolated-runtimes-only-granted-tools.md) (proposed), each isolated runtime runs with a direct-mode model catalog and with user input and sub-agents switched off, and it does not start without that catalog. It is offered only its host tools, plus web search where that is live.
+
+Threads saved before this change keep the old tool list in their history and send it again when resumed. Every tool on it is refused with no effect.
+
+This closing of the tool surface applies to isolated runtimes. The private App Servers that run in the owner's own Codex home keep the owner's Codex tool surface by design: the main conversation, the pending responder and the private memory curator.

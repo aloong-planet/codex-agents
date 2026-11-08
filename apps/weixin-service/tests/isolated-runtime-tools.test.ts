@@ -31,8 +31,8 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
     fs.writeFileSync(path.join(hostCodexHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "sk-synthetic-ticket23" }));
     environment = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: path.join(work, "host-home"), CODEX_HOME: hostCodexHome };
     model = await FakeResponsesEndpoint.start();
-    // The catalog the binary ships, unchanged: what a runtime used before the fix (with the fake provider, the remote
-    // catalog fetch fails and Codex falls back to this one).
+    // The catalog the binary ships, unchanged. A runtime given it is offered the same code-mode tool list that runtimes were
+    // offered before the fix (compare the unfixed run in the ticket's evidence with the positive control below).
     const scratch = fs.mkdtempSync(path.join(work, "dump-"));
     const dump = spawnSync(executable(), ["debug", "models", "--bundled"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", HOME: scratch, CODEX_HOME: scratch } });
     expect(dump.status, dump.stderr).toBe(0);
@@ -58,7 +58,7 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
     additional: ((request.body.input ?? []) as Array<Record<string, unknown>>).filter((item) => item.type === "additional_tools")
       .map((item) => names((item.tools ?? []) as Array<Record<string, unknown>>).sort()),
   });
-  /** The configuration a runtime ran with before the fix: the binary's own catalog, sub-agents and user input on. */
+  /** Reproduces the tool list a runtime was offered before the fix: the binary's own catalog, with sub-agents and user input on. */
   const beforeTheFix = (runtime: IsolatedModelRuntime): IsolatedModelRuntime => ({ ...runtime, configOverrides: [...runtime.configOverrides,
     `model_catalog_json=${JSON.stringify(bundledCatalog)}`, "agents.enabled=true", "tools.experimental_request_user_input.enabled=true"] });
 

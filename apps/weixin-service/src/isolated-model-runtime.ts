@@ -86,8 +86,8 @@ export function createIsolatedModelRuntime(options: {
 
 const derivedCatalogs = new Map<string, string>();
 
-/** The binary's bundled model catalog with every model set to direct tool mode and no apply_patch tool, derived once per
- * binary (path, size and modification time, so an application update derives again). */
+/** The binary's bundled model catalog with every model set to direct tool mode and no apply_patch tool. Derived once per
+ * binary, keyed by its real path, size and modification time. */
 function directModelCatalog(executable: string): string {
   try {
     const binary = fs.statSync(executable);
