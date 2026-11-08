@@ -58,6 +58,7 @@ With no server registered, the table shows a single row: 「还没有 MCP 服务
 The subtitle shows the transport, the state and the tool counts. The drawer contains:
 
 1. **Connection state.** State, server name and version, negotiated protocol, authentication, sandbox, connected time, error, automatic retry, how tool annotations are treated, and the tail of the program output. The reconnect action is here.
+   - Authentication reads 「OAuth client_credentials · 客户端 <id>」, followed by 「 · DPoP」 when the token is presented with DPoP; a server with headers only reads 「请求头 <names>」, names without values; a server with neither has no authentication line.
 2. **Tools.**
    - Every tool has a checkbox; unchecking it disables the tool.
    - Read-only and may-modify-data marks appear only for trusted servers.
@@ -80,8 +81,12 @@ The subtitle shows the transport, the state and the tool counts. The drawer cont
 
 The owner pastes an `{"mcpServers": {…}}` document.
 
-- The check lists each server as to be imported or skipped, with the reason (same name exists, SSE transport).
-- A confirmation card shows the commands of the servers to be imported.
+- The check lists each server as to be imported or skipped:
+  - a server to be imported shows its transport, that it is untrusted and unattached, and the names of values still to fill in (a value that was only a placeholder such as `${NAME}`);
+  - a skipped server shows the reason: same name exists, SSE transport, invalid name, no command or URL, or the field that failed its check.
+- A document that is not JSON, or has no `mcpServers` object, is refused with one inline line in the warning colour under the text; no list appears and 检查 stays.
+- A confirmation card shows the commands of the local programs under 本机将运行 and the addresses of the URL servers under 将连接, each group only when it has entries.
+- Confirming imports them and opens the first imported server; its save bar says 已导入，正在连接。, or 已导入 N 个，正在连接。 for more than one.
 - Imported servers are untrusted and unattached.
 
 ### Shared visual block
@@ -93,7 +98,8 @@ The console shell, buttons, inputs, badges, form sections, confirmation cards, c
 - **Simulation marker.** The floating `Demo ·` bar only marks the simulation.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
 - **服务器列表.** 示例数据 / 空; in the product, whether any server is registered decides it.
-- **Fake actions.** Add, import, check, save, reconnect, tool confirmation, tool switches and delete give visual feedback only. The import check returns a fixed result whatever is pasted. A refresh restores the mock data.
+- **检查结果** (shown only in the import drawer). 多个服务器 / 单个服务器 / 不是 JSON / 没有 mcpServers; in the product, the pasted document decides it.
+- **Fake actions.** Add, import, check, save, reconnect, tool confirmation, tool switches and delete give visual feedback only. The import check returns the result chosen under 检查结果, whatever is pasted. A refresh restores the mock data.
 - **No side effects.** The page runs no command and connects to no address.
 
 ## Uncovered dimensions
