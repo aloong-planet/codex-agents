@@ -58,7 +58,7 @@ An expanded record shows these parts, in order:
 3. The assignment list. Each entry shows the executor, the responsible leader, the capability profile, a cross-team marker, the status and the result.
 4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it. A post keeps its line breaks: a post with several items, such as a start message naming several Executors, a closing covering several Assignments or a cancel report, shows each item on its own line, as the group receives it. The cancelled group sample R-2394 shows the cancel report. In a start message, an Assignment that waits for others names them after its title, as 「（等 2 完成后开始）」; it gets no start post of its own when it starts later (sample R-2392).
 
-   Delivery: ticket 07 of agent-teams delivers the one-item-per-line posts. Ticket 31 delivers dependencies between Assignments: the 「（等 … 完成后开始）」 annotation and the 未开始（前项失败） state of sample R-2392.
+   Delivery: ticket 07 of agent-teams delivered the one-item-per-line posts, and ticket 31 the dependencies between Assignments: the 「（等 … 完成后开始）」 annotation and the 未开始（前项失败） state of sample R-2392. The service numbers prerequisites by their position in the request, as the sample does, and names Executors in the interim form 「执行者 <n>（<profile name>）」 until the team-management page adds the Executor noun.
    - Leaders post the start message naming who does which assignment, team-internal decisions, progress, and the closing message.
    - Sam posts cross-team assignments.
    - Private requests have no group-report timeline.
