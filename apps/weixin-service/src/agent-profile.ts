@@ -49,6 +49,32 @@ export function resolveAgentProfile(definitions: TeamDefinitions, agent: AgentRe
 }
 
 /**
+ * The module permission each host tool needs before its gate lets a call through: read or write on some saved scope, or read
+ * and write on one scope (files.edit). media.send's own images and the schedule tools have no module gate. Taken from the gates
+ * in the local file tools and the file-send artifact store.
+ */
+const HOST_TOOL_PERMISSIONS: Readonly<Record<string, "read" | "write" | "read_write" | null>> = {
+  "files.find": "read", "files.grep": "read", "files.read": "read", "weixin.send_files": "read",
+  "files.write": "write", "files.edit": "read_write", "media.send": null,
+  "schedules.create": null, "schedules.delete": null, "schedules.disable": null, "schedules.edit": null, "schedules.enable": null,
+  "schedules.inspect": null, "schedules.list": null, "schedules.read_text": null, "schedules.retry_news": null, "schedules.run_now": null,
+};
+
+/**
+ * A profile's effective host tools (team-management::US-003/AC-02): the checked tools whose module permission is granted by the
+ * current scopes. A checked tool with no known gate counts as not granted.
+ */
+export function effectiveHostTools(checked: readonly string[], scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>):
+  Readonly<{ offered: string[]; ungranted: string[] }> {
+  const granted = (tool: string) => {
+    const need = HOST_TOOL_PERMISSIONS[tool];
+    if (need === undefined) return false;
+    return need === null || scopes.some((scope) => need === "read_write" ? scope.read && scope.write : scope[need]);
+  };
+  return { offered: checked.filter(granted), ungranted: checked.filter((tool) => !granted(tool)) };
+}
+
+/**
  * The shared tool host as one agent sees it: only its resolved host tools are offered, and any other call is refused
  * before the shared host. Turn bindings stay on the shared host, which keeps checking module permissions on every call.
  */
@@ -56,7 +82,13 @@ export class ProfileToolHost implements DynamicToolHost {
   private readonly allowed: ReadonlySet<string>;
   private readonly offered: WorkflowToolCatalog;
 
-  constructor(private readonly host: DynamicToolHost, catalog: WorkflowToolCatalog, hostTools: readonly string[]) {
+  /**
+   * `hostTools` is the resolved view of the request's definitions version. `revocation.current` gives the profile's allowlist
+   * in the current definitions, or undefined once the profile is gone: a call passes only when its tool is in both, so a removal
+   * applies at the next call of a running request (agent-dispatch::REQ-017/AC-02). Every refused call is reported to `refused`.
+   */
+  constructor(private readonly host: DynamicToolHost, catalog: WorkflowToolCatalog, hostTools: readonly string[],
+    private readonly revocation: Readonly<{ current?: () => readonly string[] | undefined; refused?: (tool: string) => void }> = {}) {
     this.allowed = new Set(hostTools);
     this.offered = new WorkflowToolCatalog(catalog.members().filter(({ id }) => this.allowed.has(id)));
   }
@@ -67,7 +99,10 @@ export class ProfileToolHost implements DynamicToolHost {
   contractHash(): string { return this.offered.contractHash(); }
 
   async execute(tool: string, argumentsValue: unknown, context?: DynamicToolContext): Promise<DynamicToolResult> {
-    if (!context?.namespace || !this.allowed.has(`${context.namespace}.${tool}`)) {
+    const id = `${context?.namespace}.${tool}`;
+    const current = this.revocation.current ? this.revocation.current() : [...this.allowed];
+    if (!context?.namespace || !this.allowed.has(id) || !current?.includes(id)) {
+      try { this.revocation.refused?.(id); } catch { /* Reporting cannot turn a refusal into a call. */ }
       return { success: false, contentItems: [{ type: "inputText",
         text: JSON.stringify({ ok: false, error: { code: "agent_profile_tool_refused", retryable: false, action: "stop" } }) }] };
     }
