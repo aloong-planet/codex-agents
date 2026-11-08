@@ -4,7 +4,8 @@ import path from "node:path";
 
 import { expect, type Page } from "@playwright/test";
 
-import { SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
+import { startAuthorizationServer, startHttpTestServer } from "../tests/fixtures/mcp-http-test-server.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
 import { authorizeLocalService } from "./console-session.js";
 import { startFixtureServer } from "./fixture-server.js";
 import { test } from "./fixtures.js";
@@ -15,6 +16,7 @@ import { test } from "./fixtures.js";
 // Coverage gap: of the text a server supplies, the output tail, the error line (table row and 原因) and the tool
 // description are given markup and checked as text; the server's name and version and the tool names are not. They
 // are separate call sites of the same escaping, and a markup tool name would also change the tool's proxy name.
+// URL servers run against local HTTP test servers on loopback http; TLS and real OAuth providers are not driven.
 const LONG = { timeout: 15_000 };
 const LOOKUP = { name: "lookup", description: "Finds an item.", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } };
 
@@ -53,16 +55,17 @@ test("registers a local program only after confirming its exact command", async 
   await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("MCP 管理");
   await expect(page.getByRole("button", { name: "添加服务器" })).toBeVisible();
   await expect(page.getByRole("button", { name: "返回团队管理" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "导入 JSON" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "导入 JSON" })).toBeVisible();
   await expect(page.locator("#amc-rows .acv2-empty")).toHaveText(/还没有 MCP 服务器。\s*点「添加服务器」登记本机程序。/);
   await testInfo.attach("empty-table", { body: await page.screenshot(), contentType: "image/png" });
 
   await page.getByRole("button", { name: "添加服务器" }).click();
   await expect(page.locator("#amc-title")).toHaveText("添加 MCP 服务器");
-  await expect(page.locator("#amc-form .acv-req")).toHaveCount(2);
+  await expect(page.locator("#amc-form .acv-req")).toHaveCount(3);
   await expect(page.locator("#amc-form .acv-opt")).toHaveCount(4);
   await expect(page.locator("#amc-form .acv-tip-btn")).not.toHaveCount(0);
-  await expect(page.locator('#amc-form input[type="radio"]')).toHaveCount(0);
+  await expect(page.locator('#amc-form input[type="radio"]')).toHaveCount(2);
+  await expect(page.getByLabel("本机程序（stdio）")).toBeChecked();
   await expect(page.locator('[data-f="timeout"]')).toHaveAttribute("placeholder", "60");
   await expect(page.locator('[data-f="trusted"]')).not.toBeChecked();
   await expect(page.locator('[data-f="enabled"]')).toBeChecked();
@@ -247,5 +250,113 @@ test("reconnects enabled servers when the service restarts", async () => {
     expect(starts(files)).toHaveLength(2);
   } finally {
     await restarted.close();
+  }
+});
+
+test("registers a URL server with OAuth and DPoP after confirming its address", async ({ page, fixtureServer }, testInfo) => {
+  const as = await startAuthorizationServer({ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, dpop: true });
+  const remote = await startHttpTestServer({ requireHeaders: { "X-Api-Key": HEADER_SENTINEL }, authorizationServer: as });
+  try {
+    await page.goto(`${fixtureServer.url}/console/mcp`);
+    await page.getByRole("button", { name: "添加服务器" }).click();
+    await page.getByLabel("网址（Streamable HTTP）").check();
+    await expect(page.locator('[data-f="command"]')).toHaveCount(0);
+    await page.locator('[data-f="name"]').fill("remote");
+    await page.locator('[data-f="url"]').fill(remote.url);
+    await page.locator('[data-f="headers"]').fill(`X-Api-Key: ${HEADER_SENTINEL}`);
+    await page.locator('[data-f="dpop"]').check();
+    await page.locator('[data-f="issuer"]').fill(as.issuer);
+    await page.locator('[data-f="clientId"]').fill("agent-console");
+    await page.locator('[data-f="clientSecret"]').fill(CLIENT_SECRET_SENTINEL);
+    await page.locator('[data-f="scope"]').fill("docs:read");
+    await expect(page.locator("#amc-grant")).toContainText(`将连接：${remote.url}`);
+    await expect(page.locator("#amc-launch")).toHaveText(remote.url);
+    await page.locator("#amc-drawer .acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await testInfo.attach("url-server-card", { body: await page.screenshot(), contentType: "image/png" });
+    await page.getByRole("button", { name: "确认并添加" }).click();
+
+    await expect(row(page, "remote")).toContainText("已连接", LONG);
+    await expect(row(page, "remote")).toContainText(`网址${remote.url}`);
+    await expect(page.locator("#amc-kind")).toContainText("网址（Streamable HTTP）");
+    await expect(page.locator("#amc-status .amc-kv")).toContainText("认证OAuth client_credentials · 客户端 agent-console · DPoP");
+    await expect(page.locator('[data-f="headers"]')).toHaveValue("X-Api-Key: ••••••");
+    await expect(page.locator('[data-f="clientSecret"]')).toHaveValue("••••••");
+    await expect(page.locator("body")).not.toContainText(HEADER_SENTINEL);
+    expect(await page.content()).not.toContain(CLIENT_SECRET_SENTINEL);
+    expect(as.tokenRequests).toMatchObject([{ clientId: "agent-console", scope: "docs:read", dpop: true, granted: true }]);
+    expect(remote.requests.filter((request) => request.scheme === "DPoP").length).toBeGreaterThan(0);
+    await testInfo.attach("url-server-drawer", { body: await page.screenshot(), contentType: "image/png" });
+  } finally {
+    await remote.close();
+    await as.close();
+  }
+});
+
+test("imports servers from JSON after confirming their commands and addresses", async ({ page, fixtureServer }, testInfo) => {
+  const work = workDirectory();
+  const local = testServerFiles(work, "local");
+  const remote = await startHttpTestServer();
+  try {
+    await registerViaApi(fixtureServer, { name: "taken", command: process.execPath, args: testServerArgs(testServerFiles(work, "taken")) });
+    await page.goto(`${fixtureServer.url}/console/mcp`);
+    await page.getByRole("button", { name: "导入 JSON" }).click();
+    await expect(page.locator("#amc-title")).toHaveText("导入 MCP 服务器");
+
+    await page.locator("[data-json]").fill('{"mcpServers": ');
+    await page.getByRole("button", { name: "检查" }).click();
+    await expect(page.locator(".amc-import-error")).toHaveText("不是有效的 JSON");
+    await expect(page.locator(".amc-import-result")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "检查" })).toBeVisible();
+    await testInfo.attach("import-refused", { body: await page.screenshot(), contentType: "image/png" });
+
+    const document = JSON.stringify({
+      mcpServers: {
+        local: { type: "stdio", command: process.execPath, args: testServerArgs(local), env: {} },
+        remote: { type: "http", url: remote.url, headers: { "X-Api-Key": "${input:key}" } },
+        taken: { command: "npx", args: ["taken"] },
+        legacy: { type: "sse", url: "http://127.0.0.1:3845/sse" },
+      },
+    }, null, 2);
+    const localLine = [process.execPath, ...testServerArgs(local)].join(" ");
+    await page.locator("[data-json]").fill(document);
+    await expect(page.locator(".amc-import-error")).toHaveCount(0);
+    await page.getByRole("button", { name: "检查" }).click();
+    const entries = page.locator(".amc-import-result li");
+    await expect(entries).toHaveText([
+      /将导入\s*local\s*本机程序 · 默认不可信、未绑定$/,
+      /将导入\s*remote\s*网址 · 默认不可信、未绑定；需要填写：X-Api-Key$/,
+      /跳过\s*taken\s*已有同名服务器$/,
+      /跳过\s*legacy\s*SSE 传输，不支持$/,
+    ]);
+    const card = page.locator("#amc-import-out .acf-grant");
+    await expect(card).toContainText(`本机将运行：${localLine}将连接：${remote.url}导入后默认不可信，还要在团队管理里绑定到能力档。`);
+    await page.locator("#amc-drawer .acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await testInfo.attach("import-card", { body: await page.screenshot(), contentType: "image/png" });
+
+    await page.locator("#amc-close").click();
+    await page.waitForTimeout(500);
+    expect(starts(local)).toEqual([]);
+    await expect(page.locator("#amc-rows tr")).toHaveCount(1);
+
+    await page.getByRole("button", { name: "导入 JSON" }).click();
+    await page.locator("[data-json]").fill(document);
+    await page.getByRole("button", { name: "检查" }).click();
+    await page.getByRole("button", { name: "确认并导入" }).click();
+    await expect(page.locator("#amc-title")).toHaveText("local");
+    await expect(page.locator("#amc-note")).toHaveText("已导入 2 个，正在连接。");
+    await expect(row(page, "local")).toContainText("已连接", LONG);
+    await expect(row(page, "remote")).toContainText("已连接", LONG);
+    for (const name of ["local", "remote"]) await expect(row(page, name)).toContainText("未绑定");
+    await expect(page.locator("#amc-status .amc-kv")).toContainText("不采信（未标为可信，一律按可能修改数据对待）");
+    expect(starts(local)).toHaveLength(1);
+    await testInfo.attach("imported", { body: await page.screenshot(), contentType: "image/png" });
+
+    await page.locator("#amc-close").click();
+    await page.locator('[data-open="remote"]').click();
+    await expect(page.locator("#amc-status .amc-kv")).toContainText("认证请求头 X-Api-Key");
+    await expect(page.locator('[data-f="headers"]')).toHaveValue("X-Api-Key: ");
+    await expect(page.locator('[data-f="trusted"]')).not.toBeChecked();
+  } finally {
+    await remote.close();
   }
 });
