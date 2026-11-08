@@ -12,15 +12,20 @@ import { conversation } from "./support/dispatch-runtime.js";
 // substituted, as in agent-dispatch-classifier.test.ts (agent-dispatch Testing Decisions). Its plan JSON and supplement answer
 // JSON have no real model sample yet; ticket 21's live run checks real output.
 const bill = { executorProfiles: [{ id: "trip" }, { id: "meal" }] };
-const plan = (profileId: string, count = 1) => ({ assignments: Array.from({ length: count }, (_, index) => ({ profileId, title: `规划行程 ${index + 1}`, brief: "南京一日游，预算 300 元" })),
+const plan = (profileId: string, count = 1) => ({ assignments: Array.from({ length: count }, (_, index) => ({ profileId, title: `规划行程 ${index + 1}`, brief: "南京一日游，预算 300 元", dependsOn: [] as number[] })),
+  decisions: [] as string[] });
+
+/** A plan whose n-th Assignment depends on the positions in `dependsOn[n]`. */
+const depending = (dependsOn: number[][]) => ({ assignments: dependsOn.map((positions, index) => ({ profileId: "trip", title: `分工 ${index + 1}`, brief: "南京一日游", dependsOn: positions })),
   decisions: [] as string[] });
 
 describe("Team Leader plan validation", () => {
-  it("accepts a plan of several Assignments with its decisions", () => {
-    expect(parseLeaderPlan({ assignments: [{ profileId: "meal", title: " 采购清单 ", brief: "三人份晚餐" }, { profileId: "trip", title: "规划行程", brief: " 南京一日游 " },
-      { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: [" 先定行程再订餐 ", "预算按 300 元控制"] }, bill))
-      .toEqual({ assignments: [{ profileId: "meal", title: "采购清单", brief: "三人份晚餐" }, { profileId: "trip", title: "规划行程", brief: "南京一日游" },
-        { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: ["先定行程再订餐", "预算按 300 元控制"] });
+  it("accepts a plan of several Assignments with their dependencies and its decisions", () => {
+    expect(parseLeaderPlan({ assignments: [{ profileId: "meal", title: " 采购清单 ", brief: "三人份晚餐", dependsOn: [] },
+      { profileId: "trip", title: "规划行程", brief: " 南京一日游 ", dependsOn: [1] }, { profileId: "meal", title: "预订午餐", brief: "两人", dependsOn: [1, 2] }],
+    decisions: [" 先定行程再订餐 ", "预算按 300 元控制"] }, bill))
+      .toEqual({ assignments: [{ profileId: "meal", title: "采购清单", brief: "三人份晚餐", dependsOn: [] }, { profileId: "trip", title: "规划行程", brief: "南京一日游", dependsOn: [1] },
+        { profileId: "meal", title: "预订午餐", brief: "两人", dependsOn: [1, 2] }], decisions: ["先定行程再订餐", "预算按 300 元控制"] });
   });
 
   it("accepts a plan with five decisions", () => {
@@ -28,19 +33,29 @@ describe("Team Leader plan validation", () => {
   });
 
   it.each([
-    ["a missing brief", { assignments: [{ profileId: "trip", title: "规划行程" }], decisions: [] }],
-    ["an extra property", { assignments: [{ profileId: "trip", title: "规划行程", brief: "南京", tools: ["files.write"] }], decisions: [] }],
+    ["a missing brief", { assignments: [{ profileId: "trip", title: "规划行程", dependsOn: [] }], decisions: [] }],
+    ["an extra property", { assignments: [{ profileId: "trip", title: "规划行程", brief: "南京", dependsOn: [], tools: ["files.write"] }], decisions: [] }],
+    ["a missing dependsOn, which only fixture mode fills", { assignments: [{ profileId: "trip", title: "规划行程", brief: "南京" }], decisions: [] }],
     ["a profile only another team presets", plan("code")],
-    ["an empty title", { assignments: [{ profileId: "trip", title: "  ", brief: "南京" }], decisions: [] }],
+    ["an empty title", { assignments: [{ profileId: "trip", title: "  ", brief: "南京", dependsOn: [] }], decisions: [] }],
     ["missing decisions", { assignments: plan("trip").assignments }],
     ["six decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五", "六"] }],
     ["an empty decision", { ...plan("trip"), decisions: ["  "] }],
     ["eleven Assignments, over the ceiling", plan("trip", 11)],
-  ])("refuses %s", (_case, value) => {
-    expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid" }));
+    ["a dependency on position 0", depending([[], [0]])],
+    ["a dependency on a position past the plan", depending([[], [], [4]])],
+    ["a dependency on a later position", depending([[], [3], []]), "第 2 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 1）"],
+    ["a dependency on its own position", depending([[1], []]), "第 1 项分工的 dependsOn 只能为空"],
+    // A cycle needs a later reference, so the earlier-only rule refuses it through that reference.
+    ["a cycle between positions 1 and 2", depending([[2], [1]]), "第 1 项分工的 dependsOn 只能为空"],
+    ["a repeated dependency", depending([[], [], [1, 1]]), "第 3 项分工的 dependsOn 不能重复"],
+  ])("refuses %s", (_case, value, reason?: string) => {
+    expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid", ...(reason ? { reason } : {}) }));
   });
 
   const supplementOf = (affected: number[], assignments = plan("trip").assignments.slice(0, 0)) => ({ affected, assignments, decisions: [] as string[] });
+  // The request has three Assignments, so new ones start at position 4.
+  const newDepending = (dependsOn: number[][]) => depending(dependsOn).assignments;
   it.each([
     ["an answer naming one of three Assignments", supplementOf([2]), { affected: [2], assignments: [], decisions: [] }],
     ["an answer adding an Assignment", supplementOf([], plan("meal").assignments), { affected: [], assignments: plan("meal").assignments, decisions: [] }],
@@ -52,6 +67,12 @@ describe("Team Leader plan validation", () => {
     ["a new Assignment on another team's preset", supplementOf([], plan("code").assignments), "leader_plan_invalid"],
     ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid",
       "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工"],
+    ["new Assignments depending on an existing one and on an earlier new one", supplementOf([1], newDepending([[2], [1, 4]])),
+      { affected: [1], assignments: newDepending([[2], [1, 4]]), decisions: [] }],
+    ["a new Assignment depending on its own position", supplementOf([], newDepending([[4]])), "leader_plan_invalid",
+      "第 4 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 3）"],
+    ["a new Assignment depending on a later new one", supplementOf([], newDepending([[5], []])), "leader_plan_invalid",
+      "第 4 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 3）"],
   ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string) => {
     if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
     else expect(parseLeaderSupplement(value, bill, 3)).toEqual(expected);
@@ -145,8 +166,8 @@ describe("Team Leader wrapper", () => {
     const external = conversation("leader-thread");
     external.runTurn.mockResolvedValueOnce(reply({ affected: [3], assignments: [], decisions: [] })).mockResolvedValueOnce(reply({ affected: [2], assignments: [], decisions: ["只调整行程"] }));
     const leader = leaderWith((_scope, work) => work(external, "/isolated/leader"));
-    const assignments = [{ position: 1, executor: "执行者 7", profileName: "餐饮", title: "预订午餐", status: "completed" },
-      { position: 2, executor: "执行者 8", profileName: "行程", title: "规划行程", status: "completed" }];
+    const assignments = [{ position: 1, executor: "执行者 7", profileName: "餐饮", title: "预订午餐", status: "completed", dependsOn: [] },
+      { position: 2, executor: "执行者 8", profileName: "行程", title: "规划行程", status: "completed", dependsOn: [1] }];
     await expect(leader.supplement(input(), assignments, "改成下午出发")).resolves.toEqual({ affected: [2], assignments: [], decisions: ["只调整行程"] });
     expect(external.runTurn).toHaveBeenCalledTimes(2);
     expect(external.runTurn.mock.calls.map(([threadId, , , , options]) => [threadId, (options as unknown as { outputSchema: { required: string[] } }).outputSchema.required]))
@@ -166,7 +187,7 @@ describe("Team Leader wrapper", () => {
     await leader.plan(input());
     await vi.advanceTimersByTimeAsync(1000);
     expect(runtimes[0]!.close).toHaveBeenCalledOnce();
-    await expect(leader.close(input(), [{ title: "规划行程 1", executor: "执行者 1", status: "completed", result: "已整理行程" }])).resolves.toBe("行程已整理好。");
+    await expect(leader.close(input(), [{ position: 1, title: "规划行程 1", executor: "执行者 1", status: "completed", result: "已整理行程", dependsOn: [] }])).resolves.toBe("行程已整理好。");
     expect(created).toBe(2);
     expect(runtimes[1]!.startOrResume.mock.calls[0]![0]).toBe("leader-thread");
     const prompt = runtimes[1]!.runTurn.mock.calls[0]![1] as string;

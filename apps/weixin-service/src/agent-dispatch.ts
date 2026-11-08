@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
-  DispatchPendingResult } from "./agent-dispatch-types.js";
+  DispatchPendingResult, PrerequisiteResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderPlanAssignment, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
@@ -22,7 +22,7 @@ export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; pro
 /** One turn captured into an agent's memory; `event` names the conversation and is the source of the user entry. */
 export type DispatchMemoryTurn = Readonly<{ event: InboundContent; senderAccountId: string; userId: string; userText: string; assistantId: string; assistantText: string }>;
 type AssignmentStatus = DispatchAssignment["status"];
-const ENDED: readonly AssignmentStatus[] = ["completed", "failed", "cancelled", "interrupted"];
+const ENDED: readonly AssignmentStatus[] = ["completed", "failed", "cancelled", "interrupted", "blocked"];
 const UNFINISHED: readonly AssignmentStatus[] = ["queued", "running", "waiting"];
 const INTERRUPTED = "服务中断，本次处理已停止。";
 type PlannedAssignment = LeaderPlanAssignment & { teamId: string };
@@ -47,16 +47,41 @@ export function requestOutcome(statuses: readonly AssignmentStatus[]): "complete
   if (counted.every((status) => status === "completed")) return "completed";
   return counted.includes("completed") ? "partially_failed" : "failed";
 }
+/** The positions, in `view`, of an Assignment's prerequisites. */
+function dependencyPositions(view: readonly DispatchAssignment[], assignment: DispatchAssignment): number[] {
+  return view.flatMap(({ id }, index) => (assignment.dependsOn ?? []).includes(id) ? [index + 1] : []);
+}
 /** An Executor's name, from its durable sequence. */
 function executorName(sequence: number): string { return `执行者 ${sequence}`; }
 const executorLabel = (assignment: DispatchAssignment) => `${assignment.executor}（${assignment.profileName}）`;
+/** The positions, as the Team Leader is shown them, of the Assignments `ids` names, joined for a group post. */
+function positionsText(view: readonly DispatchAssignment[], ids: readonly string[]): string {
+  return view.flatMap(({ id }, index) => ids.includes(id) ? [String(index + 1)] : []).join("、");
+}
 /**
  * The Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01). Several
- * Assignments go one per line, as every group post with several items does.
+ * Assignments go one per line, as every group post with several items does. An Assignment that waits for others names the
+ * positions of its prerequisites not yet completed; it gets no post of its own when it starts later.
  */
-function startMessage(assignments: readonly DispatchAssignment[]): string {
-  const items = assignments.map((assignment) => `${executorLabel(assignment)}处理：${assignment.title}`);
+function startMessage(starting: readonly DispatchAssignment[], view: readonly DispatchAssignment[]): string {
+  const items = starting.map((assignment) => {
+    const waits = (assignment.dependsOn ?? []).filter((id) => view.find((other) => other.id === id)?.status !== "completed");
+    return `${executorLabel(assignment)}处理：${assignment.title}${waits.length ? `（等 ${positionsText(view, waits)} 完成后开始）` : ""}`;
+  });
   return items.length === 1 ? `我安排${items[0]}。完成后会在本群汇报。` : `我安排：\n${items.join("\n")}\n完成后会在本群汇报。`;
+}
+/** Bounds on the prerequisite results a dependent Executor receives: each, and all of them together, in characters. */
+export const PREREQUISITE_RESULT_LIMIT = 4_000;
+export const PREREQUISITE_RESULTS_LIMIT = 12_000;
+const TRUNCATED = "…（结果过长，以下已截断）";
+/** Bounds a dependent's prerequisite results: each to its own limit, then all together, in plan order, with a truncation mark. */
+export function boundedPrerequisites(prerequisites: readonly PrerequisiteResult[]): PrerequisiteResult[] {
+  let remaining = PREREQUISITE_RESULTS_LIMIT;
+  return prerequisites.map((prerequisite) => {
+    const kept = Math.min(prerequisite.result.length, PREREQUISITE_RESULT_LIMIT, remaining);
+    remaining -= kept;
+    return { ...prerequisite, result: kept < prerequisite.result.length ? `${prerequisite.result.slice(0, kept)}${TRUNCATED}` : prerequisite.result };
+  });
 }
 /** The message an Assignment's Executor receives; group discussion never travels with it. */
 function inputOf(event: InboundContent): InboundContent {
@@ -149,8 +174,8 @@ export class AgentDispatch {
     return { jobs: this.jobs().map(({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, event, definitionsVersion }) =>
       ({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, accountId: event.accountId, target: event.target, requester: event.senderId,
         definitionsVersion: definitionsVersion ?? null,
-        assignments: this.assignments(id).map(({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run }) =>
-          ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run })) })),
+        assignments: this.assignments(id).map(({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run, dependsOn }) =>
+          ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run, dependsOn: dependsOn ?? [] })) })),
     notices: this.database.prepare("SELECT id, state FROM dispatch_notice ORDER BY sequence").all() };
   }
 
@@ -189,6 +214,7 @@ export class AgentDispatch {
         this.queueNotice(`${job.id}:interrupted:${assignment.id}:${assignment.attempt}`, { ...this.notice(job,
           `服务中断，${executorLabel(assignment)}的分工「${assignment.title}」已中断，无法确认已完成的内容，不会自动重放。`), requestId: job.id });
       }
+      this.blockDependents(job.id);
       job.status = "queued"; this.save(job);
     });
   }
@@ -251,7 +277,10 @@ export class AgentDispatch {
             waiting.status = pending.result.status; waiting.result = pending.result.message;
             if (original.status === "waiting") original.status = "queued";
             const reply = pending.result.status === "cancelled" ? { ...notice, requestId: original.id } : undefined;
-            this.transaction(() => { this.saveAssignment(waiting); this.save(original); if (reply) this.queueNotice(`${event.key}:pending`, reply); });
+            this.transaction(() => {
+              this.saveAssignment(waiting); this.blockDependents(original.id); this.save(original);
+              if (reply) this.queueNotice(`${event.key}:pending`, reply);
+            });
             if (reply) await this.deliverNotice(`${event.key}:pending`, reply);
             this.finishInput(event.key); this.kick(); continue;
           }
@@ -319,6 +348,7 @@ export class AgentDispatch {
               // A request waiting for a choice: the supplement supersedes the waiting Assignments and its Team Leader decides what it affects.
               this.transaction(() => {
                 for (const assignment of this.assignments(job.id)) if (assignment.status === "waiting") { assignment.status = "cancelled"; this.saveAssignment(assignment); }
+                this.blockDependents(job.id);
                 job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job);
               });
             }
@@ -336,13 +366,16 @@ export class AgentDispatch {
             } else await this.coordinate(event, bindingHash, "这条汇报已被接收或发送结果无法确认，不能自动重发。业务操作不会重新执行。");
           } else if (job.status === "failed" || job.status === "partially_failed") {
             job.status = "queued"; job.attempt++; job.retry = true; job.fixtureMessageId = event.messageId;
-            // A retry reruns only the failed and interrupted Assignments, each with its Executor; a request that failed before
-            // its Team Leader divided it, or before it answered a supplement, is planned or answered again.
+            // A retry reruns the failed and interrupted Assignments, each with its Executor, and then the dependents they left
+            // not started, in dependency order; a request that failed before its Team Leader divided it, or before it answered a
+            // supplement, is planned or answered again.
             this.transaction(() => {
               for (const assignment of this.assignments(job.id)) {
-                if (assignment.status !== "failed" && assignment.status !== "interrupted") continue;
+                if (assignment.status !== "failed" && assignment.status !== "interrupted" && assignment.status !== "blocked") continue;
                 assignment.attempt = job.attempt; assignment.status = "queued"; delete assignment.cause; this.saveAssignment(assignment);
               }
+              // A dependent whose prerequisite was cancelled stays not started.
+              this.blockDependents(job.id);
               this.save(job);
             });
           } else await this.coordinate(event, bindingHash, "这项请求没有可重试的失败处理；已完成的操作不会重新执行。");
@@ -366,19 +399,20 @@ export class AgentDispatch {
       if (!team) throw new Error("dispatch_team_unavailable");
       await this.divide(job, team, signal);
       job = this.job(job.id)!;
-      const starting = this.assignments(job.id).filter(({ attempt, status }) => attempt === job.attempt && status === "queued");
+      const view = this.leaderView(job.id);
+      const starting = view.filter(({ attempt, status }) => attempt === job.attempt && status === "queued");
       if (starting.length) {
-        const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`, { ...this.notice(job, startMessage(starting)), requestId: job.id });
+        const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`, { ...this.notice(job, startMessage(starting, view)), requestId: job.id });
         if (!start.ok) throw new Error("dispatch_receipt_unavailable");
         if (signal.aborted) throw new Error("dispatch_cancelled");
-        this.transaction(() => { for (const assignment of starting) { assignment.status = "running"; this.saveAssignment(assignment); } });
+        const ready = this.markReady(job);
         await this.postDecisions(job);
-        await Promise.all(starting.map((assignment) => this.runAssignment(job, assignment, signal)));
+        await this.runReady(job, ready, signal);
       }
       // A stopped service reports the Assignments it cut off at its next start.
       if (this.closing) return;
       job = this.job(job.id)!;
-      const assignments = this.assignments(job.id);
+      const assignments = this.leaderView(job.id);
       if (!job.cancelRequested) {
         if (assignments.some(({ status }) => status === "waiting")) { job.status = "waiting"; this.save(job); return; }
         closing = await this.closeRequest(job, team, assignments);
@@ -426,8 +460,10 @@ export class AgentDispatch {
       return;
     }
     // A promoted supplement: the lead Team Leader decides which Assignments it affects (agent-dispatch::REQ-007/AC-04).
-    const answer = await this.options.leader.supplement(this.leaderInput(job, team), assignments.map((assignment, index) =>
-      ({ position: index + 1, executor: assignment.executor, profileName: assignment.profileName, title: assignment.title, status: assignment.status })),
+    const view = this.leaderView(job.id);
+    const answer = await this.options.leader.supplement(this.leaderInput(job, team), view.map((assignment, index) =>
+      ({ position: index + 1, executor: assignment.executor, profileName: assignment.profileName, title: assignment.title, status: assignment.status,
+        dependsOn: dependencyPositions(view, assignment) })),
     (job.executionEvent ?? job.event).text);
     if (signal.aborted) throw new Error("dispatch_cancelled");
     const added = answer.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
@@ -437,23 +473,37 @@ export class AgentDispatch {
 
   /**
    * Gives the current attempt its Assignments: `added` become new Assignments, each with its own Executor; the Assignments at
-   * the 1-based `affected` positions rerun with their own Executors on the attempt's message, the supplement.
+   * the 1-based `affected` positions rerun with their own Executors on the attempt's message, the supplement, and so does every
+   * Assignment downstream of them that was not cancelled, so it works from their new results (agent-dispatch::REQ-007/AC-04).
    */
   private addAssignments(job: DispatchJob, team: DispatchTeamView, added: readonly PlannedAssignment[], affected: readonly number[], decisions: readonly string[]): void {
     const input = inputOf(job.executionEvent ?? job.event);
     this.transaction(() => {
-      const existing = this.assignments(job.id);
-      for (const position of affected) {
-        const assignment = existing[position - 1]!;
+      const existing = this.leaderView(job.id);
+      const rerun = new Set(affected.map((position) => existing[position - 1]!.id));
+      // A cancelled Assignment stays cancelled, because the requester stopped it, and nothing downstream reruns through it.
+      for (let grown = true; grown;) {
+        grown = false;
+        for (const assignment of existing) {
+          if (rerun.has(assignment.id) || assignment.status === "cancelled" || !(assignment.dependsOn ?? []).some((id) => rerun.has(id))) continue;
+          rerun.add(assignment.id); grown = true;
+        }
+      }
+      for (const assignment of existing) {
+        if (!rerun.has(assignment.id)) continue;
         assignment.attempt = job.attempt; assignment.status = "queued"; assignment.input = input; delete assignment.cause;
         this.saveAssignment(assignment);
       }
+      // A new Assignment's positions number the Assignments as the Team Leader is shown them, its earlier new ones following.
+      const ids = existing.map(({ id }) => id);
       for (const [index, planned] of added.entries()) {
         const profile = team.profiles.find(({ id }) => id === planned.profileId)!;
         const id = `${job.id}:assignment:${job.attempt}:${index + 1}`;
         const sequence = Number(this.database.prepare("INSERT INTO dispatch_assignment (id, request_id, payload) VALUES (?, ?, '{}')").run(id, job.id).lastInsertRowid);
         this.saveAssignment({ id, requestId: job.id, teamId: planned.teamId, profileId: profile.id, profileName: profile.name, executor: executorName(sequence), sequence,
-          title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt, input });
+          title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt, input,
+          ...(planned.dependsOn.length ? { dependsOn: planned.dependsOn.map((position) => ids[position - 1]!) } : {}) });
+        ids.push(id);
       }
       const current = this.job(job.id)!;
       if (decisions.length) current.decisions = { attempt: job.attempt, texts: [...decisions] }; else delete current.decisions;
@@ -470,10 +520,72 @@ export class AgentDispatch {
     }
   }
 
+  /**
+   * Marks running, in one step, every queued Assignment of the attempt whose prerequisites have all completed, and returns them.
+   * Dependents waiting for a prerequisite take no pool slot.
+   */
+  private markReady(job: DispatchJob): DispatchAssignment[] {
+    const ready: DispatchAssignment[] = [];
+    this.transaction(() => {
+      this.blockDependents(job.id);
+      const assignments = this.assignments(job.id);
+      for (const assignment of assignments) {
+        if (assignment.attempt !== job.attempt || assignment.status !== "queued" ||
+          !(assignment.dependsOn ?? []).every((id) => assignments.find((other) => other.id === id)?.status === "completed")) continue;
+        assignment.status = "running"; this.saveAssignment(assignment); ready.push(assignment);
+      }
+    });
+    return ready;
+  }
+
+  /**
+   * Runs the attempt's Assignments: independent ones at once, each dependent once all its prerequisites have completed. No
+   * post goes out when a waiting Assignment starts. A cancel or stop starts nothing further.
+   */
+  private async runReady(job: DispatchJob, first: readonly DispatchAssignment[], signal: AbortSignal): Promise<void> {
+    const running = new Map<string, Promise<void>>();
+    const launch = (assignments: readonly DispatchAssignment[]) => {
+      for (const assignment of assignments) running.set(assignment.id, this.runAssignment(job, assignment, signal).finally(() => { running.delete(assignment.id); }));
+    };
+    launch(first);
+    while (running.size) {
+      await Promise.race(running.values());
+      if (!this.closing && !signal.aborted && !this.job(job.id)?.cancelRequested) launch(this.markReady(job));
+    }
+  }
+
+  /**
+   * Leaves not started, transitively, every queued Assignment with a prerequisite that ended without completing (failed,
+   * interrupted, cancelled while the request goes on, or itself not started). Callers run it in the transaction that records the end.
+   */
+  private blockDependents(requestId: string): void {
+    const assignments = this.assignments(requestId), view = assignments;
+    const unmet = (assignment: DispatchAssignment) => (assignment.dependsOn ?? []).filter((id) => {
+      const status = assignments.find((other) => other.id === id)?.status;
+      return status !== undefined && status !== "completed" && ENDED.includes(status);
+    });
+    for (let grown = true; grown;) {
+      grown = false;
+      for (const assignment of assignments) {
+        const failed = assignment.status === "queued" ? unmet(assignment) : [];
+        if (!failed.length) continue;
+        assignment.status = "blocked"; assignment.result = `未开始：它等待的第 ${positionsText(view, failed)} 项未能完成。`; delete assignment.cause;
+        this.saveAssignment(assignment); grown = true;
+      }
+    }
+  }
+
+  /** The final results of an Assignment's prerequisites, bounded, as its Executor receives them. */
+  private prerequisitesOf(assignment: DispatchAssignment): PrerequisiteResult[] {
+    const view = this.leaderView(assignment.requestId);
+    return boundedPrerequisites(view.flatMap((prerequisite, index) => (assignment.dependsOn ?? []).includes(prerequisite.id)
+      ? [{ position: index + 1, title: prerequisite.title, executor: prerequisite.executor, result: prerequisite.result ?? "" }] : []));
+  }
+
   /** Runs one Assignment's Executor and records its end; a failure while other Assignments are unfinished is posted at once. */
   private async runAssignment(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<void> {
     let result: DispatchExecutionResult | undefined, failure: Extract<AssignmentFailure, { kind: "error" }> | undefined;
-    try { result = await this.options.executor.run(structuredClone(job), structuredClone(assignment), signal); }
+    try { result = await this.options.executor.run(structuredClone(job), structuredClone(assignment), signal, this.prerequisitesOf(assignment)); }
     catch (error) { failure = { kind: "error", error }; }
     // An Executor cut off by a stop is reported as interrupted at the next start.
     if (this.closing && (failure || result!.status === "cancelled")) return;
@@ -490,30 +602,40 @@ export class AgentDispatch {
     if (result?.runRef) { ended.runRef = result.runRef; current.runRef = result.runRef; }
     // The post that reports this end is queued with it, so a stop between the two cannot leave the end unreported.
     let post: { id: string; notice: Notice } | undefined;
-    if (!this.closing && !current.cancelRequested) {
-      if (ended.status === "waiting") {
-        // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
-        const input = ended.input ?? current.executionEvent ?? current.event;
-        const presentation = ended.runRef ? this.options.presentation(input, ended.runRef) : undefined;
-        post = { id: `${job.id}:pending:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current, ended.result!), ...(presentation ? { presentation } : {}), requestId: job.id } };
-        current.reportId = post.id;
-      } else if (ended.status === "failed" && this.assignments(job.id).some(({ id, status }) => id !== ended.id && UNFINISHED.includes(status))) {
+    const reporting = !this.closing && !current.cancelRequested;
+    if (reporting && ended.status === "waiting") {
+      // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
+      const input = ended.input ?? current.executionEvent ?? current.event;
+      const presentation = ended.runRef ? this.options.presentation(input, ended.runRef) : undefined;
+      post = { id: `${job.id}:pending:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current, ended.result!), ...(presentation ? { presentation } : {}), requestId: job.id } };
+      current.reportId = post.id;
+    }
+    this.transaction(() => {
+      this.saveAssignment(ended);
+      // Its dependents are left not started in the same step; a failure that leaves nothing else unfinished is named by the closing.
+      this.blockDependents(job.id);
+      if (reporting && ended.status === "failed" && this.assignments(job.id).some(({ id, status }) => id !== ended.id && UNFINISHED.includes(status))) {
         post = { id: `${job.id}:failure:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current,
           `${executorLabel(ended)}的分工「${ended.title}」未能完成：${ended.cause}。其余分工继续处理。`), requestId: job.id } };
       }
-    }
-    this.transaction(() => { this.saveAssignment(ended); this.save(current); if (post) this.queueNotice(post.id, post.notice); });
+      this.save(current); if (post) this.queueNotice(post.id, post.notice);
+    });
     if (post) await this.deliverNotice(post.id, post.notice);
   }
 
   /** The Team Leader's closing turn; a failed turn falls back to the Assignments' own results, so no outcome goes unreported. */
   private async closeRequest(job: DispatchJob, team: DispatchTeamView, assignments: readonly DispatchAssignment[]): Promise<string> {
     try {
-      return await this.options.leader.close(this.leaderInput(job, team),
-        assignments.map(({ title, executor, status, result }) => ({ title, executor, status, result: result ?? "" })));
+      return await this.options.leader.close(this.leaderInput(job, team), assignments.map((assignment, index) => ({ position: index + 1, title: assignment.title,
+        executor: assignment.executor, status: assignment.status, result: assignment.result ?? "", dependsOn: dependencyPositions(assignments, assignment) })));
     } catch {
-      return assignments.map((assignment) => `${assignment.executor}「${assignment.title}」${assignment.status === "completed" ? "已完成"
-        : assignment.status === "cancelled" ? "已停止" : "未能完成"}。${assignment.result ?? ""}`).join("\n");
+      const lines = assignments.map((assignment) => assignment.status === "blocked" ? `${assignment.executor}「${assignment.title}」${assignment.result ?? ""}`
+        : `${assignment.executor}「${assignment.title}」${assignment.status === "completed" ? "已完成" : assignment.status === "cancelled" ? "已停止" : "未能完成"}。${assignment.result ?? ""}`);
+      // With Assignments not started, the last line gives the order a retry follows.
+      const ids = (statuses: readonly AssignmentStatus[]) => assignments.filter(({ status }) => statuses.includes(status)).map(({ id }) => id);
+      const redone = ids(["failed", "interrupted"]), started = ids(["blocked"]);
+      if (redone.length && started.length) lines.push(`需要时请明确要求重试，会先重做第 ${positionsText(assignments, redone)} 项，再开始第 ${positionsText(assignments, started)} 项。`);
+      return lines.join("\n");
     }
   }
 
@@ -560,10 +682,15 @@ export class AgentDispatch {
     if (assignments.length <= 1) { job.result = `已停止继续处理。${evidence}`; return; }
     // One line per Assignment, as every group post with several items.
     const outcome = (assignment: DispatchAssignment) => assignment.status === "completed" ? "已完成"
-      : assignment.status === "failed" || assignment.status === "interrupted" ? "未能完成" : "已停止";
+      : assignment.status === "failed" || assignment.status === "interrupted" ? "未能完成" : assignment.status === "blocked" ? "未开始" : "已停止";
     job.result = `已停止继续处理：\n${assignments.map((assignment) => `${assignment.executor}「${assignment.title}」${outcome(assignment)}`).join("\n")}\n${evidence}`;
   }
 
+  /**
+   * The request's Assignments as its Team Leader is shown them, in position order: position n is element n - 1. Every 1-based
+   * position a Team Leader writes or reads (a supplement's `affected`, `dependsOn`, the start message and the closing) numbers this list.
+   */
+  private leaderView(requestId: string): DispatchAssignment[] { return this.assignments(requestId); }
   private hasAttemptAssignments(job: DispatchJob): boolean { return this.assignments(job.id).some(({ attempt }) => attempt === job.attempt); }
   private closingId(job: DispatchJob): string { return `${job.id}:closing:${job.attempt}`; }
   /** The requester's request whose Assignment, or whose earlier single Executor, started the workflow run. */

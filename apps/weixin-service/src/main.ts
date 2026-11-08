@@ -80,7 +80,7 @@ import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
 import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
-import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement } from "./fixture-team-leader.js";
+import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement, withFixtureDependencies } from "./fixture-team-leader.js";
 import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
 import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
@@ -942,8 +942,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     return new CodexTeamLeader(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
       runtime: (scope, work) => runtimes.use(scope, () => create(scope), ({ agent, cwd }) => work(agent, cwd)), model,
       ...(fixtureCoordinationRuntime ? { prepareThread: (input, phase, threadId, assignments) => answer(threadId, JSON.stringify(phase === "plan"
-        ? fixtureFeishu!.leaderPlan(input.fixtureMessageId) ?? fixtureDefaultPlan(input)
-        : phase === "supplement" ? fixtureFeishu!.leaderSupplement(input.fixtureMessageId) ?? fixtureDefaultSupplement(assignments as readonly LeaderAssignmentView[])
+        ? withFixtureDependencies(fixtureFeishu!.leaderPlan(input.fixtureMessageId)) ?? fixtureDefaultPlan(input)
+        : phase === "supplement" ? withFixtureDependencies(fixtureFeishu!.leaderSupplement(input.fixtureMessageId)) ?? fixtureDefaultSupplement(assignments as readonly LeaderAssignmentView[])
           : fixtureFeishu!.leaderClosing(input.fixtureMessageId) ?? fixtureDefaultClosing(assignments as readonly LeaderAssignmentReport[]))) } : {}),
     });
   })();

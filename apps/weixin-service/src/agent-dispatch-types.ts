@@ -43,7 +43,8 @@ export type DispatchAssignment = {
   executor: string;
   title: string;
   brief: string;
-  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted";
+  /** `blocked`: it never started because a prerequisite ended without completing, shown as 「未开始（前项失败）」. */
+  status: "queued" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "interrupted" | "blocked";
   /** The request attempt this Assignment runs in; an explicit retry or an affecting supplement moves it to the new attempt. */
   attempt: number;
   result?: string;
@@ -54,7 +55,11 @@ export type DispatchAssignment = {
   input?: InboundContent;
   /** The host-known cause of its failure, as its failure post names it. */
   cause?: string;
+  /** The Assignments of the same request it starts after, all completed; absent on Assignments stored before dependencies existed. */
+  dependsOn?: string[];
 };
+/** A completed prerequisite's final result, as a dependent Assignment's Executor receives it; never its process. */
+export type PrerequisiteResult = Readonly<{ position: number; title: string; executor: string; result: string }>;
 export type DispatchClassificationInput = {
   event: InboundContent;
   agents: readonly DispatchAgentDefinition[];
@@ -66,7 +71,8 @@ export type DispatchPendingResult = { handled: false; cancelledRunRef?: string }
 /** `cause` is set when the host saw a tool call refused during a turn the Executor reported unfinished. */
 export type DispatchExecutionResult = { status: "completed" | "waiting" | "failed" | "cancelled"; message: string; runRef?: string; cause?: "tool_refused" };
 export interface DispatchExecutor {
-  run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<DispatchExecutionResult>;
+  /** `prerequisites` holds the final results of the Assignments it depends on, bounded in size. */
+  run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal, prerequisites?: readonly PrerequisiteResult[]): Promise<DispatchExecutionResult>;
   close(): void | Promise<void>;
 }
 export type DispatchDelivery = (input: { accountId: string; target: string; senderAccountId: string; message: string; operationId: string; beforeSubmit(): boolean }) => Promise<SendTextResult>;

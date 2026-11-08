@@ -9,7 +9,7 @@ import type { PublicCodexServiceState } from "../../src/conversation-service.js"
 import { authorizeLocalService } from "../../e2e/console-session.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
-export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number };
+export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number; dependsOn: string[] };
 export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string; result?: string;
     definitionsVersion: number | null; assignments: DispatchAssignmentState[] }>; notices?: Array<{ id: string; state: string }> };
   fixtureLeaderRequests?: Array<{ phase: "plan" | "supplement" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
