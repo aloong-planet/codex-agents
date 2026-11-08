@@ -1102,9 +1102,16 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       dispatchApplications.set(agent.appId, application);
       channel.setAgentSender(agent.appId, { transport: application.transport, ready: () => application.ready });
       if (!known) for (const address of dispatchConversations()) mediaRouter?.add(feishuMediaRoute({ ...address, senderAccountId: agent.appId }));
-      bindFixtureApplications();
       if (startedChannels.has("feishu")) void startDispatchApplication(application);
     }
+    // An application no team uses any more is closed: work queued under it fails delivery with no other identity (agent-dispatch::REQ-008/AC-04).
+    for (const [appId, application] of dispatchApplications) {
+      if (roster.agents.some((agent) => agent.appId === appId)) continue;
+      application.ready = false;
+      dispatchApplications.delete(appId);
+      void Promise.resolve(application.transport.close()).catch(() => {});
+    }
+    bindFixtureApplications();
   };
   fixtureLeaderRequests = fixtureLeader?.requests;
   return dispatch;

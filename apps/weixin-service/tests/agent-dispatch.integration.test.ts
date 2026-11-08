@@ -265,6 +265,36 @@ it("fails a request whose start message was uncertain at a crash, without sendin
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// agent-dispatch::REQ-008/AC-04 with a Team Leader application replaced from the console while its work runs (ticket 11, D5).
+it("posts nothing through another identity for work started under a Team Leader application that was replaced", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-replaced-application-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    // The replacement application cannot join the group yet, so Bill stays onboarding with it.
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_alpha: { add: "owner_only" } } }) });
+    await running.post("/api/fixture/inbound", groupMessage("om_replaced", "帮我规划周末一日行程", decision("bill", "规划周末一日行程"),
+      { modelHold: true, modelReply: executorReply("周末一日行程已规划好。", "规划周末一日行程") }));
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1 && state.agentDispatch?.jobs[0]?.status === "running");
+    type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
+      profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string }> };
+    const view = await running.get<{ version: number; teams: TeamView[] }>("/api/teams");
+    const bill = view.teams.find(({ id }) => id === "bill")!;
+    await running.post("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility,
+      leader: { ...bill.leader, appId: "cli_eeeeeeeeeeeeeeee" }, executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) =>
+        ({ id, name, noun, instructions, hostTools })), groups: ["oc_alpha"], secret: "bill-replacement" } });
+    await running.post("/api/fixture/inbound", { modelControl: { messageId: "om_replaced", action: "release" } });
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status !== "running" && (state.agentDispatch?.notices?.length ?? 0) === 2);
+    const settled = result;
+    console.log(JSON.stringify({ kind: "dispatch_replaced_application", command: "帮我规划周末一日行程", jobs: settled.agentDispatch, outboxes: settled.agentFixtureOutboxes, coordinator: settled.fixtureTextOutbox }));
+    expect((await running.get<{ teams: TeamView[] }>("/api/teams")).teams.find(({ id }) => id === "bill")!.bindings).toEqual([expect.objectContaining({ chatId: "oc_alpha", state: "onboarding" })]);
+    expect([settled.agentFixtureOutboxes?.bill?.text ?? [], settled.fixtureTextOutbox ?? []]).toEqual([[], []]);
+    // The business outcome stands; its closing has no sender left, so the notice records the failed delivery instead of using another identity.
+    expect([result.agentDispatch?.jobs[0]?.status, settled.agentDispatch?.notices?.map(({ id, state }) => [id.split(":").slice(1).join(":"), state])])
+      .toEqual(["completed", [["receipt:0", "accepted"], ["closing:0", "cancelled"]]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 it("builds the Coordinator's and the Team Leader's runtimes from their resolved profiles, without tools", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-coordination-runtime-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
