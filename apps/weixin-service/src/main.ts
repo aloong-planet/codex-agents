@@ -72,7 +72,8 @@ import { FixturePort } from "./fixture-port.js";
 import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
 import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { CodexDispatchExecutor } from "./agent-dispatch-executor.js";
+import { CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
+import { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID, TeamRegistry, type DefinitionsVersion } from "./team-registry.js";
 import { ProfileToolHost, resolveAgentProfile, type ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
@@ -833,15 +834,18 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     const resolved = resolveAgentProfile(definitions, { role: "executor", teamId: job.agentId, profileId }, catalogToolIds);
     return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools) };
   };
+  // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: ({ agent }) => agent.close() });
   const classifier = fixtureMode && !fixtureLiveMainModel
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input) }
     : (() => {
+      if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
       // The Coordinator resolves to no host tools, so its runtime gets none (agent-dispatch::CON-003).
-      const runtime = isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
-      return new CodexDispatchClassifier(runtime.agent, runtime.cwd, model, coordinatorProfile.instructions);
+      const create = () => isolatedConversation("dispatch-coordinator", { serviceName: "feishu_dispatch_coordinator", webSearch: "disabled", structuredOutputSupported: appServerCapabilities.structuredOutputSupported });
+      return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorProfile.instructions);
     })();
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
-    agents, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
+    agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
     contextRevision: () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); },
     profile: executorProfile,
     memory: (job, scope) => accountMemory.recall(memoryAccount(scope, job.event)!, job.event.text),

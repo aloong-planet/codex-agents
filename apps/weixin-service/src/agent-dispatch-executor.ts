@@ -8,30 +8,39 @@ import { MAIN_REPLY_OUTPUT_SCHEMA, parseMainReply } from "./main-reply-result.js
 import { AppServerTurnFailure } from "./app-server-turn-driver.js";
 import type { WorkflowHandoffReceipt } from "./workflow-tool-host.js";
 import type { DispatchAgent, DispatchExecutor, DispatchExecutionResult, DispatchJob } from "./agent-dispatch-types.js";
+import type { RuntimePool } from "./runtime-pool.js";
 import { COORDINATOR_ID } from "./team-registry.js";
-import type { ProfileToolHost, ResolvedAgentProfile } from "./agent-profile.js";
+import type { ResolvedAgentProfile } from "./agent-profile.js";
+import type { DynamicToolHost } from "./dynamic-tool-host.js";
 
-type Runtime = { agent: CodexConversation; cwd: string };
-type MemoryScope = ResolvedAgentProfile["memoryScope"];
+export type DispatchRuntime = { agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">; cwd: string };
+/** The shared tool host as one Executor profile sees it, with the contract hash of what it offers. */
+export type ExecutorToolHost = DynamicToolHost & { contractHash(): string };
+/** A job's Executor profile as resolved for its definitions version. */
+export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost }>;
+
+/** Default limits of agent-dispatch::QR-001: running runtimes, idle or busy, and the idle time before release. */
+export const DISPATCH_RUNTIME_LIMIT = 16;
+export const DISPATCH_RUNTIME_IDLE_MS = 5 * 60_000;
 /** Domain-neutral source rules every Executor turn carries; domain rules come only from the Agent Profile. */
 const SHARED_EXECUTOR_RULES = "需要实时信息时先检索并读取可靠来源，来源必须支持对应事实，不能只把链接列在文末冒充查证。交付文件前复核其事实与来源是否相符。";
 
 /** Group authority stays canonical; only the isolated session and outbound application vary by role. */
 export class CodexDispatchExecutor implements DispatchExecutor {
   private readonly database: DatabaseSync;
-  private readonly runtimes = new Map<string, Runtime>();
   private closing = false;
   constructor(databasePath: string, private readonly options: {
     agents: readonly DispatchAgent[];
-    createRuntime(job: DispatchJob, scope: string, tools: ProfileToolHost): Runtime;
+    runtimes: RuntimePool<DispatchRuntime>;
+    createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost): DispatchRuntime;
     tools: ConversationTurnToolControl;
     /** The job's Executor profile as resolved for its definitions version; the only source of its instructions, tools and memory scope. */
-    profile(job: DispatchJob): Readonly<{ instructions: string; memoryScope: MemoryScope; tools: ProfileToolHost }>;
+    profile(job: DispatchJob): ExecutorProfileView;
     contextRevision(job: DispatchJob): string;
     authorized(job: DispatchJob): boolean;
     model(job: DispatchJob): CodexTurnModel;
-    memory(job: DispatchJob, scope: MemoryScope): string;
-    capture(job: DispatchJob, scope: MemoryScope, reply: string): Promise<void>;
+    memory(job: DispatchJob, scope: ExecutorProfileView["memoryScope"]): string;
+    capture(job: DispatchJob, scope: ExecutorProfileView["memoryScope"], reply: string): Promise<void>;
     existingResult(job: DispatchJob): DispatchExecutionResult | undefined;
     prepareThread?(job: DispatchJob, threadId: string): void;
   }) {
@@ -49,15 +58,19 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     if (existing) return existing;
     const profile = this.options.profile(job);
     const scope = createHash("sha256").update(JSON.stringify([job.event.accountId, job.event.target, role, job.bindingHash, revision, profile.tools.contractHash()])).digest("hex");
-    let runtime = this.runtimes.get(scope);
-    if (!runtime) { runtime = this.options.createRuntime(job, `dispatch-${scope}`, profile.tools); this.runtimes.set(scope, runtime); }
+    return this.options.runtimes.use(scope, () => this.options.createRuntime(job, `dispatch-${scope}`, profile.tools),
+      (runtime) => this.runOn(runtime, job, role, profile, scope, eligible, signal), { signal });
+  }
+
+  private async runOn(runtime: DispatchRuntime, job: DispatchJob, role: DispatchAgent, profile: ExecutorProfileView, scope: string, eligible: () => boolean,
+    signal: AbortSignal): Promise<DispatchExecutionResult> {
     const previous = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
     const threadId = await runtime.agent.startOrResume(previous ? String(previous.thread_id) : undefined, runtime.cwd, []);
     this.database.prepare("INSERT INTO agent_session VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET thread_id = excluded.thread_id").run(scope, threadId);
     if (!eligible()) throw new Error("dispatch_authorization_changed");
     this.options.prepareThread?.(job, threadId);
     const event = { ...(job.executionEvent ?? job.event), agentId: role.id, dispatchRequestId: job.id, senderAccountId: job.senderAccountId, ...(job.retry ? { dispatchRetry: true } : {}) };
-    const interrupt = () => { void runtime!.agent.interruptThread(threadId).catch(() => {}); };
+    const interrupt = () => { void runtime.agent.interruptThread(threadId).catch(() => {}); };
     signal.addEventListener("abort", interrupt);
     let result: DispatchExecutionResult;
     try {
@@ -83,7 +96,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   }
   async close(): Promise<void> {
     this.closing = true;
-    await Promise.allSettled([...this.runtimes.values()].map(({ agent }) => agent.close()));
+    await this.options.runtimes.close();
     this.database.close();
   }
   private receipt(receipt: WorkflowHandoffReceipt): DispatchExecutionResult {
