@@ -171,7 +171,7 @@ Applies to: every isolated model runtime used by the Coordinator, Team Leaders a
 - agent-dispatch::QR-001/AC-01: A runtime that is idle beyond the configured idle limit is released. A released Coordinator or Team Leader session resumes from its persisted thread when next needed. An Executor's runtime is released when its Assignment ends.
 - agent-dispatch::QR-001/AC-02: The number of concurrently running runtimes never exceeds the configured limit. Work beyond the limit waits and is not dropped.
 
-> Pending: the idle and concurrency limit values are set from the measured per-runtime memory and start-up cost (ADR-0027 evidence (b)).
+The configured idle limit defaults to 5 minutes. The configured concurrency limit defaults to 16 running runtimes, idle or busy. Both defaults are derived from the measured per-runtime memory and start-up cost in the Sources of [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md).
 
 ## Constraints
 
