@@ -35,7 +35,7 @@ Deployments and file-tool acceptance must use the Node version pinned in CI; cha
 
 Financial state, attachments, execution history and reply destinations must remain owner-bound and separate from general personal memory and group dispatch under [ADR-0025](docs/adr/0025-isolate-private-financial-authority.md).
 
-In vitest tests, a wait on another process starting, stopping or reporting is bounded by at least the smaller of `processWaitLimitMs` and its case's own limit, never by the 1 s default of `expect.poll` or `vi.waitFor`, and a product timer that starts when a child is spawned is held until that child reports ready ([why](apps/weixin-service/tests/support/process-wait.ts)).
+In vitest tests, a wait on another process starting, stopping or reporting is bounded by at least the smaller of `processWaitLimitMs` and its case's own limit, never by the 1 s default of `expect.poll` or `vi.waitFor`, a product timer that starts when a child is spawned is held until that child reports ready, and a wall-clock product deadline a case sets must not fall due before the step it must precede ([why](apps/weixin-service/tests/support/process-wait.ts)).
 
 Tests signal process groups only through `signalProcessGroup` in [process-group.ts](apps/weixin-service/tests/support/process-group.ts).
 
