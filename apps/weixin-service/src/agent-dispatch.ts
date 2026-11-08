@@ -247,8 +247,9 @@ export class AgentDispatch {
             // The resolved choice ends its Assignment; the Team Leader closes the request once nothing else is unfinished.
             waiting.status = pending.result.status; waiting.result = pending.result.message;
             if (original.status === "waiting") original.status = "queued";
-            this.transaction(() => { this.saveAssignment(waiting); this.save(original); });
-            if (pending.result.status === "cancelled") await this.deliverNotice(`${event.key}:pending`, { ...notice, requestId: original.id });
+            const reply = pending.result.status === "cancelled" ? { ...notice, requestId: original.id } : undefined;
+            this.transaction(() => { this.saveAssignment(waiting); this.save(original); if (reply) this.queueNotice(`${event.key}:pending`, reply); });
+            if (reply) await this.deliverNotice(`${event.key}:pending`, reply);
             this.finishInput(event.key); this.kick(); continue;
           }
           const presentation = pending.result.status === "waiting" && pending.runRef ? this.options.presentation(event, pending.runRef) : undefined;
@@ -446,15 +447,23 @@ export class AgentDispatch {
   /** Holds a division over the limits for the original requester's choice; the Coordinator asks in the group (agent-dispatch::REQ-011/AC-02). */
   private async askOverLimit(job: DispatchJob, team: DispatchTeamView, held: NonNullable<DispatchJob["overLimit"]>): Promise<void> {
     job = this.job(job.id)!;
-    job.overLimit = held; job.status = "waiting"; this.save(job);
-    const items = [...this.assignments(job.id).filter(({ status }) => status !== "cancelled"), ...held.assignments.map((planned) =>
+    // In plan order: the request's Assignments first, then the held ones, which are the only ones not yet started.
+    const existing = this.assignments(job.id).filter(({ status }) => status !== "cancelled");
+    const items = [...existing, ...held.assignments.map((planned) =>
       ({ teamId: planned.teamId, title: planned.title, profileName: team.profiles.find(({ id }) => id === planned.profileId)?.name ?? planned.profileId }))];
     const teams = new Set(items.map(({ teamId }) => teamId)).size;
+    const limits = `超出上限（每件事务最多 ${ASSIGNMENT_LIMIT} 项分工、${TEAM_LIMIT} 个团队），`;
+    const opening = existing.length
+      ? `${team.leader.name} 按补充调整后的计划共有 ${items.length} 项分工、涉及 ${teams} 个团队，${limits}新增的分工尚未开始执行：`
+      : `${team.leader.name} 的计划有 ${items.length} 项分工、涉及 ${teams} 个团队，${limits}尚未开始执行：`;
+    const listed = items.map(({ profileName, title }, index) => `${index + 1}. ${profileName}：${title}`).slice(existing.length);
     const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
-    await this.deliverNotice(`${job.id}:over-limit:${job.attempt}`, { event: job.event, bindingHash: job.bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId,
-      requestId: job.id, text: `${team.leader.name} 的计划有 ${items.length} 项分工、涉及 ${teams} 个团队，超出上限（每件事务最多 ${ASSIGNMENT_LIMIT} 项分工、${TEAM_LIMIT} 个团队），尚未开始执行：\n` +
-        `${items.map(({ profileName, title }, index) => `${index + 1}. ${profileName}：${title}`).join("\n")}\n` +
-        `请回复「按计划执行」「精简到上限内」（保留负责团队和第一个协作团队，按计划顺序最多 ${ASSIGNMENT_LIMIT} 项）或「取消这项事务」。` });
+    const id = `${job.id}:over-limit:${job.attempt}`;
+    const notice: Notice = { event: job.event, bindingHash: job.bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, requestId: job.id,
+      text: `${opening}\n${listed.join("\n")}\n请回复「按计划执行」「精简到上限内」（保留负责团队和第一个协作团队，按计划顺序最多 ${ASSIGNMENT_LIMIT} 项）或「取消这项事务」。` };
+    // The question is queued with the wait, so a stop between the two cannot leave a request waiting on a question never posted.
+    this.transaction(() => { job.overLimit = held; job.status = "waiting"; this.save(job); this.queueNotice(id, notice); });
+    await this.deliverNotice(id, notice);
   }
 
   /** Applies the requester's choice on a held division: as proposed, or trimmed to the lead team, the first other team and five Assignments. */
@@ -524,19 +533,22 @@ export class AgentDispatch {
       if (result!.status === "failed") ended.cause = failureCause({ kind: "reported", toolRefused: result!.cause === "tool_refused" });
     }
     if (result?.runRef) { ended.runRef = result.runRef; current.runRef = result.runRef; }
-    this.transaction(() => { this.saveAssignment(ended); this.save(current); });
-    if (this.closing || current.cancelRequested) return;
-    if (ended.status === "waiting") {
-      // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
-      const input = ended.input ?? current.executionEvent ?? current.event;
-      const presentation = ended.runRef ? this.options.presentation(input, ended.runRef) : undefined;
-      const id = `${job.id}:pending:${ended.id}:${ended.attempt}`;
-      current.reportId = id; this.save(current);
-      await this.deliverNotice(id, { ...this.notice(current, ended.result!), ...(presentation ? { presentation } : {}), requestId: job.id });
-    } else if (ended.status === "failed" && this.assignments(job.id).some(({ id, status }) => id !== ended.id && UNFINISHED.includes(status))) {
-      await this.deliverNotice(`${job.id}:failure:${ended.id}:${ended.attempt}`, { ...this.notice(current,
-        `${executorLabel(ended)}的分工「${ended.title}」未能完成：${ended.cause}。其余分工继续处理。`), requestId: job.id });
+    // The post that reports this end is queued with it, so a stop between the two cannot leave the end unreported.
+    let post: { id: string; notice: Notice } | undefined;
+    if (!this.closing && !current.cancelRequested) {
+      if (ended.status === "waiting") {
+        // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
+        const input = ended.input ?? current.executionEvent ?? current.event;
+        const presentation = ended.runRef ? this.options.presentation(input, ended.runRef) : undefined;
+        post = { id: `${job.id}:pending:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current, ended.result!), ...(presentation ? { presentation } : {}), requestId: job.id } };
+        current.reportId = post.id;
+      } else if (ended.status === "failed" && this.assignments(job.id).some(({ id, status }) => id !== ended.id && UNFINISHED.includes(status))) {
+        post = { id: `${job.id}:failure:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current,
+          `${executorLabel(ended)}的分工「${ended.title}」未能完成：${ended.cause}。其余分工继续处理。`), requestId: job.id } };
+      }
     }
+    this.transaction(() => { this.saveAssignment(ended); this.save(current); if (post) this.queueNotice(post.id, post.notice); });
+    if (post) await this.deliverNotice(post.id, post.notice);
   }
 
   /** The Team Leader's closing turn; a failed turn falls back to the Assignments' own results, so no outcome goes unreported. */

@@ -15,6 +15,10 @@ import { conversation } from "./support/dispatch-runtime.js";
 // The request lifecycle at the AgentDispatch boundary. Durable stores are real; external conversations, deliveries and the
 // Coordinator's decisions are substitutes. The nested-wait case runs the production Team Leader wrapper and Executor over a
 // real pool, because holding a slot while waiting for another one would span all three.
+// Gap: each group post that reports a state change (a pending choice, a failure, the over-limit question, a choice's cancel
+// reply) is queued in the same transaction as that change. No case shows it: nothing awaits between the two writes, so only a
+// process kill could fall between them, and a test can stop an instance only at an await; failing the post's insert instead
+// would need a storage seam the product does not have. Code review covers it (ticket 07, R-1).
 const agents: DispatchAgent[] = [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
   { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" },
   { id: "bill", name: "Bill", responsibility: "衣食住行", senderAccountId: "cli_bill" }];
@@ -654,4 +658,36 @@ it("queues a supplement sent while an over-limit choice is pending until the cho
   expect(supplements).toEqual(["supplement:one"]);
   expect(runs.slice(0, 6).every((run) => run.endsWith(":alice"))).toBe(true);
   expect(runs[6]).toBe("分工1:supplement:one");
+});
+
+it("asks about only the new Assignments when a supplement takes the request over the limits, and trims in plan order", async () => {
+  const gate = deferred();
+  const runs: string[] = [];
+  const executor: DispatchExecutor = { run: async (job, assignment) => {
+    runs.push(`${assignment.title}:${assignment.attempt}`);
+    if (assignment.attempt === 0) await gate.promise;
+    return { status: "completed", message: `${assignment.title}完成` };
+  }, close: () => {} };
+  const four = { assignments: six.assignments.slice(0, 4), decisions: [] };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(four, [], async () => ({ affected: [], assignments: six.assignments.slice(4), decisions: [] })), executor, deliveries);
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toHaveLength(4), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect(deliveries.filter(({ sender }) => sender === "cli_sam")).toHaveLength(1), { timeout: 2000, interval: 10 });
+  // The four Assignments already ran, so only the two new ones are listed as not yet started, numbered in plan order.
+  expect(deliveries.find(({ sender }) => sender === "cli_sam")?.message).toBe(
+    "Alice 按补充调整后的计划共有 6 项分工、涉及 1 个团队，超出上限（每件事务最多 5 项分工、2 个团队），新增的分工尚未开始执行：\n" +
+    "5. 能力档 1：分工5\n6. 能力档 2：分工6\n请回复「按计划执行」「精简到上限内」（保留负责团队和第一个协作团队，按计划顺序最多 5 项）或「取消这项事务」。");
+  expect(dispatch.getState().jobs[0]?.status).toBe("waiting");
+  dispatch.admit(event("three", "trim:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Trimming counts the existing Assignments first, so only the fifth is added.
+  expect(runs).toEqual(["分工1:0", "分工2:0", "分工3:0", "分工4:0", "分工5:1"]);
+  expect(messages(deliveries).filter((message) => message.startsWith("我安排")).at(-1)).toBe("我安排执行者 5（能力档 1）处理：分工5。完成后会在本群汇报。");
 });
