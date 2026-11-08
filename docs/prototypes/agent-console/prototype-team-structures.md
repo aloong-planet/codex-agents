@@ -56,7 +56,7 @@ An expanded record shows these parts, in order:
 1. The result.
 2. A path line: the route from Sam to the lead leader, each cross-team assignment from Sam on the lead leader's request, and the identities that report.
 3. The assignment list. Each entry shows the executor, the responsible leader, the capability profile, a cross-team marker, the status and the result.
-4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it.
+4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it. A post keeps its line breaks: a post with several items, such as a start message naming several Executors, a closing covering several Assignments or a cancel report, shows each item on its own line, as the group receives it. The cancelled group sample R-2394 shows the cancel report.
    - Leaders post the start message naming who does which assignment, team-internal decisions, progress, and the closing message.
    - Sam posts cross-team assignments.
    - Private requests have no group-report timeline.
@@ -132,7 +132,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   In the product, actual execution results drive these transitions.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
-- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the ten sample requests. These include one partially failed group request, one group request waiting for an over-limit confirmation, and three private requests: one running, one partially failed and one waiting for an over-limit confirmation.
+- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the eleven sample requests. These include one partially failed group request, one cancelled group request, one group request waiting for an over-limit confirmation, and three private requests: one running, one partially failed and one waiting for an over-limit confirmation.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.
   - Sam's leader selection demonstrates the coordination handoff.
