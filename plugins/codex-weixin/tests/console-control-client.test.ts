@@ -1,6 +1,12 @@
-// Coverage gap: the 15 s wait for a live lock held longer than its 10 s stale limit is not driven (it would take
-// 15 s and needs a lock holder that never finishes); the stale-lock takeover and the release after a failed
-// authorization are driven below.
+// Coverage gaps:
+// - The 15 s lock-wait deadline (「微信 Demo 本机授权正忙」) is not driven. It is reached only when, for 15 s, every
+//   poll finds a lock younger than its 10 s stale limit (other processes taking it in turn) or a lock that cannot be
+//   removed; a single holder that never finishes is taken over after 10 s instead (driven below). Re-test
+//   condition: a lock path that cannot be removed, for 15 s.
+// - The re-check right after taking the lock, which returns a credential another process wrote between this
+//   process's check and its lock, is not driven: within one process nothing runs between the two, and across
+//   processes the window is microseconds. Without it such a race costs one extra authorization that then settles.
+//   Re-test condition: a seam between the check and taking the lock.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

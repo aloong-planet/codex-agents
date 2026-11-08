@@ -1,7 +1,6 @@
 // Two installed plugin processes against one real service (agent-console::US-001/AC-05): they share one
 // credential, so the service keeps one 「Codex 插件」 entry and polling causes no re-authorization; after the
 // owner revokes the entry they come back as one new entry.
-import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,26 +10,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { requestConsoleControl } from "../../../apps/weixin-service/src/console-control.js";
+import { startFixtureService, type FixtureService } from "./support/fixture-service.js";
 
 const port = 4329;
 const baseUrl = `http://127.0.0.1:${port}`;
-const demoCwd = path.resolve(process.cwd(), "../../apps/weixin-service");
 const serverEntry = path.resolve(process.cwd(), "dist/server.mjs");
 const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-plugin-credential-"));
-
-async function waitForService(): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    try {
-      await fetch(`${baseUrl}/api/state`);
-      if (fs.existsSync(path.join(stateDirectory, "console-control.json"))) return;
-    } catch {
-      // The service is still starting.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("fixture service did not become ready");
-}
 
 /** Ids of the service's 「Codex 插件」 entries. */
 async function pluginEntries(): Promise<string[]> {
@@ -65,26 +50,17 @@ async function readState(client: Client) {
 }
 
 describe("installed plugin processes share one local authorization", () => {
-  let service: ChildProcess;
+  let service: FixtureService | undefined;
   const plugins: Client[] = [];
 
   beforeAll(async () => {
-    service = spawn(process.execPath, ["dist/main.js"], {
-      cwd: demoCwd,
-      env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port), WORKFLOW_FIXTURE_STATE_DIRECTORY: stateDirectory },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    await waitForService();
+    service = await startFixtureService({ port, stateDirectory });
     plugins.push(...await Promise.all([startPlugin(), startPlugin()]));
   }, 20_000);
 
   afterAll(async () => {
     await Promise.all(plugins.map((plugin) => plugin.close()));
-    if (service && service.exitCode === null) {
-      const exited = new Promise((resolve) => service.once("exit", resolve));
-      service.kill("SIGTERM");
-      await exited;
-    }
+    await service?.stop();
     fs.rmSync(stateDirectory, { recursive: true, force: true });
   });
 
