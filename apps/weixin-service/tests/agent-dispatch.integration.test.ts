@@ -845,6 +845,8 @@ it("reports interrupted Assignments after a crash and closes the request", async
 // Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-04, REQ-010/AC-01). The engine's rules are covered at
 // the AgentDispatch boundary; this case shows main's wiring: the injected cross-team decision and per-team plans reach the production
 // turns, and the other team's Executor runs, sends and remembers under its own team.
+// Gap: the source sender main records with an Executor's memory capture is not observable through fixture mode, whose curators
+// record only the account and the turns; code review covers it.
 it("places a part with another team through main, whose Executor sends its file under its own Team Leader", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-cross-team-")), business = mkdtempSync(join(tmpdir(), "dispatch-cross-team-files-"));
   let running: Running | undefined;
@@ -871,6 +873,8 @@ it("places a part with another team through main, whose Executor sends its file 
     expect(result.agentFixtureOutboxes?.alice?.media).toEqual([]);
     expect(result.agentDispatch?.jobs[0]?.assignments.map(({ teamId, executor }) => `${teamId}:${executor}`)).toEqual(["alice:执行者 1", "jack:执行者 2"]);
     expect(result.fixtureModelRequests!.filter(({ input }) => JSON.stringify(input).includes("你是 Jack 团队的执行者 2"))).toHaveLength(1);
+    // Each Executor's runtime is created for its own team's Team Leader.
+    expect(result.fixtureThreadStarts!.map(({ serviceName }) => serviceName).filter((name) => String(name).startsWith("feishu_agent_")).sort()).toEqual(["feishu_agent_alice", "feishu_agent_jack"]);
     // Jack's Executor remembers into Jack's profile scope in this conversation (agent-dispatch::REQ-012/AC-03).
     const owner = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")!.owner;
     const alpha = owner.groupAddress("oc_alpha")!, jackProfile = memoryAccountId(owner.memoryScope(alpha.accountId, alpha.target), { kind: "profile", teamId: "jack", profileId: "executor-1" });

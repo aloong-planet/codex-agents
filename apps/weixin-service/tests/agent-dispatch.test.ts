@@ -922,3 +922,16 @@ it("reports a cross-team Assignment cut off by a restart under its own Team Lead
   expect(posts(after)).toEqual(["cli_bill: 服务中断，执行者 3（能力档 1）的分工「编写脚本」已中断，无法确认已完成的内容，不会自动重放。", `cli_bill: ${BILL_CLOSED}`, "cli_alice: ALICE_CLOSING"]);
   hung.reject(new Error("abandoned")); await first.close();
 });
+
+it("starts no Executor when a cross-team Team Leader's start message is not confirmed as sent", async () => {
+  let runs = 0;
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), teamLeaders(crossTurns()), { run: async () => { runs += 1; return { status: "completed", message: "完成" }; }, close: () => {} }, deliveries,
+    { assign: toBill, rejected: new Set(["dispatch:one:receipt:0:bill"]) });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("failed"), { timeout: 2000, interval: 10 });
+  expect(runs).toBe(0);
+  expect(posts(deliveries)).toEqual([`cli_alice: ${LEAD_START}`, `cli_sam: ${ANNOUNCED}`, `cli_bill: ${BILL_START}`,
+    "cli_alice: 接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。"]);
+});
