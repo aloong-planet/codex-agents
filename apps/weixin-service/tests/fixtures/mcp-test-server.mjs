@@ -5,7 +5,8 @@
 //
 // - --tools: a JSON array of extra tool definitions (MCP Tool objects), re-read when the file changes. Unless
 //   --no-list-changed is given, the server declares tools.listChanged and notifies the client on every change.
-// - --marker: on start, the server appends one JSON line { pid, argv, cwd } to this file.
+// - --marker: on start, the server appends one JSON line { pid, argv, cwd, secretToken } to this file; secretToken is
+//   the SECRET_TOKEN it received, or null.
 // - --fail-flag: while this file exists, the server prints its SECRET_TOKEN to stderr and exits with code 1.
 //
 // Fixed tools: `env` (the process environment and working directory), `whoami` (pid and argv), `read_file` and
@@ -26,7 +27,7 @@ const marker = option("--marker");
 const failFlag = option("--fail-flag");
 const listChanged = !process.argv.includes("--no-list-changed");
 
-if (marker) fs.appendFileSync(marker, `${JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd() })}\n`);
+if (marker) fs.appendFileSync(marker, `${JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd(), secretToken: process.env.SECRET_TOKEN ?? null })}\n`);
 if (failFlag && fs.existsSync(failFlag)) {
   process.stderr.write(`starting with token ${process.env.SECRET_TOKEN ?? "(none)"}\n`);
   process.stderr.write(`fatal: could not authenticate with ${process.env.SECRET_TOKEN ?? "(none)"}\n`);

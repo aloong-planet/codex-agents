@@ -27,8 +27,8 @@ export function writeTools(file: string, tools: unknown[]): void {
   fs.writeFileSync(file, JSON.stringify(tools));
 }
 
-/** Every start of the test server, oldest first. */
-export function starts(files: TestServerFiles): Array<{ pid: number; argv: string[]; cwd: string }> {
+/** Every start of the test server, oldest first, with the SECRET_TOKEN it received (null without one). */
+export function starts(files: TestServerFiles): Array<{ pid: number; argv: string[]; cwd: string; secretToken: string | null }> {
   if (!fs.existsSync(files.marker)) return [];
   return fs.readFileSync(files.marker, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }

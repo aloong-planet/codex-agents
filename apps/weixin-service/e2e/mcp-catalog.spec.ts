@@ -5,6 +5,8 @@ import path from "node:path";
 import { expect, type Page } from "@playwright/test";
 
 import { SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
+import { authorizeLocalService } from "./console-session.js";
+import { startFixtureServer } from "./fixture-server.js";
 import { test } from "./fixtures.js";
 
 // MCP 管理 (docs/specs/mcp-catalog.md) in a real browser, against the fixture service and real local MCP programs.
@@ -137,13 +139,17 @@ test("reviews new and changed tools and switches tools off", async ({ page, fixt
   writeTools(files.tools, [
     { ...LOOKUP, description: "Finds an item by name." },
     { name: "fresh", description: "Creates an item.", inputSchema: { type: "object" }, annotations: { destructiveHint: true } },
-    { name: "pay", description: "Confirms a payment.", inputSchema: { type: "object" }, _meta: { "anthropic/requiresUserInteraction": true } },
+    { name: "pay", description: '<a href="https://example.com/x">link</a><img src="x">', inputSchema: { type: "object" }, _meta: { "anthropic/requiresUserInteraction": true } },
   ]);
   const tool = (name: string) => page.locator(".amc-tool").filter({ has: page.locator(`[data-tool="${name}"]`) });
   await expect(tool("fresh")).toContainText("新增，待复核", LONG);
   await expect(tool("lookup")).toContainText("定义有变化，待复核");
   await expect(tool("lookup")).toContainText("变化的部分：说明；原说明：Finds an item.");
   await expect(tool("pay")).toContainText("需人工确认，不提供");
+  // Text from a server is shown as text: its markup creates no link or image (agent-console::REQ-005/AC-04).
+  await expect(tool("pay")).toContainText('<a href="https://example.com/x">link</a><img src="x">');
+  await expect(page.locator("#amc-tools a, #amc-tools img")).toHaveCount(0);
+  await expect(tool("fresh")).not.toContainText("可能修改数据");
   await expect(page.getByRole("button", { name: "全部确认（3）" })).toBeVisible();
   await expect(page.locator("#amc-tools .acv2-completed")).toHaveCount(0);
   await testInfo.attach("tools-waiting-for-review", { body: await page.screenshot(), contentType: "image/png" });
@@ -159,6 +165,7 @@ test("reviews new and changed tools and switches tools off", async ({ page, fixt
   await page.locator('[data-f="trusted"]').check();
   await page.getByRole("button", { name: "保存", exact: true }).click();
   await expect(tool("fresh")).toContainText("可能修改数据");
+  await expect(tool("lookup")).toContainText("只读");
   await expect(tool("env")).not.toContainText("只读");
   await expect(page.locator("#amc-status")).toContainText("采信（已标为可信服务器）");
   await testInfo.attach("trusted-marks", { body: await page.screenshot(), contentType: "image/png" });
@@ -187,6 +194,8 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   await page.getByRole("button", { name: "确认并保存" }).click();
   await expect(page.locator("#amc-note")).toHaveText("已保存：新事务使用新配置。");
   await expect.poll(() => starts(second).length, LONG).toBe(1);
+  // The form sent the saved value back as the placeholder, and the new program still received it.
+  expect(starts(second)[0]!.secretToken).toBe(SECRET_SENTINEL);
   const lookup = page.locator(".amc-tool").filter({ has: page.locator('[data-tool="lookup"]') });
   await expect(lookup).toContainText("定义有变化，待复核", LONG);
   await expect(lookup).toContainText("变化的部分：参数");
@@ -199,4 +208,32 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   await expect(page.locator("#amc-rows .acv2-empty")).toBeVisible();
   const pid = starts(second)[0]!.pid;
   await expect.poll(() => isAlive(pid), LONG).toBe(false);
+});
+
+test("reconnects enabled servers when the service restarts", async () => {
+  const work = workDirectory();
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-e2e-state-"));
+  const files = testServerFiles(work, "kept");
+  writeTools(files.tools, [LOOKUP]);
+  const first = await startFixtureServer("fixture", "fixture", undefined, { stateDirectory });
+  const port = Number(new URL(first.url).port);
+  try {
+    await registerViaApi(first, { name: "kept", command: process.execPath, args: testServerArgs(files) });
+    await expect.poll(() => starts(files).length, LONG).toBe(1);
+  } finally {
+    await first.close();
+  }
+
+  const restarted = await startFixtureServer("fixture", "fixture", undefined, { stateDirectory, port });
+  try {
+    const cookie = await authorizeLocalService(stateDirectory);
+    const state = async () => {
+      const response = await fetch(`${restarted.url}/api/mcp/servers`, { headers: { cookie } });
+      return (await response.json()).servers.map((server: { name: string; state: string }) => `${server.name}:${server.state}`);
+    };
+    await expect.poll(state, LONG).toEqual(["kept:connected"]);
+    expect(starts(files)).toHaveLength(2);
+  } finally {
+    await restarted.close();
+  }
 });

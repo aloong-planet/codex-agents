@@ -65,6 +65,10 @@ describe("local program fields (mcp-catalog::US-001/AC-03)", () => {
     [{ command: "node", sandbox: { read: ["/h"] } }, "可读的目录不能是家目录本身或它的上级：/h"],
     [{ command: "node", sandbox: { write: ["/h/owner/.state"] } }, "可读写的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state"],
     [{ command: "node", sandbox: { read: ["/h/owner/.state/weixin/mcp"] } }, "可读的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin/mcp"],
+    [{ command: "node", sandbox: { read: ["/"] } }, "可读的目录不能是家目录本身或它的上级：/"],
+    [{ command: "node", sandbox: { write: ["/"] } }, "可读写的目录不能是家目录本身或它的上级：/"],
+    [{ command: "node", sandbox: { read: ["/h/owner/.state/weixin"] } }, "可读的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin"],
+    [{ command: "node", sandbox: { write: ["/h/owner/.state/weixin"] } }, "可读写的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin"],
   ])("refuses %j", (input, message) => {
     expect(() => normalizeStdio(input, context)).toThrow(message);
   });
@@ -116,11 +120,14 @@ describe("pinned definitions (mcp-catalog::US-004/AC-03)", () => {
     title: "Lookup",
     description: "Finds an item.",
     inputSchema: { type: "object", properties: { q: { type: "string" }, n: { type: "integer" } }, required: ["q"] },
+    outputSchema: { type: "object", properties: { id: { type: "string" } } },
     annotations: { readOnlyHint: true },
     _meta: { "anthropic/requiresUserInteraction": false },
   };
   it.each([
     ["text", { ...base, description: "Finds an item by name." }],
+    ["text", { ...base, title: "Find" }],
+    ["schema", { ...base, outputSchema: { type: "object", properties: { id: { type: "integer" } } } }],
     ["schema", { ...base, inputSchema: { type: "object", properties: { q: { type: "string" } } } }],
     ["hints", { ...base, annotations: { readOnlyHint: false } }],
     ["meta", { ...base, _meta: { "anthropic/requiresUserInteraction": true } }],
@@ -132,6 +139,7 @@ describe("pinned definitions (mcp-catalog::US-004/AC-03)", () => {
       _meta: { "anthropic/requiresUserInteraction": false },
       annotations: { readOnlyHint: true },
       inputSchema: { required: ["q"], properties: { n: { type: "integer" }, q: { type: "string" } }, type: "object" },
+      outputSchema: { properties: { id: { type: "string" } }, type: "object" },
       description: "Finds an item.",
       title: "Lookup",
       name: "lookup",
