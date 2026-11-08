@@ -13,6 +13,9 @@
 // - URL servers run against local HTTP test servers (fixtures/mcp-http-test-server.ts) on loopback http, which the
 //   rules allow; TLS and real third-party OAuth providers are not driven. DPoP proofs are checked by the test server's
 //   own verifier (self-checked in fixtures/mcp-http-test-server.test.ts), not by a production authorization server.
+// - Redirects are driven for the MCP POST requests and the OAuth requests. The optional GET stream is not asserted (the
+//   SDK ignores its failure and the connection stays up), and the session-termination DELETE is not driven: the HTTP
+//   test server is stateless and opens no session. Both go through the same SDK redirect handling as the POST.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
