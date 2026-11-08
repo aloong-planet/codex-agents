@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -702,19 +702,52 @@ it("protects main-owned state and configuration under broad grants and rechecks 
       scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
     await send("om_private_boundary", "读取第一个 Boundary 文件并发回", copyAndSend("private-result.txt"), true);
     const personal = await running.until((s) => s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
-    expect(personal.feishuFixtureMediaOutbox).toEqual([expect.objectContaining({ chatId: "oc_private", bytesBase64: Buffer.from("PRIVATE_STATE_SENTINEL").toString("base64") })]);
+    // The owner's private chat is held to the same boundary: the state, Codex home and both configuration files sort
+    // before Boundary Z.md, so the first readable Boundary file is the business one.
+    expect(personal.feishuFixtureMediaOutbox).toEqual([expect.objectContaining({ chatId: "oc_private", bytesBase64: Buffer.from("PUBLIC_BUSINESS_SENTINEL").toString("base64") })]);
     await send("om_group_boundary", "读取第一个 Boundary 文件并发回", copyAndSend("group-result.txt"));
     const group = await running.until((s) => s.feishuFixtureMediaOutbox?.length === 2 && s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
     expect(group.feishuFixtureMediaOutbox?.[1]).toMatchObject({ chatId: "oc_alpha", bytesBase64: Buffer.from("PUBLIC_BUSINESS_SENTINEL").toString("base64") });
-    for (const [index, relativePath] of ["state/blocked.md", "owner-home/blocked.md", "Boundary C.json", "Boundary D.json"].entries()) {
-      await send(`om_protected_write${index}`, "尝试写入受保护位置并返回结果", [
-        { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath, content: "blocked", overwrite: false } },
-        { namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: `denied-${index}.txt`, content: result(0, ["error", "code"]), overwrite: false } },
-        { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [result(1, ["fileRef"])] } },
-      ]);
-      const denied = await running.until((s) => s.feishuFixtureMediaOutbox?.length === 3 + index && s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
-      expect(denied.feishuFixtureMediaOutbox?.at(-1)).toMatchObject({ chatId: "oc_alpha", bytesBase64: Buffer.from("local_file_permission_denied").toString("base64") });
+    const groupRuntimes = readdirSync(join(directory, "group-model-runtimes")).filter((name) => name.startsWith("feishu.group."));
+    expect(groupRuntimes).toHaveLength(1);
+    const runtimeRoot = join(directory, "group-model-runtimes", groupRuntimes[0]!), skillRoots = [["workspace", ".agents", "skills"], ["codex-home", "skills"], ["home", ".agents", "skills"]];
+    const protectedTargets = [...skillRoots.map((parts) => ["state", "group-model-runtimes", groupRuntimes[0]!, ...parts, "planted", "SKILL.md"].join("/")),
+      "state/state.json", "owner-home/blocked.md", "Boundary C.json", "Boundary D.json"];
+    const stateFile = join(directory, "state.json"), stateBefore = existsSync(stateFile) ? readFileSync(stateFile) : undefined;
+    const protectedWrites = (chat: string) => [
+      ...protectedTargets.map((relativePath) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath, content: "planted", overwrite: false } })),
+      ...protectedTargets.map((_, index) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" },
+        relativePath: `denied-${chat}-${index}.txt`, content: result(index, ["error", "code"]), overwrite: false } })),
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: protectedTargets.map((_, index) => result(protectedTargets.length + index, ["fileRef"])) } },
+    ];
+    // The Weixin entry, as the project's Weixin regressions require: the same copy and the same protected writes.
+    const weixinTurns: unknown[] = [];
+    for (const [text, calls, sentNames] of [
+      ["读取第一个 Boundary 文件并发回", copyAndSend("wx-private-result.txt"), ["wx-private-result.txt"]],
+      ["尝试写入受保护位置并返回结果", protectedWrites("weixin"), protectedTargets.map((_, index) => `denied-weixin-${index}.txt`)],
+    ] as const) {
+      const before = await running.state();
+      await running.post("/api/fixture/workflow/inbound", { text, modelToolCalls: calls });
+      const after = await running.until((s) => (s.weixinFixtureReplies?.length ?? 0) > (before.weixinFixtureReplies?.length ?? 0) &&
+        (s.fixtureOutbox?.length ?? 0) === (before.fixtureOutbox?.length ?? 0) + sentNames.length);
+      expect(after.weixinFixtureReplies?.at(-1)?.message).toBe("文件已发送，请查收。");
+      expect(after.fixtureOutbox!.slice(before.fixtureOutbox?.length ?? 0).map((item) => item.fileName)).toEqual(sentNames);
+      const runs = after.workflows!.runs.filter((run) => !before.workflows?.runs.some((earlier) => earlier.runRef === run.runRef));
+      expect(runs.map((run) => ({ workflowId: run.workflowId, status: run.status }))).toEqual([{ workflowId: "weixin.send-files", status: "succeeded" }]);
+      weixinTurns.push({ command: text, reply: after.weixinFixtureReplies?.at(-1)?.message, run: runs[0], outbox: after.fixtureOutbox!.slice(before.fixtureOutbox?.length ?? 0) });
     }
+    expect(readFileSync(join(vault, "wx-private-result.txt"), "utf8")).toBe("PUBLIC_BUSINESS_SENTINEL");
+    for (const [index] of protectedTargets.entries()) expect(readFileSync(join(vault, `denied-weixin-${index}.txt`), "utf8")).toBe("local_file_permission_denied");
+    for (const [chat, privateChat] of [["private", true], ["group", false]] as const) {
+      const before = (await running.state()).feishuFixtureMediaOutbox?.length ?? 0;
+      await send(`om_protected_${chat}`, "尝试写入受保护位置并返回结果", protectedWrites(chat), privateChat);
+      const denied = await running.until((s) => s.feishuFixtureMediaOutbox?.length === before + protectedTargets.length && s.feishuFixtureTextOutbox?.at(-1)?.message === "文件已发送，请查收。");
+      const sent = denied.feishuFixtureMediaOutbox!.slice(before);
+      expect(sent).toHaveLength(7);
+      for (const item of sent) expect(item).toMatchObject({ chatId: privateChat ? "oc_private" : "oc_alpha", bytesBase64: Buffer.from("local_file_permission_denied").toString("base64") });
+    }
+    for (const parts of skillRoots) expect(existsSync(join(runtimeRoot, ...parts, "planted")), parts.join("/")).toBe(false);
+    expect(existsSync(stateFile) ? readFileSync(stateFile) : undefined).toEqual(stateBefore);
     await send("om_pending_boundary", "列出 Candidate 文件让我选", [find("Candidate"),
       { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
         candidateRefs: [result(0, ["entries", 0, "fileRef"]), result(0, ["entries", 1, "fileRef"])] } },
@@ -729,7 +762,7 @@ it("protects main-owned state and configuration under broad grants and rechecks 
       s.feishuFixtureTextOutbox?.at(-1)?.message === "文件发送失败，请稍后重试。");
     expect(denied.workflows?.runs.find((run) => run.runRef === pending.runRef)).toMatchObject({ status: "failed", errorCode: "local_file_permission_denied", effects: [] });
     expect(denied.feishuFixtureMediaOutbox).toEqual([]);
-    console.log(JSON.stringify({ kind: "feishu_group_protected_main", commands: ["private Boundary read/send", "group Boundary read/send", "protected writes", "Candidate choice", "restart with newly protected home", "1"],
+    console.log(JSON.stringify({ kind: "feishu_group_protected_main", weixinTurns, commands: ["private Boundary read/send", "group Boundary read/send", "weixin Boundary read/send", "weixin protected writes", "private protected writes", "group protected writes", "Candidate choice", "restart with newly protected home", "1"],
       initialOutbox: waiting.feishuFixtureMediaOutbox, pending, transcript: denied.codex.transcript, workflows: denied.workflows?.runs, outbox: denied.feishuFixtureMediaOutbox }));
   } finally { await running?.close(); rmSync(business, { recursive: true, force: true }); }
 }, 60000);

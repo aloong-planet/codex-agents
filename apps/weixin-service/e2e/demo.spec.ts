@@ -181,7 +181,7 @@ async function fixtureNotesDirectory(page: Page): Promise<string> {
     const state = await (await fetch("/api/state")).json();
     return state.workflowModulePermissions.modules.find((module: { moduleId: string }) => module.moduleId === "notes")?.scopes[0]?.directory;
   });
-  const ownedDirectory = process.env.WORKFLOW_FIXTURE_STATE_DIRECTORY;
+  const ownedDirectory = process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY;
   if (typeof directory !== "string" || !ownedDirectory || path.basename(directory) !== "demo-vault" ||
       fs.realpathSync(path.dirname(directory)) !== fs.realpathSync(ownedDirectory)) {
     throw new Error("refusing to modify a non-fixture vault");

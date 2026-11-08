@@ -13,6 +13,7 @@ import { NOTES_SEND_FILE_WORKFLOW } from "../src/workflow-notes-send-intent.js";
 import { renderWorkflowRun } from "../src/weixin-workflow-trigger-adapter.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
 import type { SendTextResult } from "../src/demo-service.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 // Historical bootstrap protocol: 24efdc4 workflow-files-provider.ts LOCATE and
 // the retained NOTES_SEND_FILE_WORKFLOW. This generates a real frozen plan via
@@ -127,7 +128,7 @@ async function createLegacyFixture(sendResult: SendTextResult = { ok: true }) {
     reconcile: async () => ({ status: "unknown" }),
   }, files, undefined, {
     snapshotLegacyFile: async (accountId, input) => {
-      const localFiles = new LocalFileTools(permissions, { moduleIds: ["notes"], spoolDirectory: path.join(artifactRoot, "snapshots"), operationDatabasePath: path.join(root, "operations.sqlite") });
+      const localFiles = new LocalFileTools(permissions, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(artifactRoot, "snapshots"), operationDatabasePath: path.join(root, "operations.sqlite") });
       try { return await localFiles.snapshotLegacyFile(accountId, input); } finally { await localFiles.close(); }
     },
   });

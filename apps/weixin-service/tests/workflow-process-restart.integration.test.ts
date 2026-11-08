@@ -203,6 +203,8 @@ function reply(state: State): string | undefined {
 
 async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; liveMain?: boolean; seedMemory?: boolean; legacy?: "accepted" | "running" } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-process-restart-"));
+  // Business files live outside the protected state directory, as in production.
+  const business = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-process-restart-business-"));
   if (options.legacy === "running") await seedCrashedResolver(directory);
   if (options.legacy === "accepted") {
     // Historical accepted-before-plan boundary via the public Engine API; no SQL state injection.
@@ -274,7 +276,7 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
         env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port),
           FIXTURE_GATE_OPERATION: generation === 1 ? options.gate : undefined,
           WORKFLOW_SIMULATOR_MODEL: options.liveMain ? "live" : "fixture", WORKFLOW_SIMULATOR_PENDING_ROUTER: liveRouter ? "live" : "fixture",
-          WORKFLOW_FIXTURE_STATE_DIRECTORY: directory },
+          WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business },
       });
       child.on("message", (message) => {
         if (message && typeof message === "object" && "kind" in message && message.kind === "sandbox-held") gateHeld = true;
@@ -294,7 +296,7 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
     release: () => { if (child?.connected) child.send("release-sandbox"); },
     waitHeld: () => expect.poll(() => gateHeld, { timeout: 10_000 }).toBe(true),
     alpha: () => {
-      const matches = fs.readdirSync(directory, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name === "Agent Alpha.md");
+      const matches = fs.readdirSync(business, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name === "Agent Alpha.md");
       expect(matches).toHaveLength(1);
       return fs.readFileSync(path.join(matches[0]!.parentPath, matches[0]!.name), "utf8");
     },

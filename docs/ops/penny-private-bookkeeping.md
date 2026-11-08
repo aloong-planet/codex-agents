@@ -38,7 +38,7 @@ Penny's receiver binds loopback only. Add a separate exact public route, for exa
 
 Configure encrypted event delivery for Penny, using its own token/key and `im.message.receive_v1`. Verify the callback challenge, then actual signed private messages. Penny validates the application and authenticated header tenant, then the configured owner and private chat before extracting media or invoking the model. Plaintext financial callbacks are not accepted.
 
-Financial records, pending previews, private turn history, callback state, delivery outcomes and downloaded images live beneath `penny/` in the existing protected private state directory. Group file tools also exclude `PENNY_CONFIG_PATH` when it is outside that directory. Keep private backups; do not attach raw state or source images to public issue/PR reports.
+Financial records, pending previews, private turn history, callback state, delivery outcomes and downloaded images live beneath `penny/` in the existing protected private state directory. File tools, in private chats as well as groups, also exclude `PENNY_CONFIG_PATH` when it is outside that directory. Keep private backups; do not attach raw state or source images to public issue/PR reports.
 
 ## Owner acceptance
 

@@ -9,6 +9,7 @@ import { DiagnosticFiles } from "../src/diagnostic-files.js";
 import { LocalDiagnostics } from "../src/local-diagnostics.js";
 import { readDiagnostics } from "../src/read-diagnostics.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 const transport = vi.hoisted(() => ({
   exited: new Set<number>(), mustExitBeforeNext: 0, startedBeforeExit: false,
@@ -70,7 +71,7 @@ beforeEach(() => {
 function fixture(options: Partial<ConstructorParameters<typeof LocalFileTools>[1]> = {}, revision = () => 1) {
   const tools = new LocalFileTools({ get: () => ({ moduleId: "files", revision: revision(), saved: true,
     scopes: ["large", "small"].map((name) => ({ scopeId: name, label: name, directory: path.join(root, name), read: true, write: false })),
-  }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, `spool-${crypto.randomUUID()}`), ...options });
+  }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, `spool-${crypto.randomUUID()}`), ...options });
   const turns = ["weixin", "feishu"].map((channel) => ({ eventKey: crypto.randomUUID(), accountId: "owner", target: channel,
     occurredAt: Date.now(), originalTextRef: "synthetic", attachmentRefs: [] }));
   const bindings = turns.map((turn) => tools.bindTurn(turn));

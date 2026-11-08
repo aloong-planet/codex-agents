@@ -11,6 +11,7 @@ import { CodexConversation } from "../src/codex-conversation.js";
 import { FixtureAppServerTransport } from "../src/fixture-app-server-transport.js";
 import { WorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost } from "../src/workflow-tool-host.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 // Public protocol/tool boundaries; real host bindings with a deterministic resource
 // executor. Phone delivery and real-model semantics are separate acceptance checks.
@@ -85,7 +86,7 @@ describe("request resources across model recovery", () => {
     permissions.save({ moduleId: "files", expectedRevision: 0, confirmed: true,
       scopes: [{ scopeId: "root", label: "Files", directory: vault, read: true, write: false }] });
     let clock = 0, reads = 0, fileRef = "", connections = 0;
-    const local = new LocalFileTools(permissions, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool"), now: () => clock });
+    const local = new LocalFileTools(permissions, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), now: () => clock });
     const artifacts = new WorkflowFileArtifactStore(path.join(root, "artifacts"), permissions);
     const host = new WorkflowToolHost(createProductionWorkflowToolCatalog({ files: false, media: false, directFiles: true }),
       { submit: async () => { throw new Error("no terminal expected"); } }, {
