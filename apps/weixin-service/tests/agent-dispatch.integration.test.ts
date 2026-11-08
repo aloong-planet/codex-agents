@@ -182,7 +182,7 @@ it("routes an explicit request to its team, whose Team Leader starts, delegates 
     for (const [index, request] of requests.entries()) {
       const [plan, close] = [result.fixtureLeaderRequests![index * 2]!, result.fixtureLeaderRequests![index * 2 + 1]!];
       expect(plan.input.brief).toEqual({ message: request.text, summary: request.summary });
-      expect(close.input.assignments).toEqual([{ title: request.title, executor: `执行者 ${index + 1}`, status: "completed", result: request.reply }]);
+      expect(close.input.assignments).toEqual([{ position: 1, title: request.title, executor: `执行者 ${index + 1}`, status: "completed", result: request.reply, dependsOn: [] }]);
     }
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);

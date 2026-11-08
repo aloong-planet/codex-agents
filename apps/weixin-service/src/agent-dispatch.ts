@@ -559,7 +559,7 @@ export class AgentDispatch {
    * interrupted, cancelled while the request goes on, or itself not started). Callers run it in the transaction that records the end.
    */
   private blockDependents(requestId: string): void {
-    const assignments = this.assignments(requestId), view = assignments;
+    const assignments = this.assignments(requestId), view = this.leaderView(requestId);
     const unmet = (assignment: DispatchAssignment) => (assignment.dependsOn ?? []).filter((id) => {
       const status = assignments.find((other) => other.id === id)?.status;
       return status !== undefined && status !== "completed" && ENDED.includes(status);
