@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 /** What the platform said about one send: accepted, rejected, or an outcome that is not known. */
-export type AnnouncementSend = (announcement: Readonly<{ chatId: string; text: string }>) => Promise<"accepted" | "rejected" | "unknown">;
+export type AnnouncementSend = (announcement: Readonly<{ id: number; chatId: string; text: string }>) => Promise<"accepted" | "rejected" | "unknown">;
 /**
  * A Coordinator announcement of a team joining or leaving a group, with its own delivery state: pending until sent, then
  * accepted, failed (rejected) or unknown. A state other than pending is final; nothing is resent automatically.
@@ -45,7 +45,7 @@ export class TeamAnnouncements {
         this.database.prepare("UPDATE team_announcement SET state = 'sending' WHERE id = ?").run(id);
         let state: TeamAnnouncement["state"];
         try {
-          const outcome = await send({ chatId: String(row.chat_id), text: String(row.text) });
+          const outcome = await send({ id, chatId: String(row.chat_id), text: String(row.text) });
           state = outcome === "accepted" ? "accepted" : outcome === "rejected" ? "failed" : "unknown";
         } catch { state = "unknown"; }
         this.database.prepare("UPDATE team_announcement SET state = ? WHERE id = ?").run(state, id);

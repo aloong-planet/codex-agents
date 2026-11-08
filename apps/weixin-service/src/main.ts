@@ -78,7 +78,11 @@ import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch
 import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
-import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
+import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
+import { TeamManagement } from "./team-management.js";
+import { TeamAnnouncements } from "./team-announcements.js";
+import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
+import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultPlan } from "./fixture-team-leader.js";
 import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
@@ -203,17 +207,39 @@ const workflowToolCatalog = createProductionWorkflowToolCatalog({
   delivery: true,
   schedules: true,
 });
-// Every reader of the dispatch roster takes it from the team registry; local `feishu.dispatch` only feeds the registry's import.
-// Dispatch turns resolve their profiles from the definitions version current at startup; nothing saves versions at runtime yet.
-let teamDefinitions: DefinitionsVersion | undefined;
+// Every reader of the dispatch roster takes it from the team registry; local `feishu.dispatch` only feeds the registry's import
+// until the first console save. Team management keeps the registry open, applies console saves and onboarding while the service
+// runs, and every dispatch reader takes the current definitions from it (team-management spec; ticket 11, decision D5).
+const consoleStateDirectory = path.dirname(privateStatePath);
+const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
+// In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
+const fixtureOnboarding = fixtureMode ? new FixtureOnboardingPlatform() : undefined;
+if (process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixtureOnboarding.configure(JSON.parse(process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING));
+let teamManagement: TeamManagement | undefined;
+// Set once the dispatch applications exist; a roster change before that has nothing to start.
+let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () => {};
+let countActiveAssignments: (teamId: string) => number = () => 0;
 const feishuConfiguration = (() => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
   if (!entry?.dispatch) return entry;
   const registry = new TeamRegistry(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
   try {
-    teamDefinitions = registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
-    return Object.freeze({ ...entry, dispatch: registry.roster(entry.connection) });
-  } finally { registry.close(); }
+    registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
+    const management = new TeamManagement({ registry, coordinator: entry.connection,
+      platform: fixtureOnboarding ?? new FeishuHttpOnboardingPlatform(),
+      announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
+      audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(),
+      moduleScopes: () => ["notes", "local-media"].flatMap((moduleId) => {
+        const state = workflowModulePermissions.get(moduleId);
+        return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
+      }),
+      activeAssignments: (teamId) => countActiveAssignments(teamId),
+      rosterChanged: (roster) => applyRoster(roster),
+      report: (code) => process.stderr.write(`${code}\n`) });
+    teamManagement = management;
+    return Object.freeze({ ...entry, dispatch: management.roster() });
+  } catch (error) { registry.close(); throw error; }
 })();
 const directChannel = fixtureMode || !weixinConfiguration
   ? undefined
@@ -244,14 +270,29 @@ const feishuChannel = feishuConfiguration
   ? new FeishuChannel(feishuConfiguration, feishuTransport!,
       durableInboundStore, durableEffectLedger, (code) => process.stderr.write(`${code}\n`), Date.now, feishuInboundMedia)
   : undefined;
-const dispatchApplications = new Map((feishuConfiguration?.dispatch?.agents.filter(({ id }) => id !== COORDINATOR_ID) ?? []).map((agent) => {
-  const transport = fixtureMode ? new FixtureFeishuTransport(false, `ou_fixture${agent.id}`)
-    : new FeishuSdkTransport({ appId: agent.appId, appSecret: agent.appSecret, mode: "outbound" });
-  const application = { agentId: agent.id, transport, ready: false };
-  return [agent.appId, application] as const;
-}));
-fixtureFeishu?.bindApplications(new Map([...dispatchApplications.values()].flatMap(({ agentId, transport }) =>
-  transport instanceof FixtureFeishuTransport ? [[agentId, transport]] : [])));
+type DispatchApplication = { agentId: string; appSecret: string; transport: FeishuSdkTransport | FixtureFeishuTransport; ready: boolean };
+// One outbound application per Team Leader, keyed by App ID. A team saved while the service runs gets one through applyRoster.
+const createDispatchApplication = (agent: Readonly<{ id: string; appId: string; appSecret: string }>): DispatchApplication => ({ agentId: agent.id, appSecret: agent.appSecret,
+  transport: fixtureMode ? new FixtureFeishuTransport(false, `ou_fixture${agent.id.replace(/[^A-Za-z0-9]/g, "")}`)
+    : new FeishuSdkTransport({ appId: agent.appId, appSecret: agent.appSecret, mode: "outbound" }), ready: false });
+const dispatchApplications = new Map((feishuConfiguration?.dispatch?.agents.filter(({ id }) => id !== COORDINATOR_ID) ?? [])
+  .map((agent) => [agent.appId, createDispatchApplication(agent)] as const));
+// Fixture inputs address Team Leader applications, Sam's own and Penny's by agent ID.
+const fixtureExtraApplications: Array<readonly [string, FixtureFeishuTransport]> = [];
+const bindFixtureApplications = () => fixtureFeishu?.bindApplications(new Map([
+  ...[...dispatchApplications.values()].flatMap(({ agentId, transport }) => transport instanceof FixtureFeishuTransport ? [[agentId, transport] as const] : []),
+  ...(fixtureFeishu ? [[COORDINATOR_ID, fixtureFeishu] as const] : []), ...fixtureExtraApplications]));
+bindFixtureApplications();
+if (fixtureFeishu && fixtureOnboarding) fixtureFeishu.bindOnboarding(fixtureOnboarding);
+/** Starts a Team Leader's outbound application and confirms its bot identity; it posts only once ready. */
+const startDispatchApplication = async (application: DispatchApplication): Promise<void> => {
+  try {
+    await application.transport.start({ message: async () => {}, ready: () => { application.ready = true; }, unavailable: () => { application.ready = false; } });
+    const botId = await application.transport.botOpenId();
+    if (!botId || !/^ou_[A-Za-z0-9]+$/.test(botId)) throw new Error("agent_identity_unavailable");
+    application.ready = true;
+  } catch { application.ready = false; process.stderr.write("dispatch_application_unavailable\n"); }
+};
 const activeChannels = [
   ...(channelPort ? [{ name: "weixin" as const, port: channelPort, owner: weixinConfiguration?.owner }] : []),
   ...(feishuChannel ? [{ name: "feishu" as const, port: feishuChannel, owner: feishuConfiguration!.owner }] : []),
@@ -361,17 +402,19 @@ const weixinMediaDelivery = directChannel ? ((): MediaDeliveryPort => {
     reconcile: (operationId) => delivery.reconcile(operationId),
   };
 })() : undefined;
-const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().flatMap((address) => {
-  const destinations = [address, ...(feishuChannel!.usesAgentDispatch(address.target) ? feishuConfiguration.dispatch!.agents.map(({ appId }) => ({ ...address, senderAccountId: appId })) : [])];
-  return destinations.map((destination: import("./media-delivery.js").MediaDeliveryDestination) => ({
-    destination,
-    delivery: new FeishuMediaDelivery(feishuConfiguration, destination.senderAccountId && destination.senderAccountId !== feishuConfiguration.connection.appId
-      ? dispatchApplications.get(destination.senderAccountId)!.transport : feishuTransport, durableEffectLedger,
-    [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
-      feishuInboundMedia!.readableRoot(feishuConfiguration.owner.deliveryTarget(destination.accountId, destination.target)!)],
-    () => startedChannels.has("feishu") && feishuChannel!.state({ ...destination, channel: "feishu" }).enabled, destination),
-  }));
-}) : [];
+// One media route per conversation and sending identity; a Team Leader saved while the service runs adds its own routes.
+const feishuMediaRoute = (destination: import("./media-delivery.js").MediaDeliveryDestination) => ({
+  destination,
+  delivery: new FeishuMediaDelivery(feishuConfiguration!, destination.senderAccountId && destination.senderAccountId !== feishuConfiguration!.connection.appId
+    ? dispatchApplications.get(destination.senderAccountId)!.transport : feishuTransport!, durableEffectLedger,
+  [path.join(workflowMediaArtifactRoot, "snapshots"), path.join(workflowFileArtifactRoot, "snapshots"),
+    feishuInboundMedia!.readableRoot(feishuConfiguration!.owner.deliveryTarget(destination.accountId, destination.target)!)],
+  () => startedChannels.has("feishu") && feishuChannel!.state({ ...destination, channel: "feishu" }).enabled, destination),
+});
+const dispatchConversations = () => feishuConfiguration?.owner.conversationAddresses().filter(({ target }) => feishuChannel!.usesAgentDispatch(target)) ?? [];
+const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfiguration.owner.conversationAddresses().flatMap((address) => [address,
+  ...(feishuChannel!.usesAgentDispatch(address.target) ? feishuConfiguration.dispatch!.agents.map(({ appId }) => ({ ...address, senderAccountId: appId })) : [])]
+  .map(feishuMediaRoute)) : [];
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
   protectedRoots: serviceProtectedRoots(process.env, os.homedir(), path.dirname(privateStatePath), diagnosticDirectory),
   ...(fixtureMode && process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT
@@ -870,7 +913,9 @@ const codexService = conversationRouter ? new ConversationService(
 let fixtureLeaderRequests: FixtureTeamLeader["requests"] | undefined;
 const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const configuration = feishuConfiguration, channel = feishuChannel;
-  const agents = configuration.dispatch!.agents.map(({ id, name, responsibility, appId }) => ({ id, name, responsibility, senderAccountId: appId }));
+  const teams = teamManagement!;
+  // The Coordinator and the Team Leaders with a sending application under the current definitions, read on every use.
+  const agents = () => teams.roster().agents.map(({ id, name, responsibility, appId }) => ({ id, name, responsibility, senderAccountId: appId }));
   const authorized = (event: import("./channel-contract.js").InboundContent) => channel.usesAgentDispatch(event.target) &&
     configuration.owner.accepts(event) && codexService.getPublicState().enabledTargets.some(({ accountId, target }) => accountId === event.accountId && target === event.target);
   const model = () => {
@@ -878,15 +923,14 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     if (!selected?.available) throw new Error("dispatch_model_unavailable");
     return { model: selected.model, effort: selected.effort };
   };
-  const definitions = teamDefinitions!.definitions, catalogToolIds = workflowToolCatalog.memberIds();
+  const catalogToolIds = workflowToolCatalog.memberIds();
   // A request keeps the definitions version it was first planned under; versions are immutable, so each is read once.
-  const versions = new Map<number, TeamDefinitions>([[teamDefinitions!.version, definitions]]);
+  const versions = new Map<number, TeamDefinitions>();
   const definitionsFor = (version: number | undefined): TeamDefinitions => {
-    if (version === undefined) return definitions;
+    if (version === undefined) return teams.current().definitions;
     let found = versions.get(version);
     if (!found) {
-      const registry = new TeamRegistry(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
-      try { found = registry.version(version)?.definitions; } finally { registry.close(); }
+      found = teams.version(version)?.definitions;
       if (!found) throw new Error("dispatch_definitions_unavailable");
       versions.set(version, found);
     }
@@ -899,7 +943,9 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     accountMemory.registerAccount(account);
     return account;
   };
-  const coordinatorProfile = resolveAgentProfile(definitions, { role: "coordinator" }, catalogToolIds);
+  const coordinatorProfile = resolveAgentProfile(teams.current().definitions, { role: "coordinator" }, catalogToolIds);
+  // Sam's instructions can change from the console; each Coordinator turn takes the current ones (team-management::REQ-001/AC-01).
+  const coordinatorInstructions = () => resolveAgentProfile(teams.current().definitions, { role: "coordinator" }, catalogToolIds).instructions;
   const memory = {
     recall: (scope: AgentMemoryScope, event: import("./channel-contract.js").InboundContent, query: string) => accountMemory.recall(memoryAccount(scope, event), query),
     capture: async (scope: AgentMemoryScope, turn: import("./agent-dispatch.js").DispatchMemoryTurn) => {
@@ -909,13 +955,22 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         assistantEntry: { id: turn.assistantId, text: turn.assistantText, createdAt: Date.now(), status: "completed" } });
     },
   };
-  // Building a profile's tool view compiles its tool schemas (about 50 ms), so one view is kept per distinct tool set.
+  // Building a profile's tool view compiles its tool schemas (about 50 ms), so one view is kept per tool set and profile.
+  // Each call is also checked against the profile's current allowlist, so a removed tool is refused at once in running
+  // requests, and the refusal is audited (agent-dispatch::REQ-017/AC-02).
   const toolViews = new Map<string, ProfileToolHost>();
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob, assignment: import("./agent-dispatch-types.js").DispatchAssignment) => {
-    const resolved = resolveAgentProfile(definitionsFor(job.definitionsVersion), { role: "executor", teamId: assignment.teamId, profileId: assignment.profileId }, catalogToolIds);
-    const key = JSON.stringify(resolved.hostTools);
+    const agent = { role: "executor", teamId: assignment.teamId, profileId: assignment.profileId } as const;
+    const resolved = resolveAgentProfile(definitionsFor(job.definitionsVersion), agent, catalogToolIds);
+    const key = JSON.stringify([resolved.hostTools, assignment.teamId, assignment.profileId]);
     let tools = toolViews.get(key);
-    if (!tools) { tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools); toolViews.set(key, tools); }
+    if (!tools) {
+      tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools, {
+        current: () => { try { return resolveAgentProfile(teams.current().definitions, agent, catalogToolIds).hostTools; } catch { return undefined; } },
+        refused: (tool) => consoleAudit.tryAppend({ by: "service", event: "host_tool_refused", team: assignment.teamId, profile: assignment.profileId, tool }),
+      });
+      toolViews.set(key, tools);
+    }
     return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
@@ -930,7 +985,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       // The runtime's tools come from the resolved profile, which never gives the Coordinator business tools (agent-dispatch::CON-003).
       const coordinatorTools = coordinatorProfile.hostTools.length ? new ProfileToolHost(workflowToolHost, workflowToolCatalog, coordinatorProfile.hostTools) : undefined;
       const create = () => isolatedConversation("dispatchCoordinator", {}, coordinatorTools);
-      return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorProfile.instructions,
+      return new CodexDispatchClassifier((work) => runtimes.use("dispatch-coordinator", create, ({ agent, cwd }) => work(agent, cwd)), model, coordinatorInstructions,
         fixtureCoordinationRuntime ? (input, threadId) => answer(threadId, JSON.stringify(fixtureFeishu!.dispatchDecision(input.event.messageId))) : undefined);
     })();
   // Team Leader turns are tool-free; each turn holds its pool slot only for itself (agent-dispatch::QR-001/AC-02).
@@ -950,7 +1005,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     if (!team) return undefined;
     const { instructions, memoryScope } = resolveAgentProfile(versionDefinitions, { role: "leader", teamId }, catalogToolIds);
     return { leader: { id: team.id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions },
-      profiles: team.executorProfiles.map(({ id, name }) => ({ id, name })), memoryScope };
+      profiles: team.executorProfiles.map(({ id, name, noun }) => ({ id, name, ...(noun ? { noun } : {}) })), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
     agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
@@ -988,11 +1043,11 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Before any dispatch work can start an Executor runtime (agent-dispatch::QR-002/AC-02).
   executor.compactHomes();
   const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized, leader,
-    definitionsVersion: () => teamDefinitions!.version, team: teamView, revision: contextRevision,
+    definitionsVersion: () => teams.current().version, team: teamView, revision: contextRevision,
     // The current definitions decide which teams take work in a group, whatever version a request was planned under.
     roster: (event) => {
       const chatId = configuration.owner.deliveryTarget(event.accountId, event.target);
-      return chatId ? acceptingTeams(definitions, chatId) : [];
+      return chatId ? acceptingTeams(teams.current().definitions, chatId) : [];
     },
     bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory, memoryScope: coordinatorProfile.memoryScope,
     completedWork: (job) => {
@@ -1030,7 +1085,27 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
     },
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
-  channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])));
+  channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
+    () => teams.roster().agents);
+  countActiveAssignments = (teamId) => dispatch.getState().jobs.flatMap(({ assignments }) => assignments)
+    .filter((assignment) => assignment.teamId === teamId && ["queued", "running", "waiting"].includes(assignment.status)).length;
+  // A roster change from a console save or onboarding: a new or re-secreted application gets its own outbound transport, media
+  // routes and channel sender at once, started when the Feishu channel already runs (ticket 11, decision D5).
+  const mediaRouter = selectedMediaDelivery instanceof MediaDeliveryRouter ? selectedMediaDelivery : undefined;
+  applyRoster = (roster) => {
+    for (const agent of roster.agents) {
+      if (agent.id === COORDINATOR_ID) continue;
+      const known = dispatchApplications.get(agent.appId);
+      if (known && known.appSecret === agent.appSecret) continue;
+      if (known) void Promise.resolve(known.transport.close()).catch(() => {});
+      const application = createDispatchApplication(agent);
+      dispatchApplications.set(agent.appId, application);
+      channel.setAgentSender(agent.appId, { transport: application.transport, ready: () => application.ready });
+      if (!known) for (const address of dispatchConversations()) mediaRouter?.add(feishuMediaRoute({ ...address, senderAccountId: agent.appId }));
+      bindFixtureApplications();
+      if (startedChannels.has("feishu")) void startDispatchApplication(application);
+    }
+  };
   fixtureLeaderRequests = fixtureLeader?.requests;
   return dispatch;
 })() : undefined;
@@ -1112,10 +1187,7 @@ if (pennyConfigured) {
     transport = new FeishuWebhookTransport(outbound, new FeishuWebhookReceiver({ ...configuration.webhook, appId: configuration.appId,
       tenantKey: configuration.tenantKey, databasePath: path.join(root, "callbacks.sqlite") }, () => { pennyError = "penny_callback_unavailable"; }));
     penny = new FinanceService({ root, config: configuration, transport, interpreter });
-    if (fixtureFeishu && pennyFixture) fixtureFeishu.bindApplications(new Map([
-      ...[...dispatchApplications.values()].flatMap(({ agentId, transport }) => transport instanceof FixtureFeishuTransport ? [[agentId, transport] as const] : []),
-      ["penny", pennyFixture],
-    ]));
+    if (pennyFixture) { fixtureExtraApplications.push(["penny", pennyFixture]); bindFixtureApplications(); }
   } catch {
     pennyError = "penny_configuration_unavailable";
     await settleCleanup([() => transport?.close(), () => interpreter?.close()]).catch(() => {});
@@ -1124,6 +1196,7 @@ if (pennyConfigured) {
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
   fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
+  ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
     [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
 } : {}) } : {};
@@ -1134,12 +1207,10 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
 // Every page and API of the local service requires an owner-authorized browser (agent-console::CON-001).
-const consoleStateDirectory = path.dirname(privateStatePath);
-const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
 // The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
 const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
-const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog });
+const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}) });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),
@@ -1227,15 +1298,17 @@ const startup = (async () => {
         }
       }
       if (!stopping && name === "feishu" && agentDispatch) {
-        await Promise.all([...dispatchApplications.values()].map(async (application) => {
-          try {
-            await application.transport.start({ message: async () => {}, ready: () => { application.ready = true; }, unavailable: () => { application.ready = false; } });
-            const botId = await application.transport.botOpenId();
-            if (!botId || !/^ou_[A-Za-z0-9]+$/.test(botId)) throw new Error("agent_identity_unavailable");
-            application.ready = true;
-          } catch { application.ready = false; process.stderr.write("dispatch_application_unavailable\n"); }
-        }));
+        await Promise.all([...dispatchApplications.values()].map(startDispatchApplication));
         await agentDispatch.start();
+        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped.
+        teamManagement?.deliverAnnouncementsWith(async ({ id, chatId, text }) => {
+          const address = feishuConfiguration!.owner.conversationAddresses().find(({ accountId, target }) => feishuConfiguration!.owner.deliveryTarget(accountId, target) === chatId);
+          if (!address) return "rejected";
+          const sent = await feishuChannel!.send({ channel: "feishu", accountId: address.accountId, target: address.target, message: text,
+            operationId: `team-announcement:${id}`, beforeSubmit: () => true });
+          return sent.ok ? "accepted" : sent.reason === "unknown" ? "unknown" : "rejected";
+        });
+        void teamManagement?.resume().catch(() => process.stderr.write("team_onboarding_resume_failed\n"));
       }
       if (!stopping) {
         startedChannels.add(name);

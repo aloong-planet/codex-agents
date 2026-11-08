@@ -320,7 +320,8 @@ it("routes and assigns only to teams accepting work in the group, and gives each
         : team.id === "jack" ? { ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" as const }, { chatId: "oc_beta", state: "onboarding" as const }] } : team) },
       { basedOn: seeded.version });
     } finally { registry.close(); }
-    running = await start(directory);
+    // The platform cannot add Jack's bot to oc_beta, so its onboarding there stays incomplete when startup resumes it.
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_beta: { add: "owner_only" } } }) });
     await running.post("/api/fixture/inbound", inBeta(groupMessage("om_beta_jack", "帮我修复代码", decision("jack", "修复代码"))));
     const refused = await running.until((state) => state.fixtureTextOutbox?.length === 1);
     expect(refused.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
@@ -644,7 +645,7 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
     // Session rows as the executor before compaction wrote them: the production class without homes, over a fake App Server conversation.
     const scopes: string[] = [];
     const recorder = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
-      agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_aaaaaaaaaaaaaaaa" }],
+      agents: () => [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_aaaaaaaaaaaaaaaa" }],
       runtimes: new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 1000, close: ({ agent }) => agent.close() }),
       createRuntime: (_job, scope) => { scopes.push(scope); return { agent: conversation(scopes.length === 1 ? "thread-ended" : "thread-recorded"), cwd: join(directory, scope) }; },
       tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },

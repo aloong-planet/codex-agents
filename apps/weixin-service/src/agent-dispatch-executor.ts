@@ -56,7 +56,8 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   private readonly database: DatabaseSync;
   private closing = false;
   constructor(databasePath: string, private readonly options: {
-    agents: readonly DispatchAgent[];
+    /** The Coordinator and every Team Leader with a sending application, as the current definitions have them. */
+    agents(): readonly DispatchAgent[];
     runtimes: RuntimePool<DispatchRuntime>;
     createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost): DispatchRuntime;
     tools: ConversationTurnToolControl;
@@ -80,7 +81,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     this.database.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; CREATE TABLE IF NOT EXISTS agent_session (scope TEXT PRIMARY KEY, thread_id TEXT NOT NULL)");
   }
   async run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<DispatchExecutionResult> {
-    const role = this.options.agents.find(({ id }) => id === job.agentId);
+    const role = this.options.agents().find(({ id }) => id === job.agentId);
     if (!role || role.id === COORDINATOR_ID || role.senderAccountId !== job.senderAccountId) throw new Error("dispatch_role_invalid");
     const revision = this.options.contextRevision(job);
     const eligible = () => !this.closing && !signal.aborted && this.options.authorized(job) && this.options.contextRevision(job) === revision;

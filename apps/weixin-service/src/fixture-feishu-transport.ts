@@ -18,6 +18,7 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
   private applications = new Map<string, FixtureFeishuTransport>();
+  private onboarding: { configure(settings: never): void } | undefined;
   private textOutcomes: Array<"accepted" | "rejected" | "unknown" | "held"> = [];
   private releaseText: (() => void) | undefined;
   private mediaOutcomes: Array<"accepted" | "rejected" | "unknown"> = [];
@@ -40,6 +41,8 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   }
   takeFixtureModelToolCall() { return this.calls.shift(); }
   bindApplications(applications: ReadonlyMap<string, FixtureFeishuTransport>): void { this.applications = new Map(applications); }
+  /** The fake onboarding platform that `onboardingControl` inputs configure (team-management Testing Decisions: Onboarding). */
+  bindOnboarding(platform: { configure(settings: never): void }): void { this.onboarding = platform; }
   dispatchDecision(messageId: string): unknown {
     if (!this.decisions.has(messageId)) throw new Error("fixture_dispatch_decision_missing");
     return structuredClone(this.decisions.get(messageId));
@@ -107,6 +110,12 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
         if (!Array.isArray(control.mediaOutcomes) || control.mediaOutcomes.length > 20 || control.mediaOutcomes.some((item) => !["accepted", "rejected", "unknown"].includes(item))) throw new Error("fixture_send_outcomes_invalid");
         peer.mediaOutcomes = control.mediaOutcomes as Array<"accepted" | "rejected" | "unknown">;
       }
+      return;
+    }
+    if (input.onboardingControl !== undefined) {
+      const control = input.onboardingControl;
+      if (!this.onboarding || !control || typeof control !== "object" || Array.isArray(control)) throw new Error("fixture_onboarding_control_invalid");
+      this.onboarding.configure(control as never);
       return;
     }
     if (input.modelControl !== undefined) {

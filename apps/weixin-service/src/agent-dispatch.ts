@@ -5,7 +5,7 @@ import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutor, DispatchJob, DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
-import { COORDINATOR_ID } from "./team-registry.js";
+import { COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
@@ -17,7 +17,8 @@ type Notice = { event: InboundContent; agentId: string; senderAccountId: string;
   requestId?: string; memory?: { attempt: number; event: InboundContent; text: string } };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
-export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"]; memoryScope: AgentMemoryScope }>;
+/** A team as a request's definitions version has it. A profile's noun names its Executors (`<noun> <n>`); without one they are 执行者. */
+export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: ReadonlyArray<Readonly<{ id: string; name: string; noun?: string }>>; memoryScope: AgentMemoryScope }>;
 /** One turn captured into an agent's memory; `event` names the conversation and is the source of the user entry. */
 export type DispatchMemoryTurn = Readonly<{ event: InboundContent; senderAccountId: string; userId: string; userText: string; assistantId: string; assistantText: string }>;
 const ENDED: ReadonlyArray<DispatchAssignment["status"]> = ["completed", "failed", "cancelled", "interrupted"];
@@ -35,7 +36,11 @@ export class AgentDispatch {
   private readonly workers = new Map<string, { operation: Promise<void>; abort: AbortController }>();
 
   constructor(databasePath: string, private readonly options: {
-    agents: readonly DispatchAgent[];
+    /**
+     * The Coordinator and every Team Leader with a sending application, as the current definitions have them. Read on each
+     * use, so a team saved or onboarded while the service runs is routed to, mentioned and posts without a restart.
+     */
+    agents(): readonly DispatchAgent[];
     classifier: DispatchClassifier;
     leader: TeamLeader;
     executor: DispatchExecutor;
@@ -163,7 +168,7 @@ export class AgentDispatch {
       this.database.prepare("UPDATE dispatch_input SET state = 'classifying' WHERE id = ?").run(event.key);
       // Only teams accepting work in this group can be routed to or named; a mention of another team confers no priority.
       const accepting = new Set(this.options.roster(event).map(({ id }) => id));
-      const agents = this.options.agents.filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
+      const agents = this.options.agents().filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
       const mentioned = event.mentionedAgentIds?.filter((id) => agents.some((agent) => agent.id === id));
       if ((mentioned?.length ?? 0) > 1) {
         await this.coordinate(event, bindingHash, "你点名了多个 Agent。这项事务希望由谁独立负责？");
@@ -179,7 +184,7 @@ export class AgentDispatch {
           if (superseded) { superseded.status = "cancelled"; this.save(superseded); }
         }
         if (pending?.handled) {
-          const agent = this.options.agents.find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
+          const agent = this.options.agents().find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = this.jobs().find((job) => job.runRef === pending.runRef && job.event.target === event.target && job.event.senderId === event.senderId);
           const waiting = original && this.currentAssignment(original);
@@ -207,7 +212,7 @@ export class AgentDispatch {
           const agent = agents.find((candidate) => candidate.id === decision.agentId)!;
           const named = agents.find(({ id }) => id === mentioned?.[0]);
           if (decision.kind === "dispatch" && named && named.id !== COORDINATOR_ID && named.id !== agent.id) {
-            const coordinator = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
+            const coordinator = this.options.agents().find(({ id }) => id === COORDINATOR_ID)!;
             const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 ${coordinator.name} 重新分派，由他独立处理。`;
             // The request's ID is its message key, so these posts belong to the request saved below.
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation, requestId: event.key });
@@ -371,7 +376,7 @@ export class AgentDispatch {
 
   private leaderInput(job: DispatchJob, team: DispatchTeamView, recall = true): LeaderTurnInput {
     const latest = job.executionEvent && job.executionEvent.text !== job.event.text ? { latest: job.executionEvent.text } : {};
-    return { requestId: job.id, leader: team.leader, profiles: team.profiles,
+    return { requestId: job.id, leader: team.leader, profiles: team.profiles.map(({ id, name }) => ({ id, name })),
       brief: { message: job.event.text, ...latest, summary: job.summary },
       // The Team Leader's own memory in this conversation; never the group memory or an Executor's (agent-dispatch::REQ-012/AC-02).
       memory: recall ? this.options.memory.recall(team.memoryScope, job.event, job.executionEvent?.text ?? job.event.text) : "",
@@ -387,7 +392,7 @@ export class AgentDispatch {
     this.transaction(() => {
       const id = `${job.id}:assignment:${job.attempt}`;
       const sequence = Number(this.database.prepare("INSERT INTO dispatch_assignment (id, request_id, payload) VALUES (?, ?, '{}')").run(id, job.id).lastInsertRowid);
-      assignment = { id, requestId: job.id, teamId: job.agentId, profileId: profile.id, profileName: profile.name, executor: `执行者 ${sequence}`,
+      assignment = { id, requestId: job.id, teamId: job.agentId, profileId: profile.id, profileName: profile.name, executor: `${profile.noun || DEFAULT_EXECUTOR_NOUN} ${sequence}`,
         title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt };
       this.saveAssignment(assignment);
     });
@@ -433,7 +438,7 @@ export class AgentDispatch {
 
   /** A Coordinator post; `requestId` names the request it belongs to, if any. */
   private async coordinate(event: InboundContent, bindingHash: string, text: string, requestId?: string) {
-    const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
+    const sam = this.options.agents().find(({ id }) => id === COORDINATOR_ID)!;
     return this.deliverNotice(`${event.key}:coordination`, { event, bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, text,
       ...(requestId ? { requestId } : {}) });
   }
@@ -479,7 +484,7 @@ export class AgentDispatch {
     if (row.state !== "queued") return row.result ? JSON.parse(row.result) as SendTextResult : { ok: false, reason: "unknown", acceptedSegments: 0 };
     notice = JSON.parse(row.payload) as Notice;
     const eligible = () => this.eligible(notice.event, notice.bindingHash) &&
-      this.options.agents.some((agent) => agent.id === notice.agentId && agent.senderAccountId === notice.senderAccountId);
+      this.options.agents().some((agent) => agent.id === notice.agentId && agent.senderAccountId === notice.senderAccountId);
     if (!eligible() || this.closing) {
       this.database.prepare("UPDATE dispatch_notice SET state = 'cancelled' WHERE id = ?").run(id);
       return { ok: false, reason: "unavailable", acceptedSegments: 0 };

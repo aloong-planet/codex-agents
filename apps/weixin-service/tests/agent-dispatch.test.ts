@@ -51,10 +51,11 @@ type Capture = { scope: AgentMemoryScope } & DispatchMemoryTurn;
  */
 function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecutor, deliveries: Array<{ sender: string; message: string; id: string }>,
   options: { roster?: readonly string[]; captures?: Capture[]; rejected?: Set<string>; failingCapture?: AgentMemoryScope["kind"];
-    pending?: (event: InboundContent) => Promise<DispatchPendingResult> } = {}) {
+    pending?: (event: InboundContent) => Promise<DispatchPendingResult>; profile?: { name: string; noun?: string } } = {}) {
   const roster = options.roster ?? accepting;
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
-    agents, leader, executor, definitionsVersion: () => 1, team: (id) => team(id), revision: () => "r1",
+    agents: () => agents, leader, executor, definitionsVersion: () => 1, revision: () => "r1",
+    team: (id) => { const view = team(id); return view && options.profile ? { ...view, profiles: [{ id: "executor-1", ...options.profile }] } : view; },
     roster: () => roster.map((id) => ({ id, name: team(id)!.leader.teamName, responsibility: team(id)!.leader.responsibility })),
     classifier: { classify: async ({ event: inbound }) => {
       const [kind, argument] = inbound.text.split(":");
@@ -105,7 +106,7 @@ it("completes every request when Team Leaders fill the pool and each needs an Ex
     }, ({ agent, cwd }) => work(agent, cwd)),
   });
   const executor = new CodexDispatchExecutor(join(state, "agent-sessions.sqlite"), {
-    agents, runtimes, tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+    agents: () => agents, runtimes, tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
     createRuntime: (_job, scope) => { const agent = conversation(`executor-${executors.length}`); executors.push(agent); return created(agent, scope); },
     profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools: { definitions: () => [], contractHash: () => "contract-1",
       execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
@@ -201,6 +202,20 @@ it("gives a request no new Assignment after a restart once its team no longer ac
   expect(after.map(({ sender, message }) => ({ sender, message }))).toEqual([
     { sender: "cli_alice", message: "负责团队当前不可用，本次未能继续处理。已完成的操作不会自动重复，请补充信息后明确让我重试。" }]);
   hung.reject(new Error("abandoned")); await first.close();
+});
+
+// An Executor is named after its profile's noun plus its number, and the start message names it so (ticket 11, decision D6).
+it("names the Executor after its profile's noun in the Team Leader's start message", async () => {
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const executor: DispatchExecutor = { run: async () => ({ status: "completed", message: "文案已写好" }), close: () => {} };
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, deliveries, { profile: { name: "商品文案", noun: "文案执行者" } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("noun", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+    expect(deliveries[0]).toMatchObject({ sender: "cli_alice", message: "我安排文案执行者 1（商品文案）处理：处理请求。完成后会在本群汇报。" });
+    expect(dispatch.getState().jobs[0]?.assignments.map(({ executor: name, profileId }) => [name, profileId])).toEqual([["文案执行者 1", "executor-1"]]);
+  } finally { await dispatch.close(); }
 });
 
 // The capture of finished requests into the group memory (agent-dispatch::REQ-012/AC-01, AC-04).

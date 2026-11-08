@@ -34,7 +34,7 @@ function executorWith(runtimes: RuntimePool<DispatchRuntime>, conversations: Arr
   const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-")); directories.push(directory);
   const scopes: string[] = [];
   const executor = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
-    agents: [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
+    agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
       { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
     runtimes,
     createRuntime: (_job, scope) => { scopes.push(scope); return { agent: conversations[scopes.length - 1]!, cwd: `/isolated/${scope}` }; },
@@ -113,7 +113,7 @@ it("ends the wait of a cancelled request for a pool slot without starting a runt
 // process exit is a promise the case controls.
 function homeExecutor(runtimes: RuntimePool<DispatchRuntime>, root: string, database: string, createRuntime: (scope: string) => DispatchRuntime, reports: string[]) {
   return new CodexDispatchExecutor(database, {
-    agents: [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
+    agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
       { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
     runtimes, createRuntime: (_job, scope) => createRuntime(scope),
     tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },

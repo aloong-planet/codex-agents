@@ -56,7 +56,7 @@ describe.skipIf(!runsInstalledAppServer)("Executor home compaction on the instal
     const threads: Array<{ saved: string | undefined; started: string }> = [], reports: string[] = [];
     const media = path.join(stateDirectory, "media"); fs.mkdirSync(media, { recursive: true });
     const executor = new CodexDispatchExecutor(path.join(stateDirectory, "agent-sessions.sqlite"), {
-      agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
+      agents: () => [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
       runtimes: new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: closeDispatchRuntime }),
       createRuntime: (created, scope, profileTools) => {
         const home = path.join(stateDirectory, "group-model-runtimes", scope);
