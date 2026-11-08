@@ -8,9 +8,11 @@ export const COORDINATOR_ID = "sam";
 
 /**
  * Seeded Executor instructions by team. Bill's team owns the weather, route, walking, opening-hours and budget-and-schedule
- * rules that every specialist turn carried before profiles; the domain-neutral source rules stay in shared prompt assembly.
+ * rules that every specialist turn carried before profiles; Jack's team owns the code-and-tests example of the goal-scope
+ * rule, which private chat keeps in shared text. The domain-neutral source rules stay in shared prompt assembly.
  */
 const SEEDED_EXECUTOR_INSTRUCTIONS: Readonly<Record<string, string>> = {
+  jack: "代码与测试任务的结果报告：只要求提供代码和测试用例、明确不要运行时，交付代码和用例即可分别记 completed；测试尚未运行应在 message 中如实说明，不新增运行测试的失败项。若用户实际要求运行而未能运行，则该目标必须如实记为未完成，不能用代码审阅替代执行。",
   bill: "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。",
 };
 
@@ -100,15 +102,16 @@ export class TeamRegistry {
 
   /**
    * The current version as today's fixed-roster readers consume it: dispatch groups plus the Coordinator and every Team Leader
-   * with its application. Refuses definitions those readers cannot represent rather than widening any team's reach.
+   * with its application, whatever its group bindings. Which teams take work in a group comes from `acceptingTeams`.
+   * Refuses definitions those readers cannot represent rather than widening any team's reach.
    */
   roster(connection: Readonly<{ appId: string; appSecret: string }>): Readonly<FeishuDispatchConfiguration> {
     const current = this.current();
     if (!current) throw new Error("team_registry_empty");
     const { coordinator, dispatchGroups, teams } = current.definitions;
-    const groups = JSON.stringify([...dispatchGroups].sort());
+    // A team may be bound to some dispatch groups and in any binding state; dispatch routes per group (agent-dispatch::REQ-015/AC-01).
     if (coordinator.appId !== connection.appId ||
-        teams.some(({ bindings }) => bindings.some(({ state }) => state !== "accepting") || JSON.stringify(bindings.map(({ chatId }) => chatId).sort()) !== groups) ||
+        teams.some(({ bindings }) => bindings.some(({ chatId }) => !dispatchGroups.includes(chatId))) ||
         new Set([coordinator.id, ...teams.map(({ id }) => id)]).size !== teams.length + 1 ||
         new Set([coordinator.appId, ...teams.map(({ leader }) => leader.appId)]).size !== teams.length + 1) throw new Error("team_registry_roster_unsupported");
     return deepFreeze({ groupChatIds: [...dispatchGroups], agents: [
@@ -144,6 +147,15 @@ export class TeamRegistry {
     return deepFreeze({ version: Number(row.version), basedOn: row.based_on === null ? null : Number(row.based_on),
       source: row.source as DefinitionsVersion["source"], definitions: JSON.parse(String(row.definitions)) as TeamDefinitions });
   }
+}
+
+/**
+ * The teams that accept work in a group, in registry order, as the Coordinator routes to them and every Team Leader's Team
+ * Directory lists them there: team name and responsibility (agent-dispatch::REQ-015, team-management::REQ-004/AC-02).
+ */
+export function acceptingTeams(definitions: TeamDefinitions, chatId: string): Array<{ id: string; name: string; responsibility: string }> {
+  return definitions.teams.filter(({ bindings }) => bindings.some((binding) => binding.chatId === chatId && binding.state === "accepting"))
+    .map(({ id, teamName, responsibility }) => ({ id, name: teamName, responsibility }));
 }
 
 function seededDefinitions(local: Readonly<FeishuDispatchConfiguration>, executorHostTools: readonly string[]): TeamDefinitions {

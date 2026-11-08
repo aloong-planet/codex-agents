@@ -8,6 +8,8 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 import { TeamRegistry } from "../src/team-registry.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { seedMemory } from "./support/memory.js";
+import { memoryAccountId } from "../src/agent-profile.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures.
 // Registry versions are saved through TeamRegistry, the store's own public class. Fixture mode injects already-decoded Coordinator
@@ -19,27 +21,41 @@ import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
 // - The upgrade case covers the stored states the pre-05 fixture mode can produce. A state reached only in production, such as
 //   an old request whose team was later removed from the local configuration, keeps the existing authorization fencing,
 //   which channel-startup's "fails closed for an unavailable assignee" cases drive; no case here builds it.
+// - Memory recall queries (a Team Leader's Brief text, an Executor's title and Brief) only rank memories in a large store with a
+//   search index. Fixture mode has no index and the seeded memories are small, so no case tells queries apart; a live run does.
+// - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
+//   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
+//   curators with recorders, so only code review and a live run cover that tool host.
 
-it("keeps travel rules in Bill's turn only, with the shared facts-and-sources check in every turn", async () => {
+it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
+  const commands = [["alice", "om_profile_alice", "帮我整理闲鱼商品描述"], ["bill", "om_profile_bill", "请帮我规划周末一日行程"],
+    ["jack", "om_profile_jack", "请给出 discount 的补丁和测试用例，不要运行"]] as const;
   try {
     dispatchConfig(directory);
     running = await start(directory);
-    await running.post("/api/fixture/inbound", groupMessage("om_profile_alice", "帮我整理闲鱼商品描述", { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理闲鱼商品描述", message: "" }));
-    await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
-    await running.post("/api/fixture/inbound", groupMessage("om_profile_bill", "请帮我规划周末一日行程", { kind: "dispatch", agentId: "bill", requestId: null, summary: "规划周末一日行程", message: "" }));
-    const result = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
-    console.log(JSON.stringify({ kind: "dispatch_profile_text", commands: ["帮我整理闲鱼商品描述", "请帮我规划周末一日行程"], jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
+    for (const [team, messageId, text] of commands) {
+      await running.post("/api/fixture/inbound", groupMessage(messageId, text, { kind: "dispatch", agentId: team, requestId: null, summary: text, message: "" }));
+      await running.until((state) => state.agentFixtureOutboxes?.[team]?.text.length === 2);
+    }
+    const result = await running.state();
+    console.log(JSON.stringify({ kind: "dispatch_profile_text", commands: commands.map(([, , text]) => text), jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
     const inputs = result.fixtureModelRequests!.map(({ input }) => JSON.stringify(input));
-    const alice = inputs.filter((input) => input.includes("你是 Alice 团队的执行者")), bill = inputs.filter((input) => input.includes("你是 Bill 团队的执行者"));
-    expect([alice.length, bill.length]).toEqual([1, 1]);
-    for (const input of [alice[0]!, bill[0]!]) expect(input).toContain("交付文件前复核其事实与来源是否相符");
+    const [alice, bill, jack] = ["Alice", "Bill", "Jack"].map((name) => inputs.filter((input) => input.includes(`你是 ${name} 团队的执行者`)));
+    expect([alice!.length, bill!.length, jack!.length]).toEqual([1, 1, 1]);
+    for (const input of [alice![0]!, bill![0]!, jack![0]!]) {
+      expect(input).toContain("交付文件前复核其事实与来源是否相符");
+      expect(input).toContain("results 只列用户本轮实际要求完成的目标");
+    }
     // One fragment from each Bill-only rule group: weather, route, walking, opening hours, budget and schedule.
     for (const fragment of ["天气等持续更新的信息", "出行路线", "步行入口", "开放时间、预约要求", "预算和时间安排"]) {
-      expect(alice[0]).not.toContain(fragment);
-      expect(bill[0]).toContain(fragment);
+      expect(alice![0]).not.toContain(fragment);
+      expect(bill![0]).toContain(fragment);
     }
+    // The code-and-tests example of the goal-scope rule reaches only Jack's team's Executor.
+    expect(jack![0]).toContain("交付代码和用例即可分别记 completed");
+    for (const input of [alice![0]!, bill![0]!]) expect(input).not.toContain("交付代码和用例即可分别记 completed");
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
@@ -274,6 +290,156 @@ it("builds the Coordinator's and the Team Leader's runtimes from their resolved 
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+const RESPONSIBILITIES = { alice: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。", bill: "日常生活事务，包括吃穿住行的规划和安排。",
+  jack: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。" };
+
+it("routes and assigns only to teams accepting work in the group, and gives each Team Leader that group's Team Directory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-group-roster-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const inBeta = <T extends { event: { message: { chat_id: string } } }>(message: T): T => { message.event.message.chat_id = "oc_beta"; return message; };
+  try {
+    dispatchConfig(directory);
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    configuration.feishu.groups.push({ chatId: "oc_beta", allowedSenderIds: ["ou_owner"] });
+    configuration.feishu.dispatch.groupChatIds.push("oc_beta");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    const local = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")?.dispatch;
+    if (!local) throw new Error("expected_dispatch_configuration");
+    const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try {
+      const seeded = registry.importLocalConfiguration(local, { executorHostTools: PRODUCTION_TOOL_IDS });
+      // Alice accepts in both groups, Bill is bound to oc_alpha only, and Jack's onboarding in oc_beta is not complete.
+      registry.save({ ...seeded.definitions, teams: seeded.definitions.teams.map((team) => team.id === "bill" ? { ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" as const }] }
+        : team.id === "jack" ? { ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" as const }, { chatId: "oc_beta", state: "onboarding" as const }] } : team) },
+      { basedOn: seeded.version });
+    } finally { registry.close(); }
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", inBeta(groupMessage("om_beta_jack", "帮我修复代码", decision("jack", "修复代码"))));
+    const refused = await running.until((state) => state.fixtureTextOutbox?.length === 1);
+    expect(refused.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
+    expect(refused.agentDispatch?.jobs).toEqual([]);
+    // A genuine mention of Jack in oc_beta confers no priority there, and Jack's bot posts nothing.
+    await running.post("/api/fixture/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: "om_beta_mention", create_time: String(Date.now()), chat_id: "oc_beta", chat_type: "group", message_type: "text",
+          mentions: [{ key: "@_user_0", id: { open_id: "ou_jackview0" }, name: "Jack" }], content: JSON.stringify({ text: "@_user_0 帮我整理闲鱼商品描述" }) } },
+      messageDetails: { message_id: "om_beta_mention", chat_id: "oc_beta", msg_type: "text", body: { content: '{"text":"帮我整理闲鱼商品描述"}' },
+        mentions: [{ key: "@_user_0", id: "cli_cccccccccccccccc", id_type: "app_id", name: "Jack" }] },
+      dispatchDecision: decision("alice", "整理闲鱼商品描述"),
+    });
+    await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    await running.post("/api/fixture/inbound", groupMessage("om_alpha_jack", "帮我修复代码", decision("jack", "修复代码")));
+    const result = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 2);
+    console.log(JSON.stringify({ kind: "dispatch_group_roster", commands: ["oc_beta 帮我修复代码", "oc_beta @Jack 帮我整理闲鱼商品描述", "oc_alpha 帮我修复代码"],
+      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, coordinator: result.fixtureTextOutbox, leader: result.fixtureLeaderRequests }));
+    expect(result.agentDispatch?.jobs.map(({ agentId, status }) => ({ agentId, status }))).toEqual([{ agentId: "alice", status: "completed" }, { agentId: "jack", status: "completed" }]);
+    expect(result.agentFixtureOutboxes?.jack?.text.map(({ chatId }) => chatId)).toEqual(["oc_alpha", "oc_alpha"]);
+    expect(result.fixtureTextOutbox).toHaveLength(1);
+    const plans = result.fixtureLeaderRequests!.filter(({ phase }) => phase === "plan");
+    expect(plans.map(({ teamId }) => teamId)).toEqual(["alice", "jack"]);
+    expect(plans.map(({ input }) => input.directory)).toEqual([
+      [{ name: "运营团队", responsibility: RESPONSIBILITIES.alice }],
+      [{ name: "运营团队", responsibility: RESPONSIBILITIES.alice }, { name: "生活团队", responsibility: RESPONSIBILITIES.bill }, { name: "技术团队", responsibility: RESPONSIBILITIES.jack }],
+    ]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("gives the Coordinator the group memory, and each Team Leader only its Brief, its own memory and the Team Directory", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-recall-scopes-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    const binding = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")!;
+    const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try {
+      const seeded = registry.importLocalConfiguration(binding.dispatch!, { executorHostTools: PRODUCTION_TOOL_IDS });
+      // Instruction markers tell the Coordinator's and each Team Leader's turns apart in the recorded runtime requests.
+      registry.save({ ...seeded.definitions, coordinator: { ...seeded.definitions.coordinator, profile: { instructions: "协调规则 R6", hostTools: [] } },
+        teams: seeded.definitions.teams.map((team) => ({ ...team, leader: { ...team.leader, profile: { instructions: `负责人规则 R6 ${team.id}`, hostTools: [] } } })) },
+      { basedOn: seeded.version });
+    } finally { registry.close(); }
+    const alpha = binding.owner.groupAddress("oc_alpha")!, group = binding.owner.memoryScope(alpha.accountId, alpha.target);
+    await seedMemory(directory, group, alpha.target, "group-seed", "GROUP_FACT_R6");
+    await seedMemory(directory, memoryAccountId(group, { kind: "leader", teamId: "alice" }), alpha.target, "alice-leader-seed", "ALICE_LEADER_FACT_R6");
+    await seedMemory(directory, memoryAccountId(group, { kind: "profile", teamId: "alice", profileId: "executor-1" }), alpha.target, "alice-profile-seed", "ALICE_PROFILE_FACT_R6");
+    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
+    await running.post("/api/fixture/inbound", groupMessage("om_recall_discussion", "DISCUSSION_MARKER_R6，周末大家有空吗", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" }));
+    await running.until((state) => (state.fixtureCoordinationRequests?.length ?? 0) === 1);
+    await running.post("/api/fixture/inbound", groupMessage("om_recall_alice", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    await running.post("/api/fixture/inbound", groupMessage("om_recall_bill", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
+    const result = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    console.log(JSON.stringify({ kind: "dispatch_recall_scopes", commands: ["DISCUSSION_MARKER_R6，周末大家有空吗", "帮我整理闲鱼商品描述", "请帮我规划周末一日行程"],
+      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes }));
+    const turns = result.fixtureCoordinationRequests!.map(({ input }) => JSON.stringify(input));
+    const coordinator = turns.filter((input) => input.includes("协调规则 R6"));
+    const [alice, bill] = ["alice", "bill"].map((id) => turns.filter((input) => input.includes(`负责人规则 R6 ${id}`)));
+    expect([coordinator.length, alice!.length, bill!.length]).toEqual([3, 2, 2]);
+    for (const input of coordinator) expect(input).toContain("GROUP_FACT_R6");
+    // The group discussion reaches the Coordinator with each later message.
+    for (const input of coordinator.slice(1)) expect(input).toContain("DISCUSSION_MARKER_R6");
+    for (const input of alice!) {
+      expect(input).toContain("ALICE_LEADER_FACT_R6");
+      for (const [name, responsibility] of [["运营团队", RESPONSIBILITIES.alice], ["生活团队", RESPONSIBILITIES.bill], ["技术团队", RESPONSIBILITIES.jack]]) {
+        expect(input).toContain(name); expect(input).toContain(responsibility);
+      }
+    }
+    for (const input of [...alice!, ...bill!]) for (const outside of ["GROUP_FACT_R6", "ALICE_PROFILE_FACT_R6", "DISCUSSION_MARKER_R6"]) expect(input).not.toContain(outside);
+    for (const input of bill!) expect(input).not.toContain("ALICE_LEADER_FACT_R6");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("captures the group memory from what was posted, each Team Leader's from its division and closing, and one memory per Executor profile", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-capture-scopes-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const requests = [
+    { team: "alice", messageId: "om_capture_1", text: "帮我整理闲鱼商品描述：九成新 iPad", title: "撰写 iPad 文案", brief: "九成新、128G" },
+    { team: "alice", messageId: "om_capture_2", text: "再帮我整理二手台灯的描述", title: "撰写台灯文案", brief: "黑色，灯座有划痕" },
+    { team: "bill", messageId: "om_capture_3", text: "帮我规划周六南京一日游", title: "排南京行程", brief: "两人，预算 400 元" },
+  ];
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    for (const [index, request] of requests.entries()) {
+      const before = (await running.state()).agentFixtureOutboxes?.[request.team]?.text.length ?? 0;
+      await running.post("/api/fixture/inbound", groupMessage(request.messageId, request.text, decision(request.team, request.title),
+        { modelReply: executorReply(`EXEC_R2_${index + 1}`, request.title), leaderClosing: { message: `CLOSE_R2_${index + 1}` },
+          leaderPlan: { assignments: [{ profileId: "executor-1", title: request.title, brief: request.brief }] } }));
+      await running.until((state) => state.agentFixtureOutboxes?.[request.team]?.text.length === before + 2);
+    }
+    const result = await running.until((state) => (state.fixtureMemoryCurations?.length ?? 0) === 9);
+    console.log(JSON.stringify({ kind: "dispatch_capture_scopes", commands: requests.map(({ text }) => text), curations: result.fixtureMemoryCurations }));
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    const owner = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")!.owner;
+    const alpha = owner.groupAddress("oc_alpha")!, group = owner.memoryScope(alpha.accountId, alpha.target);
+    const curations = result.fixtureMemoryCurations!;
+    const groupTurns = curations.filter(({ accountId }) => accountId === group);
+    // Every team's request lands in the one canonical group memory, curated by the group curator, with what was posted and no Executor result.
+    expect(groupTurns.every(({ curator }) => curator === "group")).toBe(true);
+    expect(groupTurns.flatMap(({ turns }) => turns)).toEqual(requests.map(({ text, title }, index) => ({ user: text,
+      assistant: `我安排执行者 ${index + 1}（能力档 1）处理：${title}。完成后会在本群汇报。\nCLOSE_R2_${index + 1}` })));
+    expect(JSON.stringify(groupTurns)).not.toContain("EXEC_R2");
+    const others = curations.filter(({ accountId }) => accountId !== group);
+    expect(others).toHaveLength(6);
+    for (const { curator, accountId } of others) { expect(curator).toBe("dispatch"); expect(accountId).toMatch(/^feishu\.dispatch\./); }
+    const accountOf = (match: (turn: { user: string; assistant?: string }) => boolean) => {
+      const found = others.filter(({ turns }) => turns.some(match));
+      expect(found).toHaveLength(1);
+      return found[0]!.accountId;
+    };
+    const profiles = requests.map((_request, index) => accountOf(({ assistant }) => assistant === `EXEC_R2_${index + 1}`));
+    const leaders = requests.map((_request, index) => accountOf(({ assistant }) => assistant?.startsWith("分工：") === true && assistant.endsWith(`CLOSE_R2_${index + 1}`)));
+    expect([profiles[0] === profiles[1], profiles[0] === profiles[2], leaders[0] === leaders[1], leaders[0] === leaders[2]]).toEqual([true, false, true, false]);
+    expect(new Set([...profiles, ...leaders]).size).toBe(4);
+    // An Executor's memory holds the Assignment it received; a Team Leader's holds its Brief, division and closing.
+    expect(others.find(({ accountId, turns }) => accountId === profiles[0] && turns.some(({ assistant }) => assistant === "EXEC_R2_1"))!.turns)
+      .toEqual([{ user: "撰写 iPad 文案\n九成新、128G", assistant: "EXEC_R2_1" }]);
+    expect(others.find(({ accountId, turns }) => accountId === leaders[2] && turns.some(({ assistant }) => assistant?.endsWith("CLOSE_R2_3")))!.turns).toEqual([{
+      user: "请求：帮我规划周六南京一日游\n协调摘要：排南京行程", assistant: "分工：执行者 3（能力档 1）排南京行程\n收尾：CLOSE_R2_3" }]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 // The last commit whose dispatch stored requests without Assignments (ticket 05's base). The owner may retire the upgrade case
 // once a deployment has migrated production's pre-05 requests (agent-dispatch Testing Decisions).
 const PRE_TEAM_COMMIT = "71ff31d";
@@ -349,6 +515,7 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     const storedIds = stored.agentDispatch!.jobs.map(({ id }) => id);
 
     // The new code starts on the same state. Only the running request's interruption report is new before anyone acts.
+    // Its seeded definitions differ from the pre-05 commit's (Jack's Executor profile, ticket 06), so this start appends version 2.
     running = await start(directory, env);
     const upgraded = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "completed" && state.agentFixtureOutboxes?.bill?.text.length === 3);
     console.log(JSON.stringify({ kind: "dispatch_pre_team_upgrade", jobs: upgraded.agentDispatch, outboxes: upgraded.agentFixtureOutboxes, coordinator: upgraded.feishuFixtureTextOutbox }));
@@ -360,7 +527,7 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
       { status: "failed", definitionsVersion: null, assignments: 0 },
       { status: "waiting", definitionsVersion: null, assignments: 0 },
       { status: "failed", definitionsVersion: null, assignments: 0 },
-      { status: "completed", definitionsVersion: 1, assignments: 1 },
+      { status: "completed", definitionsVersion: 2, assignments: 1 },
     ]);
     expect(upgraded.agentDispatch?.jobs[0]?.result).toBe("这是 fixture Codex 回复。");
     expect(upgraded.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
@@ -377,10 +544,10 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
       { modelReply: JSON.stringify({ message: "已保留修改并补齐报告。", results: [{ subject: "修改样例并整理报告", status: "completed" }] }) });
     const controlled = await running.until((state) => state.agentDispatch?.jobs[3]?.status === "completed" && state.agentFixtureOutboxes?.jack?.text.length === 4);
     console.log(JSON.stringify({ kind: "dispatch_pre_team_controls", jobs: controlled.agentDispatch, outboxes: controlled.agentFixtureOutboxes, leader: controlled.fixtureLeaderRequests }));
-    expect(controlled.agentDispatch?.jobs[2]).toMatchObject({ definitionsVersion: 1, assignments: [expect.objectContaining({ teamId: "jack", status: "completed" })] });
+    expect(controlled.agentDispatch?.jobs[2]).toMatchObject({ definitionsVersion: 2, assignments: [expect.objectContaining({ teamId: "jack", status: "completed" })] });
     expect(controlled.agentDispatch?.jobs[4]).toMatchObject({ definitionsVersion: null, assignments: [] });
     expect(controlled.agentFixtureOutboxes?.alice?.media).toEqual([expect.objectContaining({ chatId: "oc_alpha", fileName: "Agent Beta.md" })]);
-    expect(controlled.agentDispatch?.jobs[3]).toMatchObject({ definitionsVersion: 1, assignments: [expect.objectContaining({ teamId: "jack", status: "completed" })] });
+    expect(controlled.agentDispatch?.jobs[3]).toMatchObject({ definitionsVersion: 2, assignments: [expect.objectContaining({ teamId: "jack", status: "completed" })] });
     expect(readFileSync(join(business, "demo-vault", "sample.txt"), "utf8")).toBe("xx\n");
     // Plans only for the requests the new code ran: the queued one, the confirmed proposal and the retried failure. The choice ran no Team Leader turn.
     expect(controlled.fixtureLeaderRequests?.filter(({ phase }) => phase === "plan").map(({ teamId }) => teamId)).toEqual(["bill", "jack", "jack"]);

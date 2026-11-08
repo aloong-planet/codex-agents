@@ -64,6 +64,8 @@ const input = (revision = "r1"): LeaderTurnInput => ({
   leader: { id: "bill", name: "Bill", teamName: "生活团队", responsibility: "衣食住行", instructions: "负责人规则" },
   profiles: [{ id: "trip", name: "行程" }, { id: "meal", name: "餐饮" }],
   brief: { message: "帮我规划周末一日行程", summary: "规划周末一日行程" },
+  directory: [{ name: "生活团队", responsibility: "衣食住行" }],
+  memory: "",
   session: { accountId: "cli_sam", target: "feishu.group.oc_alpha", bindingHash: "binding-alpha", revision, definitionsVersion: 1 },
   fixtureMessageId: "om_one",
 });
