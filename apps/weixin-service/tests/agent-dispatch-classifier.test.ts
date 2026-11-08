@@ -23,7 +23,7 @@ function runtime(response: AppServerTurnResult) {
 
 it("decodes a real coordinator JSON result through a tool-free constrained turn and releases its thread", async () => {
   const external = runtime({ owner: "model_owned", finalText: '{"kind":"dispatch","agentId":"alice","requestId":null,"summary":"整理商品文案","message":""}' });
-  const classifier = new CodexDispatchClassifier(external, "/isolated/coordinator", () => ({ model: "fixture-model", effort: "low" }));
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
   await expect(classifier.classify(input)).resolves.toEqual({ kind: "dispatch", agentId: "alice", requestId: null, summary: "整理商品文案", message: "" });
   expect(external.startOrResume).toHaveBeenCalledWith(undefined, "/isolated/coordinator", []);
   expect(external.runTurn).toHaveBeenCalledWith("coordinator-thread", expect.any(String), undefined, undefined, expect.objectContaining({
@@ -40,7 +40,7 @@ it.each([
   { name: "workflow ownership", response: { owner: "workflow_owned", receipt: { outcome: "accepted", reply: "not a coordinator decision" } }, error: "dispatch_decision_invalid" },
 ] satisfies Array<{ name: string; response: AppServerTurnResult; error: string | typeof SyntaxError }>)("rejects $name and releases the coordinator thread", async ({ response, error }) => {
   const external = runtime(response);
-  const classifier = new CodexDispatchClassifier(external, "/isolated/coordinator", () => ({ model: "fixture-model", effort: "low" }));
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
   await expect(classifier.classify(input)).rejects.toThrow(error);
   expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
 });
@@ -48,7 +48,7 @@ it.each([
 it("preserves an external model failure and releases the temporary coordinator thread", async () => {
   const external = runtime({ owner: "model_owned", finalText: "" });
   external.runTurn.mockRejectedValueOnce(new Error("model_transport_disconnected"));
-  const classifier = new CodexDispatchClassifier(external, "/isolated/coordinator", () => ({ model: "fixture-model", effort: "low" }));
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
   await expect(classifier.classify(input)).rejects.toThrow("model_transport_disconnected");
   expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
 });

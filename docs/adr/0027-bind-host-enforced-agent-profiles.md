@@ -74,7 +74,7 @@ Memory scopes:
 - `apps/weixin-service/src/isolated-model-runtime.ts`: disabled runtime features and skipped host skill discovery.
 - The owner's agent-link project at `/Users/loong_zhou/playground/multi-agent`: README section 「MCP（外部工具服务）」, FEATURES section 28 and `agent-link/mcp.ts` (host-managed MCP connections and proxy tools).
 - `apps/weixin-service/src/main.ts`: one tool control for every specialist and one group memory scope.
-- `apps/weixin-service/src/agent-dispatch-executor.ts`: shared prompt tail and runtime map.
+- `apps/weixin-service/src/agent-dispatch-executor.ts`: shared prompt tail. Its runtimes, and the coordinator's, come from the bounded pool in `runtime-pool.ts`.
 - Evidence (a), measured on 2026-11-08 with `codex-cli 0.167.0-alpha.3.2`, the executable bundled with the ChatGPT app, which the service selects when `CODEX_BIN` is unset. The repository pins no Codex version. Runtimes were created by `createIsolatedModelRuntime` and spawned as the service spawns them. Model requests went to a loopback fake Responses endpoint, never to a model.
   - Configuration in use: `skills/list` returned the runtime's own skill, the 34 skills under the real HOME's `.agents/skills` and 5 bundled system skills installed into the runtime's own home. Skipping host skill discovery or not gave the same 40 entries.
   - The captured model request listed a skill planted in the HOME's `.agents/skills`, and injected its body when the text named it with `$` or the input carried it as a skill item. It listed the bundled skills too.
