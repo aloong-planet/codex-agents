@@ -32,7 +32,9 @@ function deferred<T = void>() {
 
 const directories: string[] = [];
 const open: AgentDispatch[] = [];
+const classified: string[] = [];
 afterEach(async () => {
+  classified.splice(0);
   for (const dispatch of open.splice(0)) await dispatch.close();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
@@ -40,7 +42,12 @@ function directory() { const created = mkdtempSync(join(tmpdir(), "agent-dispatc
 function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecutor, deliveries: Array<{ sender: string; message: string; id: string }>) {
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
     agents, leader, executor, definitionsVersion: () => 1, team: (id) => team(id), revision: () => "r1",
-    classifier: { classify: async ({ event: inbound }) => ({ kind: "dispatch", agentId: inbound.text, requestId: null, summary: `${inbound.text} 的请求`, message: "" }) },
+    classifier: { classify: async ({ event: inbound }) => {
+      const cancel = inbound.text.startsWith("cancel:");
+      classified.push(cancel ? "cancel" : "dispatch");
+      return cancel ? { kind: "cancel", agentId: null, requestId: inbound.text.slice("cancel:".length), summary: "", message: "" }
+        : { kind: "dispatch", agentId: inbound.text, requestId: null, summary: `${inbound.text} 的请求`, message: "" };
+    } },
     delivery: async ({ senderAccountId, message, operationId }) => { deliveries.push({ sender: senderAccountId, message, id: operationId }); return { ok: true, acceptedSegments: 1 }; },
     authorized: () => true, bindingHash: () => "binding-alpha", memory: () => "", completedWork: () => "",
     presentation: () => undefined, presented: () => {}, report: () => {},
@@ -120,5 +127,31 @@ it.each(["plan", "closing"] as const)("resumes a request cut off in its Team Lea
   expect(runs).toEqual(cutOff === "plan" ? ["second"] : ["first"]);
   expect(after.filter(({ message }) => message === "已收尾。")).toEqual([expect.objectContaining({ sender: "cli_alice" })]);
   expect(second.getState().jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "completed", executor: "执行者 1" })]);
+  hung.reject(new Error("abandoned")); await first.close();
+});
+
+it("keeps a request cancelled while its Team Leader planned it cancelled after a restart", async () => {
+  const state = directory();
+  const hung = deferred<never>();
+  const runs: string[] = [];
+  const executor = (name: string): DispatchExecutor => ({ run: async () => { runs.push(name); return { status: "completed", message: "已整理好。" }; }, close: () => {} });
+  const first = dispatchWith(state, { plan: () => hung.promise, close: () => hung.promise }, executor("first"), []);
+  await first.start();
+  first.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(first.getState().jobs[0]?.status).toBe("running"), { timeout: 2000, interval: 10 });
+  // The requester cancels while the plan turn is still running; the process then stops before that turn ends.
+  first.admit(event("two", `cancel:${first.getState().jobs[0]!.id}`));
+  // The cancel is recorded synchronously once its decision returns; one macrotask later intake has finished with it.
+  await vi.waitFor(() => expect(classified).toContain("cancel"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  open.splice(open.indexOf(first), 1);
+
+  const after: Array<{ sender: string; message: string; id: string }> = [];
+  const second = dispatchWith(state, { plan: async () => JSON.parse(plan), close: async () => "已收尾。" }, executor("second"), after);
+  await second.start();
+  await vi.waitFor(() => expect(second.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(runs).toEqual([]);
+  expect(after.map(({ message }) => message)).toEqual(["已停止继续处理。已经完成的操作不会自动撤销。"]);
   hung.reject(new Error("abandoned")); await first.close();
 });

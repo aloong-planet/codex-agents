@@ -78,6 +78,13 @@ export class AgentDispatch {
     }
     for (const job of this.jobs()) if (job.status === "running") {
       const assignment = this.currentAssignment(job);
+      if (job.definitionsVersion !== undefined && job.cancelRequested) {
+        // The requester's cancellation stands; nothing of a cancelled request runs again after a restart.
+        job.status = "cancelled"; job.result = `已停止继续处理。${this.options.completedWork(job)}已经完成的操作不会自动撤销。`; job.supplements = [];
+        this.endAssignment(job, "cancelled");
+        this.recordResult(job, assignment ? this.closingId(job) : undefined);
+        continue;
+      }
       // A tool-free Team Leader turn is safe to repeat, so a request cut off before or after its Executor resumes there.
       if (job.definitionsVersion !== undefined && assignment?.status !== "running") { job.status = "queued"; this.save(job); continue; }
       job.status = "failed"; job.result = `服务中断，本次处理已停止。${this.options.completedWork(job)}已有操作不会自动重复；请核对结果后明确重试。`;
@@ -350,7 +357,7 @@ export class AgentDispatch {
   }
   private endAssignment(job: DispatchJob, status: "cancelled"): void {
     const assignment = this.currentAssignment(job);
-    if (assignment && !ENDED.includes(assignment.status)) { assignment.status = status; this.saveAssignment(assignment); }
+    if (assignment && (!ENDED.includes(assignment.status) || assignment.status === "failed")) { assignment.status = status; this.saveAssignment(assignment); }
   }
   private closingId(job: DispatchJob): string { return `${job.id}:closing:${job.attempt}`; }
 

@@ -1164,6 +1164,7 @@ it("accepts requester-only cancel and supplements while a specialist is still ru
     await send("om_owner_cancel", "ou_owner", "取消", { kind: "cancel", agentId: null, requestId, summary: "", message: "" });
     const cancelled = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
     expect(cancelled.agentDispatch?.jobs[0]?.status).toBe("cancelled");
+    expect(cancelled.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "cancelled" })]);
     expect(cancelled.agentFixtureOutboxes?.alice?.text.at(-1)?.message).toBe("已停止继续处理。已经完成的操作不会自动撤销。");
     await send("om_held_bill", "ou_owner", "安排周末出行", { kind: "dispatch", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" }, true);
     const bill = await running.until((state) => state.fixtureModelRequests?.length === 2);
