@@ -220,6 +220,7 @@ An invalid startup configuration, startup connection failure or active channel f
 | One group runtime fails on first startup or after persisted restart | Healthy private/other-group conversations continue; channel-switching::US-005/AC-02 and channel-switching::REQ-009/AC-01 |
 | Two groups interleave discussion and mentions; one model turn stalls | channel-switching::US-005/AC-02 and channel-switching::REQ-012/AC-01 |
 | Group asks for private/other-group memories or files containing internal state, including symlinks | channel-switching::US-006/AC-01 through channel-switching::US-006/AC-03 |
+| Member names one of the owner's or Codex's bundled skills with `$<skill>`, or a request carries a skill input item for one | Nothing from it is listed or injected, in group, dispatch, pending-router and research runtimes alike, under channel-switching::US-006/AC-02 |
 | Grant or revoke business files, then resume a saved group thread | channel-switching::US-006/AC-03 and channel-switching::REQ-012/AC-02 |
 | Create a group reminder; another authorized member edits it; ask for all tasks or an outside task ID | channel-switching::US-007/AC-01 and channel-switching::US-007/AC-02 |
 | Group/private plans become due together; original group becomes unavailable | channel-switching::US-007/AC-02; preserve destination and existing no-resend semantics |
