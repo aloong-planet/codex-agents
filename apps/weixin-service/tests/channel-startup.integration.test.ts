@@ -11,6 +11,7 @@ import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { AccountMemoryToolHost } from "../src/account-memory-tool-host.js";
 import type { PublicCodexServiceState } from "../src/conversation-service.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
+import { authorizeLocalService } from "../e2e/console-session.js";
 
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
@@ -59,7 +60,10 @@ async function start(directory: string, extraEnv: Record<string, string> = {}) {
   });
   child.stdout?.on("data", (chunk) => { output += String(chunk); });
   child.stderr?.on("data", (chunk) => { output += String(chunk); });
-  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(1000) })).json() as State; }
+  // The local service requires an authorized browser; the test logs in through the control channel like the owner.
+  let cookie: string | undefined;
+  const authorized = async () => cookie ??= await authorizeLocalService(directory);
+  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(1000) })).json() as State; }
   async function until(predicate: (value: State) => boolean, timeout = 15000): Promise<State> {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -78,7 +82,7 @@ async function start(directory: string, extraEnv: Record<string, string> = {}) {
       expect(child.signalCode).toBe("SIGKILL");
     },
     async post(route: string, body: unknown) {
-      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json" }, body: JSON.stringify(body) });
+      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json", cookie: await authorized() }, body: JSON.stringify(body) });
       expect(response.status, await response.clone().text()).toBe(200);
     } };
 }

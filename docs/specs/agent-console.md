@@ -1,8 +1,7 @@
 # Agent console
 
-> Status: specified; not implemented.
+> Status: specified; login and local-only access are implemented, the console pages are not.
 > Related: [agent dispatch](agent-dispatch.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [channel boundaries](channel-switching.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: the local service serves only the existing settings page. It has no login; writes are accepted when the request origin matches its Host header.
 > Pending: no read projection combines requests, Assignments, reports and delivery outcomes, and no storage exists for Team Leader chats or private requests.
 
 ## Problem Statement
@@ -23,6 +22,7 @@ As the owner, I want only browsers that I authorized on this computer to use the
 - agent-console::US-001/AC-02: An authorized browser stays authorized across service restarts. The service stores only a hash of each cookie, and the cookie is valid for 400 days, renewed whenever a page opens.
 - agent-console::US-001/AC-03: The local command lists authorized browsers and revokes one or all. In the console, a 「本机」 section at the bottom of the sidebar holds the 「本机登录」 entry with the number of authorized browsers. It opens a drawer listing each browser's label, authorization time, last use and a current-browser marker. Each browser has 收回, and the list has 全部收回; both ask for inline confirmation. The same drawer explains that the audit is written to a local file and read from the command line. A revoked browser's open pages disconnect immediately and need a new login link.
 - agent-console::US-001/AC-04: A browser without authorization, including one whose login link has expired or been used, sees only a card explaining how to obtain a login link. No data is shown and the console underneath cannot be used.
+- agent-console::US-001/AC-05: The codex-weixin Codex plugin, which uses the local service without a browser, is the one exception. It authorizes through the same local control channel as the login command and holds its credential in memory only. It appears as one authorized entry, 「Codex 插件」, replaced each time it authorizes; it is audited and revocable like a browser, and authorizes again on its next start or when the service refuses its credential.
 
 ### agent-console::US-002 Move around the console
 
@@ -138,7 +138,7 @@ In private conversations, the Coordinator's routing, cross-team Assignments and 
 Applies to: every page and API of the local service, including the existing settings pages.
 
 - Requests whose Host is not `127.0.0.1` or `localhost` with the service's port are refused.
-- Every page and API requires an authorized browser, except the login-link exchange and the page explaining how to obtain a link.
+- Every page and API requires an authorized browser, except the login-link exchange and the page explaining how to obtain a link. The Codex plugin's authorization under agent-console::US-001/AC-05 counts as an authorized browser.
 - State-changing requests must also come from the same origin.
 - Fixture routes exist only in fixture mode; they keep their current access, subject to the Host rule.
 - The public event ingress never routes to the local service.
@@ -186,6 +186,8 @@ The interface is Chinese and light only; the project's capability declaration di
 | Private request needs a sixth Assignment | Confirmation in the private conversation under agent-console::REQ-002/AC-02 and [agent-dispatch::REQ-011/AC-02](agent-dispatch.md) |
 | Owner selects a group request in a private conversation and wants to cancel it | No cancel action; the note points to the group under agent-console::REQ-002/AC-04 |
 | Owner revokes the current browser | The page turns into the login card under agent-console::US-001/AC-03 and agent-console::US-001/AC-04 |
+| Owner runs the login command while the service is not running | The command says the service is not running and prints no link under agent-console::US-001/AC-01 |
+| Codex plugin starts, or its authorization is revoked or replaced | It authorizes again through the control channel, replacing its previous entry, under agent-console::US-001/AC-05 |
 | Search for an amount or a Penny transaction | No financial content is found under agent-console::REQ-003 |
 | A private result is requested from a group | Not available under agent-console::CON-002 |
 | Owner changes a team or MCP server | Audit entry without secrets under agent-console::REQ-004 |
@@ -196,7 +198,11 @@ The interface is Chinese and light only; the project's capability declaration di
 
 **Local service.** The console is served by the existing local service on the loopback address, next to the existing settings pages, and never through the public ingress. One authorization layer guards every route; fixture routes remain gated by fixture mode.
 
-**Login.** Login follows the owner's agent-link design: a control command obtains a single-use link from the running service, the browser exchanges it for a cookie, and the service stores hashed authorizations in its state directory with owner-only file permissions. Revocation closes the browser's live connections.
+**Login.** Login follows the owner's agent-link design: a control command obtains a single-use link from the running service, the browser exchanges it for a cookie, and the service stores hashed authorizations in its state directory with owner-only file permissions. Revocation closes the browser's live connections, and an open page that is then refused reloads into the login card with the revoked notice.
+
+**Control channel.** The running service listens on an owner-only Unix socket and writes a connection file holding the socket path and a token rotated on every start, both in its state directory. The login command and the Codex plugin are its only clients. The cookie's name carries the service's port, because loopback cookies are shared across ports.
+
+**Audit file.** The audit is a JSON Lines file in the state directory with owner-only permissions, appended to and read with standard command-line tools. An authorization that cannot be stored or audited is refused; a revocation always applies and reports an audit entry that could not be written.
 
 **Read projections.** The overview and records read from a projection over Dispatch Requests, Assignments, Executors, group reports and their delivery outcomes, keyed by conversation. Penny contributes only its readiness and storage locations.
 
@@ -204,7 +210,7 @@ The interface is Chinese and light only; the project's capability declaration di
 
 ## Testing Decisions
 
-- **Authorization.** Tested at the HTTP boundary of the real local service: Host refusal, unauthorized access to every route, link expiry and single use, persistence across restart, revocation closing connections, and the fixture-mode exception.
+- **Authorization.** Tested at the HTTP boundary of the real local service: Host refusal, unauthorized access to every route, link expiry and single use, persistence across restart, revocation closing connections, and the fixture-mode exception. The control channel and the Codex plugin's authorization are tested over a real Unix socket, and the plugin's renewal at its HTTP client boundary.
 - **Projections.** Tested at their public interface from durable dispatch records, including partial failure, cross-team Assignments, delivery states and Penny's exclusion.
 - **Private conversations.** The real-main path drives console messages through admission and verifies destinations, requester checks, private isolation and confirmation once-only behavior.
 - **Pages.** Playwright end-to-end tests drive the console as the owner: login, tree and records, drawer behavior, chat drafts, private request creation and a private supplement to a group request.

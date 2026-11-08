@@ -11,6 +11,8 @@ import { DemoService, type WeixinChannel } from "../src/demo-service.js";
 import { DurableInboundStore } from "../src/durable-inbound-store.js";
 import { FixturePort } from "../src/fixture-port.js";
 import { createDemoServer } from "../src/http-server.js";
+import { ConsoleAccess } from "../src/console-access.js";
+import { exchangeLoginLink } from "../e2e/console-session.js";
 import { WeixinCodexService, type CodexAgent } from "../src/weixin-codex-service.js";
 
 // Inject model output at the external model boundary; do not inject semantic
@@ -43,7 +45,8 @@ describe("main reply protocol through HTTP fixture ingress", () => {
     const store = new CodexServiceStore(path.join(directory, "codex-service.json"));
     const codex = new WeixinCodexService(channel, agent, store, directory);
     const demo = new DemoService(port, async () => "data:image/svg+xml,fixture", codex);
-    const server = createDemoServer(demo, { fixtureMode: true });
+    const access = new ConsoleAccess({ directory: path.join(directory, "console") });
+    const server = createDemoServer(demo, { fixtureMode: true, access });
     try {
       await port.start();
       await codex.start();
@@ -54,12 +57,13 @@ describe("main reply protocol through HTTP fixture ingress", () => {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("missing fixture address");
       const origin = `http://127.0.0.1:${address.port}`;
+      const cookie = await exchangeLoginLink(access.issueLoginLink(address.port).url);
       const send = () => fetch(`${origin}/api/fixture/inbound`, {
         method: "POST", headers: { "content-type": "application/json", origin },
         body: JSON.stringify({ text: "只回复：收到" }),
       });
       expect((await send()).status).toBe(200);
-      const failed = await (await fetch(`${origin}/api/state`)).json();
+      const failed = await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json();
       expect(sent).toHaveLength(2); // Unavailable fixture typing sends one acknowledgement.
       expect(sent[1]).toBe("我暂时无法处理这条消息，请稍后再发一条新消息。");
       expect(reply).toHaveBeenCalledOnce();
@@ -70,7 +74,7 @@ describe("main reply protocol through HTTP fixture ingress", () => {
       expect(store.load().transcript.at(-1)?.replyFailure).toBe(code);
 
       expect((await send()).status).toBe(200);
-      const recovered = await (await fetch(`${origin}/api/state`)).json();
+      const recovered = await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json();
       expect(sent).toHaveLength(4);
       expect(sent[3]).toBe("收到");
       expect(reply).toHaveBeenCalledTimes(2);

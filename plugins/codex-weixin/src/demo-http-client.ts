@@ -150,16 +150,22 @@ function parsePublicState(value: unknown): DemoStateResult {
 
 export class DemoHttpClient {
   private readonly baseUrl: string;
+  private credential: Promise<string> | undefined;
 
+  /**
+   * `authorize` returns the console cookie (`name=value`) for the local service. The credential is kept in
+   * memory only; a 401 means it was revoked or replaced, so the client authorizes once more and retries.
+   */
   constructor(
     baseUrl = "http://127.0.0.1:4317",
     private readonly fetchFn: FetchLike = fetch,
+    private readonly authorize?: () => Promise<string>,
   ) {
     this.baseUrl = requireLoopbackBaseUrl(baseUrl);
   }
 
   async getState(): Promise<DemoStateResult> {
-    const response = await this.fetchFn(`${this.baseUrl}/api/state`, {
+    const response = await this.send(`${this.baseUrl}/api/state`, {
       headers: { accept: "application/json" },
     });
     if (!response.ok) throw new Error(`微信 Demo 状态请求失败（HTTP ${response.status}）`);
@@ -210,8 +216,26 @@ export class DemoHttpClient {
     return this.post("/api/codex/permissions/configure", { mode, rootIds, confirmed });
   }
 
+  private async send(url: string, init: RequestInit & { headers: Record<string, string> }): Promise<Response> {
+    if (!this.authorize) return this.fetchFn(url, init);
+    for (let attempt = 0; ; attempt += 1) {
+      const current = this.credential ?? this.authorize();
+      this.credential = current;
+      let cookie: string;
+      try {
+        cookie = await current;
+      } catch (error) {
+        if (this.credential === current) this.credential = undefined;
+        throw error;
+      }
+      const response = await this.fetchFn(url, { ...init, headers: { ...init.headers, cookie } });
+      if (response.status !== 401 || attempt > 0) return response;
+      if (this.credential === current) this.credential = undefined;
+    }
+  }
+
   private async post(pathname: string, body: Record<string, unknown>): Promise<DemoStateResult> {
-    const response = await this.fetchFn(`${this.baseUrl}${pathname}`, {
+    const response = await this.send(`${this.baseUrl}${pathname}`, {
       method: "POST",
       headers: {
         accept: "application/json",

@@ -33,4 +33,4 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 - Pairing requires an identifiable existing owner, a stopped service and a configured bot. There is no chat-based member administration, runtime channel switching or task transfer.
 - Feishu video, audio and interactive cards are unsupported. Outgoing images are limited to 10 MiB and files to 30 MiB.
 - Migrating old personal reminder preferences requires a valid private Feishu binding. Disabled destinations retain their own work without fallback. Unfinished plan-reminder batches are not rebuilt for another conversation.
-- The existing management panel remains Weixin-specific; Feishu reuses saved permissions and local status. Channel acceptance does not prove phone receipt.
+- The existing management panel remains Weixin-specific; Feishu reuses saved permissions and local status. Both open only in a browser authorized through the [local login](agent-console.md). Channel acceptance does not prove phone receipt.
