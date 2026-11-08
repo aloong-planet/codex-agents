@@ -74,6 +74,21 @@ it("shares one runtime among concurrent work on the same key, running the work a
   await Promise.all(shared);
 });
 
+it("keeps a shared runtime in use until the last of its work ends", async () => {
+  const { pool, create, created } = harness(1);
+  const first = deferred(), second = deferred();
+  const shared = [pool.use("s", create("s"), () => first.promise), pool.use("s", create("s"), () => second.promise)];
+  const other = pool.use("t", create("t"), async () => "t-done");
+  await settle();
+  first.resolve();
+  await settle();
+  expect(created.map(({ key, closed }) => [key, closed])).toEqual([["s", false]]);
+  second.resolve();
+  await expect(Promise.all(shared)).resolves.toEqual([undefined, undefined]);
+  await expect(other).resolves.toBe("t-done");
+  expect(created.map(({ key, closed }) => [key, closed])).toEqual([["s", true], ["t", false]]);
+});
+
 it("releases the least recently used idle runtime, not the oldest, for waiting work before the idle limit", async () => {
   const { pool, create, created, closeGates, maxLive } = harness(2);
   await pool.use("a", create("a"), async () => {});
