@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
+import { memoryAccountId, ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
 import type { TeamDefinitions } from "../src/team-registry.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } from "../src/workflow-tool-host.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 
 // Resolution and host-tool boundary seams. The shared host is the real WorkflowToolHost over the production catalog,
-// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts;
-// main's Coordinator wiring is a recorded gap there.
+// with its gateway and inline executor injected as in workflow-tool-host.test.ts. Executor wiring in real main is in agent-dispatch.integration.test.ts,
+// which also drives main's Coordinator wiring: its runtime and tools in "builds the Coordinator's and the Team Leader's runtimes …", and its
+// memory scope in "gives the Coordinator the group memory, …".
 const definitions: TeamDefinitions = {
   coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: "cli_0123456789abcdef",
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },
@@ -29,17 +30,42 @@ const offered = (tools: ProfileToolHost) => tools.definitions().flatMap((namespa
 describe("agent profile resolution", () => {
   it.each([
     ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "协调规则", hostTools: [], memoryScope: "group" }],
-    ["a Team Leader with its own instructions, no host tools and no memory, even when its profile lists tools", { role: "leader", teamId: "bill" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "负责人规则", hostTools: [], memoryScope: "none" }],
-    ["an Executor's host tools as its allowlist intersected with the catalog", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
-      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: "group" }],
+      { instructions: "协调规则", hostTools: [], memoryScope: { kind: "group" } }],
+    ["a Team Leader with its own instructions, no host tools and its own memory, even when its profile lists tools", { role: "leader", teamId: "bill" } as const, PRODUCTION_TOOL_IDS,
+      { instructions: "负责人规则", hostTools: [], memoryScope: { kind: "leader", teamId: "bill" } }],
+    ["an Executor's host tools as its allowlist intersected with the catalog, and its profile's memory", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
+      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" } }],
   ])("resolves %s", (_case, agent, catalog, expected) => {
     expect(resolveAgentProfile(definitions, agent, catalog)).toEqual(expected);
   });
 
   it.each([["an unknown team", "nobody", "executor-1"], ["an unknown Executor profile", "bill", "missing"]])("refuses %s", (_case, teamId, profileId) => {
     expect(() => resolveAgentProfile(definitions, { role: "executor", teamId, profileId }, PRODUCTION_TOOL_IDS)).toThrow(/^agent_profile_unknown$/);
+  });
+});
+
+describe("agent memory accounts", () => {
+  const leader = (teamId: string) => ({ kind: "leader", teamId }) as const;
+  const profile = (teamId: string, profileId: string) => ({ kind: "profile", teamId, profileId }) as const;
+  it("keeps the group memory in the group's own account", () => {
+    expect(memoryAccountId("feishu.group.a", { kind: "group" })).toBe("feishu.group.a");
+  });
+
+  it.each([
+    ["the same leader in the same group", true, ["feishu.group.a", leader("alice")], ["feishu.group.a", leader("alice")]],
+    ["the same profile in the same group", true, ["feishu.group.a", profile("alice", "executor-1")], ["feishu.group.a", profile("alice", "executor-1")]],
+    ["one leader in two groups", false, ["feishu.group.a", leader("alice")], ["feishu.group.b", leader("alice")]],
+    ["two leaders in one group", false, ["feishu.group.a", leader("alice")], ["feishu.group.a", leader("bill")]],
+    ["one profile in two groups", false, ["feishu.group.a", profile("alice", "executor-1")], ["feishu.group.b", profile("alice", "executor-1")]],
+    ["two teams' profiles with the same profile ID", false, ["feishu.group.a", profile("alice", "executor-1")], ["feishu.group.a", profile("bill", "executor-1")]],
+    ["two profiles of one team", false, ["feishu.group.a", profile("alice", "executor-1")], ["feishu.group.a", profile("alice", "writer")]],
+    ["a leader and its team's profile", false, ["feishu.group.a", leader("alice")], ["feishu.group.a", profile("alice", "executor-1")]],
+  ] as const)("gives %s a shared account: %s", (_case, same, left, right) => {
+    const [a, b] = [memoryAccountId(left[0], left[1]), memoryAccountId(right[0], right[1])];
+    for (const account of [a, b]) expect(account).toMatch(/^feishu\.dispatch\.[0-9a-f]{64}$/);
+    expect(a === b).toBe(same);
+    expect([a, b]).not.toContain(left[0]);
+    expect([a, b]).not.toContain(right[0]);
   });
 });
 

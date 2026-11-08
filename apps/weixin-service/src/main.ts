@@ -78,10 +78,10 @@ import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch
 import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
-import { COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
+import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type DefinitionsVersion, type TeamDefinitions } from "./team-registry.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultPlan } from "./fixture-team-leader.js";
-import { ProfileToolHost, resolveAgentProfile, type ResolvedAgentProfile } from "./agent-profile.js";
+import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { ConsoleAudit } from "./console-audit.js";
@@ -764,24 +764,46 @@ const personalMemoryCurator: AccountMemoryCurator = fixtureMode
       accountMemoryCuratorCwd,
     );
 let groupMemoryCurator: AccountMemoryCurator | undefined;
+// Team Leader and Executor memories share the isolated group curator's runtime, which only the group curator closes. Their tool
+// host has no notification route and no reminder ownership, so a planned event there gets neither a delivery destination nor a
+// reminder intent; group reminders stay with the group memory (agent-dispatch::REQ-012).
+let dispatchMemoryCurator: AccountMemoryCurator | undefined;
+// Fixture mode only: what each fixture curator was asked to curate, so whole-app cases can see which memory a turn reached.
+const fixtureMemoryCurations: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }> = [];
+const fixtureCurator = (curator: "group" | "dispatch"): AccountMemoryCurator => ({ close: () => {}, curate: async (input) => {
+  fixtureMemoryCurations.push({ curator, accountId: input.accountId, turns: input.turns.map(({ userEntry, assistantEntry }) => ({ user: userEntry.text,
+    ...(assistantEntry ? { assistant: assistantEntry.text } : {}) })) });
+  if (fixtureMemoryCurations.length > 40) fixtureMemoryCurations.shift();
+  return { status: "noop" };
+} });
 if (feishuConfiguration?.owner.hasGroups) {
-  if (fixtureMode) groupMemoryCurator = { curate: async () => ({ status: "noop" }), close: () => {} };
-  else {
+  if (fixtureMode) {
+    groupMemoryCurator = fixtureCurator("group");
+    if (feishuConfiguration.dispatch) dispatchMemoryCurator = fixtureCurator("dispatch");
+  } else {
     try {
       const runtime = isolatedConversation("groupMemoryCurator");
       groupMemoryCurator = new CodexAccountMemoryCurator(runtime.agent, accountMemoryTools, runtime.cwd);
+      if (feishuConfiguration.dispatch) {
+        const curator = new CodexAccountMemoryCurator(runtime.agent, new AccountMemoryToolHost(accountMemoryStore, accountMemorySearch), runtime.cwd);
+        dispatchMemoryCurator = { curate: (input) => curator.curate(input), cancelAccount: (accountId) => curator.cancelAccount(accountId), close: () => {} };
+      }
     } catch { process.stderr.write("group_memory_runtime_unavailable\n"); }
   }
 }
 const accountMemoryCurator: AccountMemoryCurator = {
   curate: (input) => {
+    if (input.accountId.startsWith(DISPATCH_MEMORY_ACCOUNT_PREFIX)) {
+      if (!dispatchMemoryCurator) throw new Error("group_memory_unbound");
+      return dispatchMemoryCurator.curate(input);
+    }
     if (!input.accountId.startsWith("feishu.group.")) return personalMemoryCurator.curate(input);
     if (!groupMemoryCurator || !notificationRoute?.ownsMemoryScope(input.accountId)) throw new Error("group_memory_unbound");
     return groupMemoryCurator.curate(input);
   },
-  cancelAccount: (accountId) => accountId.startsWith("feishu.group.")
-    ? groupMemoryCurator?.cancelAccount?.(accountId) : personalMemoryCurator.cancelAccount?.(accountId),
-  close: () => settleCleanup([() => personalMemoryCurator.close(), () => groupMemoryCurator?.close()]),
+  cancelAccount: (accountId) => accountId.startsWith(DISPATCH_MEMORY_ACCOUNT_PREFIX) ? dispatchMemoryCurator?.cancelAccount?.(accountId)
+    : accountId.startsWith("feishu.group.") ? groupMemoryCurator?.cancelAccount?.(accountId) : personalMemoryCurator.cancelAccount?.(accountId),
+  close: () => settleCleanup([() => personalMemoryCurator.close(), () => groupMemoryCurator?.close(), () => dispatchMemoryCurator?.close()]),
 };
 const planMonitor = new PlanFollowUpMonitor({
     store: accountMemoryStore,
@@ -870,11 +892,23 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     }
     return found;
   };
-  // Every resolved scope is the group memory until per-agent visibility scopes exist.
-  const memoryAccount = (scope: ResolvedAgentProfile["memoryScope"], event: import("./channel-contract.js").InboundContent) =>
-    scope === "group" ? configuration.owner.memoryScope(event.accountId, event.target) : undefined;
+  // Each agent recalls and captures only its own scope's account: the group's for the Coordinator, derived ones for Team Leaders
+  // and Executors (agent-dispatch::REQ-012). Every account is registered before use, so recall never depends on other paths.
+  const memoryAccount = (scope: AgentMemoryScope, event: import("./channel-contract.js").InboundContent) => {
+    const account = memoryAccountId(configuration.owner.memoryScope(event.accountId, event.target), scope);
+    accountMemory.registerAccount(account);
+    return account;
+  };
   const coordinatorProfile = resolveAgentProfile(definitions, { role: "coordinator" }, catalogToolIds);
-  const memory = (event: import("./channel-contract.js").InboundContent) => accountMemory.recall(memoryAccount(coordinatorProfile.memoryScope, event)!, event.text);
+  const memory = {
+    recall: (scope: AgentMemoryScope, event: import("./channel-contract.js").InboundContent, query: string) => accountMemory.recall(memoryAccount(scope, event), query),
+    capture: async (scope: AgentMemoryScope, turn: import("./agent-dispatch.js").DispatchMemoryTurn) => {
+      await accountMemory.captureTurn({ accountId: memoryAccount(scope, turn.event), target: turn.event.target,
+        userEntry: { source: { eventKey: turn.event.key, target: turn.event.target, senderAccountId: turn.senderAccountId }, id: turn.userId, text: turn.userText,
+          createdAt: turn.event.receivedAt, status: "completed" },
+        assistantEntry: { id: turn.assistantId, text: turn.assistantText, createdAt: Date.now(), status: "completed" } });
+    },
+  };
   // Building a profile's tool view compiles its tool schemas (about 50 ms), so one view is kept per distinct tool set.
   const toolViews = new Map<string, ProfileToolHost>();
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob, assignment: import("./agent-dispatch-types.js").DispatchAssignment) => {
@@ -914,15 +948,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const teamView = (teamId: string, version: number) => {
     const versionDefinitions = definitionsFor(version), team = versionDefinitions.teams.find(({ id }) => id === teamId);
     if (!team) return undefined;
-    const instructions = resolveAgentProfile(versionDefinitions, { role: "leader", teamId }, catalogToolIds).instructions;
+    const { instructions, memoryScope } = resolveAgentProfile(versionDefinitions, { role: "leader", teamId }, catalogToolIds);
     return { leader: { id: team.id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions },
-      profiles: team.executorProfiles.map(({ id, name }) => ({ id, name })) };
+      profiles: team.executorProfiles.map(({ id, name }) => ({ id, name })), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
     agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
     contextRevision,
     profile: executorProfile,
-    memory: (job, scope) => accountMemory.recall(memoryAccount(scope, job.event)!, job.event.text),
+    memory: (job, scope, query) => memory.recall(scope, job.event, query),
     existingResult: (job) => {
       const event = job.executionEvent ?? job.event;
       const run = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId);
@@ -942,12 +976,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId: job.agentId }, tools);
     },
     prepareThread: (job, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId)); },
-    capture: async (job, scope, reply) => {
-      const event = job.executionEvent ?? job.event;
-      await accountMemory.captureTurn({ accountId: memoryAccount(scope, job.event)!, target: job.event.target,
-        userEntry: { source: { eventKey: event.key, target: event.target, senderAccountId: job.senderAccountId }, id: `${job.id}:user:${job.attempt}`, text: event.text, createdAt: event.receivedAt, status: "completed" },
-        assistantEntry: { id: `${job.id}:assistant:${job.attempt}`, text: reply, createdAt: Date.now(), status: "completed" } });
-    },
+    capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event, senderAccountId: job.senderAccountId,
+      userId: `${assignment.id}:user:${assignment.attempt}`, userText: brief, assistantId: `${assignment.id}:assistant:${assignment.attempt}`, assistantText: reply }),
     homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory),
       compact: (home, recordedThread) => compactRuntimeHome(home, recordedThread, fixtureCompactionHold ? { afterRemoval: () => {
         fs.writeFileSync(path.join(stateDirectory, "fixture-compaction-held"), "");
@@ -959,7 +989,12 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   executor.compactHomes();
   const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized, leader,
     definitionsVersion: () => teamDefinitions!.version, team: teamView, revision: contextRevision,
-    bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory,
+    // The current definitions decide which teams take work in a group, whatever version a request was planned under.
+    roster: (event) => {
+      const chatId = configuration.owner.deliveryTarget(event.accountId, event.target);
+      return chatId ? acceptingTeams(definitions, chatId) : [];
+    },
+    bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory, memoryScope: coordinatorProfile.memoryScope,
     completedWork: (job) => {
       const files = localFileTools.dispatchEvidence(job.id);
       const schedules = scheduledTasks.dispatchEvidence(job.id);
@@ -1088,7 +1123,7 @@ if (pennyConfigured) {
 }
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
-  fixtureThreadStarts: structuredClone(fixtureThreadStarts),
+  fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
     [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
 } : {}) } : {};

@@ -6,12 +6,20 @@ import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDel
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
+import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
-type Notice = { event: InboundContent; agentId: string; senderAccountId: string; text: string; bindingHash: string; presentation?: Omit<PendingPresentation, "acceptedAt"> };
+/**
+ * A group post. `requestId` ties it to the request it belongs to; `memory` marks the closing or result of a finished attempt,
+ * whose acceptance captures that attempt into the group memory.
+ */
+type Notice = { event: InboundContent; agentId: string; senderAccountId: string; text: string; bindingHash: string; presentation?: Omit<PendingPresentation, "acceptedAt">;
+  requestId?: string; memory?: { attempt: number; event: InboundContent; text: string } };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
-export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"] }>;
+export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"]; memoryScope: AgentMemoryScope }>;
+/** One turn captured into an agent's memory; `event` names the conversation and is the source of the user entry. */
+export type DispatchMemoryTurn = Readonly<{ event: InboundContent; senderAccountId: string; userId: string; userText: string; assistantId: string; assistantText: string }>;
 const ENDED: ReadonlyArray<DispatchAssignment["status"]> = ["completed", "failed", "cancelled", "interrupted"];
 
 /**
@@ -37,10 +45,18 @@ export class AgentDispatch {
     team(teamId: string, definitionsVersion: number): DispatchTeamView | undefined;
     /** The access revision that keys Team Leader sessions. */
     revision(): string;
+    /**
+     * The teams accepting work in the event's group under the current definitions, in registry order. Only they are routed
+     * to, receive new Assignments there and form its Team Directory (agent-dispatch::REQ-015/AC-01, AC-02).
+     */
+    roster(event: InboundContent): ReadonlyArray<Readonly<{ id: string; name: string; responsibility: string }>>;
     delivery: DispatchDelivery;
     authorized(event: InboundContent): boolean;
     bindingHash(event: InboundContent): string;
-    memory(event: InboundContent): string;
+    /** The Coordinator's memory scope, the group memory: only its turns recall it and only finished requests are captured into it. */
+    memoryScope: AgentMemoryScope;
+    /** Recall and capture of one agent's own memory scope in the event's conversation (agent-dispatch::REQ-012). */
+    memory: Readonly<{ recall(scope: AgentMemoryScope, event: InboundContent, query: string): string; capture(scope: AgentMemoryScope, turn: DispatchMemoryTurn): Promise<void> }>;
     completedWork(job: DispatchJob): string;
     presentation(event: InboundContent, runRef: string): Omit<PendingPresentation, "acceptedAt"> | undefined;
     presented(presentation: PendingPresentation): void;
@@ -55,9 +71,11 @@ export class AgentDispatch {
       CREATE TABLE IF NOT EXISTS dispatch_notice (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT);
       CREATE TABLE IF NOT EXISTS dispatch_assignment (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, request_id TEXT NOT NULL, payload TEXT NOT NULL);
     `);
-    if (!this.database.prepare("PRAGMA table_info(dispatch_notice)").all().some((column) => column.name === "accepted_at")) {
-      this.database.exec("ALTER TABLE dispatch_notice ADD COLUMN accepted_at INTEGER");
-    }
+    const columns = this.database.prepare("PRAGMA table_info(dispatch_notice)").all().map(({ name }) => name);
+    if (!columns.includes("accepted_at")) this.database.exec("ALTER TABLE dispatch_notice ADD COLUMN accepted_at INTEGER");
+    // Group posts of a request, and whether a capture into the group memory has taken them.
+    if (!columns.includes("request_id")) this.database.exec("ALTER TABLE dispatch_notice ADD COLUMN request_id TEXT");
+    if (!columns.includes("captured")) this.database.exec("ALTER TABLE dispatch_notice ADD COLUMN captured INTEGER");
   }
 
   admit(event: InboundContent): void {
@@ -143,13 +161,17 @@ export class AgentDispatch {
       const event = JSON.parse(String(row.payload)) as InboundContent, bindingHash = String(row.binding_hash);
       if (!this.eligible(event, bindingHash)) { this.finishInput(event.key); continue; }
       this.database.prepare("UPDATE dispatch_input SET state = 'classifying' WHERE id = ?").run(event.key);
-      if ((event.mentionedAgentIds?.length ?? 0) > 1) {
+      // Only teams accepting work in this group can be routed to or named; a mention of another team confers no priority.
+      const accepting = new Set(this.options.roster(event).map(({ id }) => id));
+      const agents = this.options.agents.filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
+      const mentioned = event.mentionedAgentIds?.filter((id) => agents.some((agent) => agent.id === id));
+      if ((mentioned?.length ?? 0) > 1) {
         await this.coordinate(event, bindingHash, "你点名了多个 Agent。这项事务希望由谁独立负责？");
         this.finishInput(event.key); continue;
       }
-      const input = { event, agents: this.options.agents.map(({ id, name, responsibility }) => ({ id, name, responsibility })),
+      const input = { event: mentioned ? { ...event, mentionedAgentIds: mentioned } : event, agents: agents.map(({ id, name, responsibility }) => ({ id, name, responsibility })),
         requests: this.jobs().filter((job) => job.event.target === event.target && job.event.senderId === event.senderId)
-          .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })), memory: this.options.memory(event) };
+          .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })), memory: this.options.memory.recall(this.options.memoryScope, event, event.text) };
       try {
         const pending = await this.options.pending?.(event);
         if (pending && !pending.handled && pending.cancelledRunRef) {
@@ -182,20 +204,21 @@ export class AgentDispatch {
         const decision = parseDispatchDecision(await this.options.classifier.classify(input), input);
         if (!this.eligible(event, bindingHash) || this.closing) { this.finishInput(event.key); continue; }
         if (decision.kind === "dispatch" || decision.kind === "propose") {
-          const agent = this.options.agents.find((candidate) => candidate.id === decision.agentId)!;
-          const named = this.options.agents.find(({ id }) => id === event.mentionedAgentIds?.[0]);
+          const agent = agents.find((candidate) => candidate.id === decision.agentId)!;
+          const named = agents.find(({ id }) => id === mentioned?.[0]);
           if (decision.kind === "dispatch" && named && named.id !== COORDINATOR_ID && named.id !== agent.id) {
             const coordinator = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
             const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 ${coordinator.name} 重新分派，由他独立处理。`;
-            const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation });
+            // The request's ID is its message key, so these posts belong to the request saved below.
+            const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation, requestId: event.key });
             if (!informed.ok) { this.finishInput(event.key); continue; }
-            const reassigned = await this.coordinate(event, bindingHash, `已将这项需求转派给 ${agent.name}。`);
+            const reassigned = await this.coordinate(event, bindingHash, `已将这项需求转派给 ${agent.name}。`, event.key);
             if (!reassigned.ok) { this.finishInput(event.key); continue; }
           }
           if (!this.job(event.key)) this.save({ id: event.key, event, bindingHash, agentId: agent.id, senderAccountId: agent.senderAccountId,
             summary: decision.summary, status: decision.kind === "propose" ? "proposed" : "queued", attempt: 0 });
           if (decision.kind === "propose") await this.coordinate(event, bindingHash,
-            `要不要请 ${agent.name} 帮你${decision.summary}？请回复这条建议确认，或告诉我暂时不用。`);
+            `要不要请 ${agent.name} 帮你${decision.summary}？请回复这条建议确认，或告诉我暂时不用。`, event.key);
         } else if (decision.kind === "confirm" || decision.kind === "decline") {
           const job = this.job(decision.requestId!);
           if (!job || job.status !== "proposed" || job.event.senderId !== event.senderId || job.event.target !== event.target || !this.eligible(job.event, job.bindingHash)) {
@@ -228,7 +251,7 @@ export class AgentDispatch {
             else if (job.status === "proposed") {
               job.summary = decision.summary || job.summary;
               job.executionEvent = { ...event, text: `${(job.executionEvent ?? job.event).text}\n补充要求：${event.text}` }; this.save(job);
-              await this.coordinate(event, bindingHash, "已补充到建议中。请确认是否开始处理。");
+              await this.coordinate(event, bindingHash, "已补充到建议中。请确认是否开始处理。", job.id);
             } else { this.endAssignment(job, "cancelled"); job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job); }
           }
         } else if (decision.kind === "retry" || decision.kind === "retry_report") {
@@ -269,13 +292,15 @@ export class AgentDispatch {
       const team = this.options.team(job.agentId, job.definitionsVersion);
       if (!team) throw new Error("dispatch_team_unavailable");
       if (!assignment) {
+        // A team that stopped accepting work in this group since admission gets no new Assignment there (agent-dispatch::REQ-015/AC-01).
+        if (!this.options.roster(job.event).some(({ id }) => id === job.agentId)) throw new Error("dispatch_team_unavailable");
         const plan = await this.options.leader.plan(this.leaderInput(job, team));
         if (signal.aborted) throw new Error("dispatch_cancelled");
         assignment = this.createAssignment(job, team, plan.assignments[0]!);
       }
       if (assignment.status === "queued") {
         const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`,
-          this.notice(job, `我安排${assignment.executor}（${assignment.profileName}）处理：${assignment.title}。完成后会在本群汇报。`));
+          { ...this.notice(job, `我安排${assignment.executor}（${assignment.profileName}）处理：${assignment.title}。完成后会在本群汇报。`), requestId: job.id });
         if (!start.ok) throw new Error("dispatch_receipt_unavailable");
         if (signal.aborted) throw new Error("dispatch_cancelled");
         assignment.status = "running"; this.saveAssignment(assignment);
@@ -292,7 +317,10 @@ export class AgentDispatch {
         if (!this.closing) await this.deliverNotice(report.id, report.notice);
         return;
       }
-      if (!job.cancelRequested) closing = await this.closeAssignment(job, team, assignment);
+      if (!job.cancelRequested) {
+        closing = await this.closeAssignment(job, team, assignment);
+        await this.rememberDivision(job, team, assignment, closing);
+      }
       job.status = assignment.status === "completed" ? "completed" : assignment.status === "cancelled" ? "cancelled" : "failed";
       job.result = closing ?? assignment.result ?? "";
       if (job.status === "failed") job.result += this.options.completedWork(job);
@@ -329,10 +357,25 @@ export class AgentDispatch {
     }
   }
 
-  private leaderInput(job: DispatchJob, team: DispatchTeamView): LeaderTurnInput {
+  /** The Team Leader's own record of an attempt: the Brief it received, its division and its closing (agent-dispatch::REQ-012/AC-02). */
+  private async rememberDivision(job: DispatchJob, team: DispatchTeamView, assignment: DispatchAssignment, closing: string): Promise<void> {
+    const { brief } = this.leaderInput(job, team, false);
+    try {
+      await this.options.memory.capture(team.memoryScope, { event: job.executionEvent ?? job.event, senderAccountId: job.senderAccountId,
+        userId: `${job.id}:leader:user:${job.attempt}`,
+        userText: `请求：${brief.message}${brief.latest ? `\n最新要求：${brief.latest}` : ""}\n协调摘要：${brief.summary}`,
+        assistantId: `${job.id}:leader:assistant:${job.attempt}`,
+        assistantText: `分工：${assignment.executor}（${assignment.profileName}）${assignment.title}\n收尾：${closing}` });
+    } catch { this.failure("dispatch_leader_memory_failed"); }
+  }
+
+  private leaderInput(job: DispatchJob, team: DispatchTeamView, recall = true): LeaderTurnInput {
     const latest = job.executionEvent && job.executionEvent.text !== job.event.text ? { latest: job.executionEvent.text } : {};
     return { requestId: job.id, leader: team.leader, profiles: team.profiles,
       brief: { message: job.event.text, ...latest, summary: job.summary },
+      // The Team Leader's own memory in this conversation; never the group memory or an Executor's (agent-dispatch::REQ-012/AC-02).
+      memory: recall ? this.options.memory.recall(team.memoryScope, job.event, job.executionEvent?.text ?? job.event.text) : "",
+      directory: this.options.roster(job.event).map(({ name, responsibility }) => ({ name, responsibility })),
       session: { accountId: job.event.accountId, target: job.event.target, bindingHash: job.bindingHash, revision: this.options.revision(),
         definitionsVersion: job.definitionsVersion! },
       fixtureMessageId: job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId };
@@ -363,7 +406,15 @@ export class AgentDispatch {
 
   private recordResult(job: DispatchJob, id = `${job.id}:result:${job.attempt}`, notice = this.notice(job, job.result!, true)): { id: string; notice: Notice } {
     job.reportId = id;
-    const report = { id: job.reportId, notice };
+    // A finished attempt is captured into the group memory once its report is accepted. A cancelled or waiting request is not:
+    // withdrawn work must leave no memory-derived reminder, and a waiting one is captured with its closing.
+    const finished = job.status === "completed" || job.status === "failed";
+    const attemptEvent = { ...(job.executionEvent ?? job.event) };
+    delete attemptEvent.discussion;
+    // A confirmation or a proposal's supplement extends the request's message; a later supplement replaces the attempt's
+    // message, so the request's own message goes in front of it (agent-dispatch::REQ-012/AC-01).
+    const text = attemptEvent.text.startsWith(job.event.text) ? attemptEvent.text : `${job.event.text}\n补充要求：${attemptEvent.text}`;
+    const report = { id: job.reportId, notice: { ...notice, requestId: job.id, ...(finished ? { memory: { attempt: job.attempt, event: attemptEvent, text } } : {}) } };
     this.transaction(() => {
       this.queueNotice(report.id, report.notice);
       if (job.status === "completed" && job.supplements?.length) {
@@ -380,9 +431,11 @@ export class AgentDispatch {
     catch (error) { this.database.exec("ROLLBACK"); throw error; }
   }
 
-  private async coordinate(event: InboundContent, bindingHash: string, text: string) {
+  /** A Coordinator post; `requestId` names the request it belongs to, if any. */
+  private async coordinate(event: InboundContent, bindingHash: string, text: string, requestId?: string) {
     const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
-    return this.deliverNotice(`${event.key}:coordination`, { event, bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, text });
+    return this.deliverNotice(`${event.key}:coordination`, { event, bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, text,
+      ...(requestId ? { requestId } : {}) });
   }
   private notice(job: DispatchJob, text: string, result = false): Notice {
     const presentation = result && job.status === "waiting" && job.runRef ? this.options.presentation(job.executionEvent ?? job.event, job.runRef) : undefined;
@@ -395,7 +448,30 @@ export class AgentDispatch {
     catch { this.failure("dispatch_presentation_record_failed"); }
   }
   private queueNotice(id: string, notice: Notice) {
-    this.database.prepare("INSERT OR IGNORE INTO dispatch_notice(id, payload, state) VALUES (?, ?, 'queued')").run(id, JSON.stringify(notice));
+    this.database.prepare("INSERT OR IGNORE INTO dispatch_notice(id, payload, state, request_id) VALUES (?, ?, 'queued', ?)").run(id, JSON.stringify(notice), notice.requestId ?? null);
+  }
+  /**
+   * Captures a finished attempt into the group memory, through the Coordinator's scope: the request message with any
+   * confirmation or supplement, and every post of the request accepted since its previous capture, in posting order.
+   */
+  private async rememberRequest(notice: Notice): Promise<void> {
+    if (!notice.requestId || !notice.memory) return;
+    const requestId = notice.requestId;
+    // The delivery outcome is already recorded; a memory failure never changes it.
+    try {
+      const job = this.job(requestId);
+      if (!job) return;
+      let posts: string[] = [];
+      this.transaction(() => {
+        posts = this.database.prepare("SELECT payload FROM dispatch_notice WHERE request_id = ? AND state = 'accepted' AND captured IS NULL ORDER BY accepted_at, sequence")
+          .all(requestId).map((row) => (JSON.parse(String(row.payload)) as Notice).text);
+        this.database.prepare("UPDATE dispatch_notice SET captured = 1 WHERE request_id = ? AND state = 'accepted' AND captured IS NULL").run(requestId);
+      });
+      // The attempt's own message: a promoted supplement may already have replaced the request's current one.
+      const { attempt, event, text } = notice.memory;
+      await this.options.memory.capture(this.options.memoryScope, { event, senderAccountId: job.senderAccountId,
+        userId: `${job.id}:user:${attempt}`, userText: text, assistantId: `${job.id}:assistant:${attempt}`, assistantText: posts.join("\n") });
+    } catch { this.failure("dispatch_group_memory_failed"); }
   }
   private async deliverNotice(id: string, notice: Notice): Promise<SendTextResult> {
     this.queueNotice(id, notice);
@@ -416,7 +492,7 @@ export class AgentDispatch {
     const state = result.ok ? "accepted" : result.reason === "unknown" || (result.acceptedSegments ?? 0) > 0 ? "unknown" : "rejected";
     const acceptedAt = result.ok ? Date.now() : null;
     this.database.prepare("UPDATE dispatch_notice SET state = ?, result = ?, accepted_at = ? WHERE id = ?").run(state, JSON.stringify(result), acceptedAt, id);
-    if (acceptedAt !== null) this.markPresented(notice, acceptedAt);
+    if (acceptedAt !== null) { this.markPresented(notice, acceptedAt); await this.rememberRequest(notice); }
     return result;
   }
   private assignments(requestId: string): DispatchAssignment[] {

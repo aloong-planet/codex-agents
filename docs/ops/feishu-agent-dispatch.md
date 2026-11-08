@@ -79,10 +79,16 @@ Use one test group, the owner's existing allowlist entry and harmless files in a
 | Genuine wrong-role mention | Use Feishu's actual @ selector to mention Bill for a code problem. | Bill explains the mismatch, Sam reassigns, and only Jack's team handles it. A typed name alone does not confer mention priority. |
 | Ownership and interruption | During a safe request, send a supplement, then cancel as its author. Repeat another member's attempted control only after explicitly adding that member for testing. | Author controls are received while work is active; other members cannot take over. Completed actions are reported, not described as undone. |
 | File choice | Ask for an ambiguous harmless file selection; answer as the original author, including after a coordinated restart. | The selected file arrives through the original Team Leader's bot in the original group, followed by its closing message; another member's short answer cannot select it. |
-| Reminder and memory | Ask one team for a short one-time reminder and save a harmless group fact. Restart before it is due; later ask another team for that fact. | Reminder retains its Team Leader's bot and group; curated group facts can be shared across teams. Private/other-group facts remain inaccessible. |
+| Reminder and memory | Ask one team for a short one-time reminder and to note a harmless fact. Restart before it is due; later ask the same team, then another team, about that fact. | Reminder retains its Team Leader's bot and group. The same team's Executors recall the fact; another team's Executors do not, and no Executor sees the group's earlier discussion. Private/other-group facts remain inaccessible. |
 | Legacy channels | Use an existing private Weixin command and Feishu private chat, plus an enabled group outside dispatch. | Existing destinations, file grants and mention-only behavior remain intact. Confirm actual receipt separately from channel acceptance. |
 
 Natural-language routing can clarify instead of dispatching when information is missing. Preserve the actual response rather than replacing it with an expected script. Do not force real failures that risk duplicate actions; deterministic restart, revocation, unknown-delivery and rejected-report tests cover those mechanics, while a real unknown send must be inspected in the original group before any further action.
+
+## First start after the visibility upgrade
+
+- Group memory curated before this upgrade may hold facts the curator drew from Executor results. It is kept, and Sam may recall those facts; new captures hold only the request and what Sam and the Team Leaders posted for it.
+- To read a group's memory, open `GET /api/state` in an owner-authorized browser. It is served by `apps/weixin-service/src/http-server.ts:168`, or by `apps/weixin-service/src/channel-status-server.ts:19` when only Feishu is enabled. The text is the `memory` field of the entry in `codex.memory.accounts[]` whose `accountId` is the group's `feishu.group.<hash>` memory account. The console page does not show it, and no route deletes it.
+- While no console save exists, the first start records a new team-registry version, because Jack's seeded Executor profile changed. Requests planned afterwards use that version.
 
 ## First start after the team-handling upgrade
 

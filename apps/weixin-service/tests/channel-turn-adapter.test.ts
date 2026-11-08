@@ -14,6 +14,8 @@ it("prepares Feishu text with shared file tools without advertising unimplemente
   const text = prepared.input.filter((input) => input.type === "text").map((input) => input.text).join("\n");
   expect(text).toContain("个人飞书目标");
   expect(text).toContain("只回复：原文。");
+  // Private turns keep the code-and-tests example of the goal-scope rule; dispatch Executors get it only from Jack's profile.
+  expect(text).toContain("例如只要求提供代码和测试用例");
   expect(text).toContain("scope:opaque");
   expect(text).toContain("暂不支持发送图片或文件");
   expect(text).not.toContain("weixin.send_files");

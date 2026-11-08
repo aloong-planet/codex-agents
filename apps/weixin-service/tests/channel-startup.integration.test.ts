@@ -12,6 +12,9 @@ import { AccountMemoryToolHost } from "../src/account-memory-tool-host.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 import { config, dispatchConfig, freePort, start, stop } from "./support/real-main.js";
+import { seedMemory } from "./support/memory.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
+import { memoryAccountId } from "../src/agent-profile.js";
 
 // Real main composition and durable processing; external model/Feishu/Weixin peers are fixtures.
 // Live app permissions, delivery and phone receipt require separately authorized user-observed acceptance.
@@ -940,7 +943,9 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
     await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
       scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
-    const at = new Date(Date.now() + 10000).toISOString();
+    // The reminders must fall due only after the restart. Their due time is wall-clock time in another process, so it leaves the
+    // requests below a wide margin, and the case fails with a reason if they still outlast it, rather than timing out later.
+    const due = Date.now() + 20_000, at = new Date(due).toISOString();
     for (const agentId of ["alice", "bill", "jack"]) {
       const text = `请保存并发回 ${agentId} 计划，稍后在本群提醒，原文：${agentId} 独立提醒`;
       await running.post("/api/fixture/feishu/inbound", {
@@ -973,8 +978,10 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     });
     const managed = await running.until((state) => state.agentFixtureOutboxes?.bill?.media.length === 2 && state.agentDispatch?.jobs.at(-1)?.status === "completed");
     expect(managed.agentFixtureOutboxes?.bill?.media[1]).toMatchObject({ chatId: "oc_alpha", fileName: "managed-reminder.txt", bytesBase64: Buffer.from("运营资料提醒").toString("base64") });
+    expect(Date.now(), "the requests outlasted the reminders' due time, so the first process would deliver them").toBeLessThan(due - 2_000);
     await running.close(); running = await start(directory, env);
-    const delivered = await running.until((state) => ["alice", "bill", "jack"].every((id) => state.agentFixtureOutboxes?.[id]?.text.length === 1));
+    const delivered = await running.until((state) => ["alice", "bill", "jack"].every((id) => state.agentFixtureOutboxes?.[id]?.text.length === 1),
+      Math.max(0, due - Date.now()) + processWaitLimitMs);
     expect(delivered.agentFixtureOutboxes).toEqual({
       alice: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "alice 独立提醒" })], media: [] },
       bill: { text: [expect.objectContaining({ chatId: "oc_alpha", message: "bill 独立提醒" })], media: [] },
@@ -984,7 +991,7 @@ it("keeps each specialist identity for files and scheduled reminders across rest
     expect(delivered.feishuFixtureTextOutbox).toEqual([]);
     expect(delivered.weixinFixtureReplies).toEqual([]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
-}, 30000);
+}, 60000);
 
 it.each([["accepted", "2"], ["rejected", "2"], ["accepted", "取消"]] as const)("resumes a specialist file choice after restart only for its original requester (%s prompt, %s response)", async (promptOutcome, choice) => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-pending-"));
@@ -1242,14 +1249,15 @@ it("retries failed dispatch after restart without repeating a completed edit wit
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 
-it("shares only curated group facts across isolated role sessions and resets them after permission changes", async () => {
+it("keeps group and private memory out of Executor turns, and shares memory per Executor profile across restart and permission changes", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-memory-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
-  const send = (id: string, chat: string, agentId: string, text: string) => running!.post("/api/fixture/feishu/inbound", {
+  const send = (id: string, chat: string, text: string, dispatchDecision: unknown) => running!.post("/api/fixture/feishu/inbound", {
     event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
       message: { message_id: id, create_time: String(Date.now()), chat_id: chat, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text }) } },
-    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: text, message: "" },
+    dispatchDecision,
   });
+  const dispatch = (id: string, chat: string, agentId: string, text: string) => send(id, chat, text, { kind: "dispatch", agentId, requestId: null, summary: text, message: "" });
   try {
     dispatchConfig(directory, true);
     const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
@@ -1261,51 +1269,53 @@ it("shares only curated group facts across isolated role sessions and resets the
     await running.until((state) => state.channels?.feishu?.ready === true);
     await running.post("/api/fixture/workflow/inbound", { text: "PRIVATE_EXECUTION_MARKER。请记住私人信息。" });
     const personal = await running.until((state) => state.weixinFixtureReplies?.length === 2);
-    const memory = new AccountMemoryStore(join(directory, "memory")), curator = new AccountMemoryToolHost(memory);
-    const seed = async (accountId: string, target: string, id: string, text: string) => {
-      expect(await curator.commit({ accountId, jobId: id, batchId: id, mutationPolicy: { mode: "free_add" }, evidenceEntryIds: [id],
-        evidenceTexts: { [id]: text }, evidenceOrigins: { [id]: { eventKey: id, target } } },
-      { batchId: id, basedOnRevision: memory.read(accountId).revision, decisions: [{ kind: "remember", category: "projects", value: text, evidenceEntryIds: [id], confidence: 1 }] })).toMatchObject({ status: "committed" });
-    };
     const personalEntry = personal.codex.transcript.find((entry) => entry.role === "user" && entry.text.startsWith("PRIVATE_EXECUTION"))!;
-    await seed("fixture-bot", personalEntry.target, personalEntry.id, "PRIVATE_MEMORY_SENTINEL");
-    await send("om_alpha_seed", "oc_alpha", "alice", "请记住 ALPHA_BUSINESS_FACT");
-    const alpha = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
-    const alphaJob = alpha.agentDispatch!.jobs[0]!;
-    const alphaTarget = binding.owner.groupAddress("oc_alpha")!;
-    await seed(binding.owner.memoryScope(alphaTarget.accountId, alphaTarget.target), alphaTarget.target, alphaJob.id, "ALPHA_BUSINESS_FACT");
-    await send("om_beta_seed", "oc_beta", "alice", "请记住 BETA_BUSINESS_FACT");
-    const beta = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 4);
-    const betaJob = beta.agentDispatch!.jobs[1]!;
-    const betaTarget = binding.owner.groupAddress("oc_beta")!;
-    await seed(binding.owner.memoryScope(betaTarget.accountId, betaTarget.target), betaTarget.target, betaJob.id, "BETA_BUSINESS_FACT");
-    await send("om_alpha_bill", "oc_alpha", "bill", "请根据群业务事实安排出行");
+    await seedMemory(directory, "fixture-bot", personalEntry.target, personalEntry.id, "PRIVATE_MEMORY_SENTINEL");
+    const [alphaTarget, betaTarget] = [binding.owner.groupAddress("oc_alpha")!, binding.owner.groupAddress("oc_beta")!];
+    const [alphaGroup, betaGroup] = [alphaTarget, betaTarget].map(({ accountId, target }) => binding.owner.memoryScope(accountId, target));
+    await seedMemory(directory, alphaGroup!, alphaTarget.target, "alpha-seed", "ALPHA_BUSINESS_FACT");
+    await seedMemory(directory, betaGroup!, betaTarget.target, "beta-seed", "BETA_BUSINESS_FACT");
+    await seedMemory(directory, memoryAccountId(alphaGroup!, { kind: "profile", teamId: "bill", profileId: "executor-1" }), alphaTarget.target, "bill-profile-seed", "BILL_PROFILE_FACT");
+    await seedMemory(directory, memoryAccountId(alphaGroup!, { kind: "profile", teamId: "alice", profileId: "executor-1" }), alphaTarget.target, "alice-profile-seed", "ALICE_ALPHA_PROFILE_FACT");
+    // Ignored discussion reaches the Coordinator with the next message, never an Executor.
+    await send("om_alpha_discussion", "oc_alpha", "DISCUSSION_MARKER_X1，周末大家有空吗", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" });
+    await dispatch("om_alpha_alice", "oc_alpha", "alice", "请整理本周运营要点");
+    await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    await dispatch("om_beta_alice", "oc_beta", "alice", "请整理本周运营要点");
+    await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 4);
+    await dispatch("om_alpha_bill", "oc_alpha", "bill", "请根据群业务事实安排出行");
     await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
-    await send("om_alpha_jack", "oc_alpha", "jack", "请根据群业务事实给出技术建议");
+    await dispatch("om_alpha_jack", "oc_alpha", "jack", "请根据群业务事实给出技术建议");
     const shared = await running.until((state) => state.agentFixtureOutboxes?.jack?.text.length === 2);
     expect(shared.fixtureModelRequests).toHaveLength(5);
     const [privateRequest, aliceAlpha, aliceBeta, billAlpha, jackAlpha] = shared.fixtureModelRequests!;
     expect(new Set([privateRequest!.threadId, aliceAlpha!.threadId, aliceBeta!.threadId, billAlpha!.threadId, jackAlpha!.threadId]).size).toBe(5);
-    for (const request of [billAlpha!, jackAlpha!]) {
-      expect(JSON.stringify(request.input)).toContain("ALPHA_BUSINESS_FACT");
-      expect(JSON.stringify(request.input)).not.toContain("BETA_BUSINESS_FACT");
-      expect(JSON.stringify(request.input)).not.toContain("PRIVATE_MEMORY_SENTINEL");
-      expect(JSON.stringify(request.input)).not.toContain("PRIVATE_EXECUTION_MARKER");
+    for (const request of [aliceAlpha!, aliceBeta!, billAlpha!, jackAlpha!]) {
+      for (const outside of ["ALPHA_BUSINESS_FACT", "BETA_BUSINESS_FACT", "PRIVATE_MEMORY_SENTINEL", "PRIVATE_EXECUTION_MARKER", "DISCUSSION_MARKER_X1"]) {
+        expect(JSON.stringify(request.input)).not.toContain(outside);
+      }
     }
-    expect(JSON.stringify(aliceBeta!.input)).not.toContain("ALPHA_BUSINESS_FACT");
+    // Only Executors of Bill's preset in this group share its memory; Jack's preset has the same ID in another team.
+    expect(JSON.stringify(billAlpha!.input)).toContain("BILL_PROFILE_FACT");
+    for (const request of [aliceAlpha!, aliceBeta!, jackAlpha!]) expect(JSON.stringify(request.input)).not.toContain("BILL_PROFILE_FACT");
+    // A preset's memory belongs to one group: Alice's oc_alpha Executor recalls it, her oc_beta Executor does not.
+    expect(JSON.stringify(aliceAlpha!.input)).toContain("ALICE_ALPHA_PROFILE_FACT");
+    for (const request of [aliceBeta!, billAlpha!, jackAlpha!]) expect(JSON.stringify(request.input)).not.toContain("ALICE_ALPHA_PROFILE_FACT");
     await running.close(); running = await start(directory);
     await running.until((state) => state.channels?.feishu?.ready === true);
-    await send("om_bill_resumed", "oc_alpha", "bill", "继续规划");
+    await dispatch("om_bill_resumed", "oc_alpha", "bill", "继续规划");
     const resumed = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
     // Each request gets its own Executor session; a Team Leader's session reset on a revision change is covered by agent-dispatch-leader.test.ts.
     expect(resumed.fixtureModelRequests![0]!.threadId).not.toBe(billAlpha!.threadId);
+    expect(JSON.stringify(resumed.fixtureModelRequests![0]!.input)).toContain("BILL_PROFILE_FACT");
     const notes = resumed.workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
     await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
       scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: false, write: false })) });
-    await send("om_bill_new_permissions", "oc_alpha", "bill", "按当前授权继续规划");
+    await dispatch("om_bill_new_permissions", "oc_alpha", "bill", "按当前授权继续规划");
     const changed = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 4);
-    expect(JSON.stringify(changed.fixtureModelRequests![1]!.input)).toContain("ALPHA_BUSINESS_FACT");
-    expect(memory.read("fixture-bot").entries.map(({ value }) => value)).toEqual(["PRIVATE_MEMORY_SENTINEL"]);
+    expect(JSON.stringify(changed.fixtureModelRequests![1]!.input)).toContain("BILL_PROFILE_FACT");
+    expect(JSON.stringify(changed.fixtureModelRequests![1]!.input)).not.toContain("ALPHA_BUSINESS_FACT");
+    expect(new AccountMemoryStore(join(directory, "memory")).read("fixture-bot").entries.map(({ value }) => value)).toEqual(["PRIVATE_MEMORY_SENTINEL"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 

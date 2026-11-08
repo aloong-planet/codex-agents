@@ -83,7 +83,7 @@ describe.skipIf(!runsInstalledAppServer)("Executor home compaction on the instal
         };
       },
       tools: { bind: () => ({ snapshot: () => ({ owner: "model" }), seal: () => {}, drain: async () => {}, release: async () => {} }) },
-      profile: () => ({ instructions: "", memoryScope: "group", tools }),
+      profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools }),
       contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "gpt-5.6-terra", effort: "low" }),
       memory, capture: async () => {}, existingResult: () => undefined,
       homes: { root: path.join(stateDirectory, "group-model-runtimes"), compact: compactRuntimeHome }, report: (code) => reports.push(code),
