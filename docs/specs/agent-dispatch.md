@@ -8,7 +8,7 @@
 
 ## Problem Statement
 
-Authorized members express work in ordinary group discussion, and a backend decides whether an agent is needed. Today one specialist completes each request alone, and every specialist shares the same group memory, tools and code-defined instructions. As a result:
+Authorized members express work in ordinary group discussion, and a backend decides whether an agent is needed. Under one-specialist dispatch, one specialist completed each request alone, and every specialist shared the same group memory, tools and code-defined instructions. As a result:
 
 - one domain's rules and results reach every other domain;
 - work cannot be divided;
