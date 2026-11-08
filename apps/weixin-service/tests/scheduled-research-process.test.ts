@@ -16,10 +16,13 @@ function executable(script: string) {
   const file = path.join(dir, "codex-fixture");
   fs.writeFileSync(file, `#!${process.execPath}\n${script}`, { mode: 0o700 }); return { file, dir };
 }
-// Child startup is not under test and can take seconds on a loaded machine, so waiting
-// for a child to get ready is bounded only by this liveness limit (the legacy bootstrap
-// in workflow-process-restart uses the same bound).
+// Child startup is not under test and can take more than a second on a loaded machine, so
+// waiting for a child to get ready is bounded only by this liveness limit (the legacy
+// bootstrap in workflow-process-restart uses the same bound).
 const childStartLimitMs = 10_000;
+// A child the product is expected to stop outlives every case limit, but still exits on its
+// own if a failed case never stops it.
+const unstoppedChildExit = "setTimeout(() => process.exit(0), 60_000);";
 // Children publish markers by rename, so a marker that exists is complete.
 async function readyMarker(marker: string) {
   await expect.poll(() => fs.existsSync(marker), { timeout: childStartLimitMs }).toBe(true);
@@ -50,7 +53,7 @@ process.on('SIGTERM', () => {});
 fs.writeFileSync('PID.tmp', JSON.stringify(process.pid)); fs.renameSync('PID.tmp', 'PID');
 console.log(JSON.stringify({type:'item.completed',item:{type:'web_search'}}));
 fs.writeFileSync(args[args.indexOf('-o')+1], JSON.stringify({body:'迟到报告。',sources:[{title:'来源',url:'https://example.com'}]}));
-setInterval(() => {}, 100);`);
+${unstoppedChildExit}`);
   // Capture the real child identity outside its disposable workspace.
   const marker = path.join(dir, "pid.json");
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("'PID.tmp'", JSON.stringify(`${marker}.tmp`)).replaceAll("'PID'", JSON.stringify(marker)));
@@ -62,7 +65,7 @@ setInterval(() => {}, 100);`);
     const rejected = expect(createScheduledResearch({ executable: file, timeoutMs: 1200 })(input())).rejects.toThrow("research_timeout");
     pid = await readyMarker(marker);
     await vi.advanceTimersByTimeAsync(1200); // Deadline: SIGTERM, which the child ignores.
-    await vi.advanceTimersByTimeAsync(1000); // Escalation: SIGKILL, the only way this child ends.
+    await vi.advanceTimersByTimeAsync(1000); // Escalation: SIGKILL, the only way this child ends within the case limit.
     await rejected;
     expect(() => process.kill(pid!, 0)).toThrow();
     pid = undefined;
@@ -90,7 +93,7 @@ fs.writeFileSync(args[args.indexOf('-o')+1], ${JSON.stringify(JSON.stringify(rep
 it("cancels on external revocation, waits for exit and removes its isolated workspace", async () => {
   const { file, dir } = executable(`const fs = require('node:fs');
 fs.writeFileSync('READY.tmp', JSON.stringify({pid:process.pid,cwd:process.cwd()})); fs.renameSync('READY.tmp', 'READY');
-setInterval(() => {}, 100);`);
+${unstoppedChildExit}`);
   const marker = path.join(dir, "ready.json");
   fs.writeFileSync(file, fs.readFileSync(file, "utf8").replaceAll("'READY.tmp'", JSON.stringify(`${marker}.tmp`)).replaceAll("'READY'", JSON.stringify(marker)));
   const controller = new AbortController();

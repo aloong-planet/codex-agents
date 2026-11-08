@@ -11,6 +11,7 @@ import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { CodexServiceStore } from "../src/codex-service-store.js";
 import { WorkflowEngine } from "../src/workflow-engine.js";
 import { WorkflowRunTargetStore } from "../src/workflow-run-target-store.js";
+import { signalProcessGroup } from "./support/process-group.js";
 
 // Full service processes and the public fixture inbound endpoint; never a Tencent send.
 // Main-model tool decisions are injected for deterministic Pending setup. Opt in to
@@ -265,9 +266,7 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
     const exited = once(process, "exit");
     const reap = () => {
       // Reap only this test's isolated process group, including its App Server children.
-      try { globalThis.process.kill(-pid, "SIGKILL"); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
+      signalProcessGroup(pid, "SIGKILL");
       child = undefined;
     };
     try {
