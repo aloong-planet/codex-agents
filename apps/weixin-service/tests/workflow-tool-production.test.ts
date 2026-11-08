@@ -20,6 +20,7 @@ import {
 } from "../src/workflow-tool-production.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowEngine, type WorkflowSubmission, type WorkflowTrigger } from "../src/workflow-engine.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 describe("WorkflowToolProductionControl", () => {
   it("retains the complete specialist task brief without treating it as a short file search", async () => {
@@ -74,7 +75,7 @@ describe("WorkflowToolProductionControl", () => {
     permissions.save({ moduleId: "notes", expectedRevision: 0, confirmed: true,
       scopes: [{ scopeId: "vault", label: "Vault", directory: vault, read: true, write: false }] });
     const files = new WorkflowFileArtifactStore(path.join(root, "artifacts"), permissions);
-    const local = new LocalFileTools(permissions, { moduleIds: ["notes"], spoolDirectory: path.join(root, "snapshots") });
+    const local = new LocalFileTools(permissions, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "snapshots") });
     const catalog = createProductionWorkflowToolCatalog({ files: false, media: false, directFiles: true });
     const engine = new WorkflowEngine(path.join(root, "workflows.sqlite"));
     const gateway = new WorkflowToolGateway(catalog, [], engine, () => { throw new Error("no terminal tools"); });

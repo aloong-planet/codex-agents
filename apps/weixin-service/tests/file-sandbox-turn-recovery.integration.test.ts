@@ -8,6 +8,7 @@ import { expect, it, vi } from "vitest";
 import { LocalFileTools } from "../src/local-file-tools.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost } from "../src/workflow-tool-host.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 // Observe the OS process boundary only. Still spawn the actual permission-limited worker;
 // no private sandbox/session access and no mock of the production file/tool classes.
@@ -28,7 +29,7 @@ it("allows the main tool loop to query again after a sandbox timeout in the same
   fs.writeFileSync(path.join(directory, "probe.txt"), "recovery probe\n");
   const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
     scopes: [{ scopeId: "files", label: "Files", directory, read: true, write: false }],
-  }) }, { moduleIds: ["files"], spoolDirectory: path.join(root, "spool") });
+  }) }, { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
   const host = new WorkflowToolHost(createProductionWorkflowToolCatalog({ files: false, media: false, directFiles: true }),
     { submit: async () => { throw new Error("unexpected terminal workflow"); } }, files);
   const trusted = { eventKey: "inbound", accountId: "fixture", target: "fixture-user", occurredAt: Date.now(),

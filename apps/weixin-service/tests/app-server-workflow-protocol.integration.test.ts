@@ -22,6 +22,7 @@ import {
   WorkflowToolHost,
   type WorkflowToolRequest,
 } from "../src/workflow-tool-host.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 
 async function mainProtocolTurn(conversation: CodexConversation, threadId: string, root: string,
@@ -123,7 +124,7 @@ describeLive("installed Codex App Server workflow protocol", () => {
       { scopeId: "blocked", label: "未授权目录", directory: blocked, read: false, write: false },
     ] });
     const before = structuredClone(permissions.get("notes"));
-    const localFiles = new LocalFileTools(permissions, { moduleIds: ["notes"], spoolDirectory: path.join(root, "spool") });
+    const localFiles = new LocalFileTools(permissions, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     let terminalCalls = 0;
     const host = new WorkflowToolHost(createProductionWorkflowToolCatalog({ directFiles: true, files: false, media: true }),
       { submit: async () => { terminalCalls++; throw new Error("unexpected_terminal_workflow"); } }, localFiles);
@@ -461,7 +462,7 @@ describeLive("installed Codex App Server workflow protocol", () => {
         saved: true,
         scopes: [{ scopeId: "vault", label: "demo Vault", directory: vault, read: true, write: false }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: path.join(root, "spool") });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const observations: Array<{ request: WorkflowToolRequest; result: unknown }> = [];
     const tools = new WorkflowToolHost(
       createProductionWorkflowToolCatalog({ files: true, media: false, directFiles: true }),
@@ -523,7 +524,7 @@ describeLive("installed Codex App Server workflow protocol", () => {
         saved: true,
         scopes: [{ scopeId: "vault", label: "demo Vault", directory: vault, read: true, write: false }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: path.join(root, "spool") });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const observations: Array<{ request: WorkflowToolRequest; result: unknown }> = [];
     const tools = new WorkflowToolHost(
       createProductionWorkflowToolCatalog({ files: true, media: false, directFiles: true }),
@@ -589,7 +590,7 @@ describeLive("installed Codex App Server workflow protocol", () => {
         saved: true,
         scopes: [{ scopeId: "vault", label: "demo Vault", directory: vault, read: true, write: false }],
       }),
-    }, { moduleIds: ["notes"], spoolDirectory: path.join(root, "spool") });
+    }, { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
     const observations: Array<{ request: WorkflowToolRequest; result?: unknown; errorCode?: string }> = [];
     const traces: Array<{ errorCode?: string; resultSuccess: boolean }> = [];
     const tools = new WorkflowToolHost(
@@ -674,7 +675,7 @@ describeLive("installed Codex App Server workflow protocol", () => {
           saved: true,
           scopes: [{ scopeId: "pictures", label: "Pictures", directory, read: true, write: false }],
         }),
-      }, { moduleIds: ["local-media"], spoolDirectory: path.join(root, "spool") });
+      }, { moduleIds: ["local-media"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
       const observations: Array<{ request: WorkflowToolRequest; result: unknown }> = [];
       const tools = new WorkflowToolHost(
         createProductionWorkflowToolCatalog({ files: true, media: false, directFiles: true }),

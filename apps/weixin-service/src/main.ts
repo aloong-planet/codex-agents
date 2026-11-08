@@ -86,7 +86,7 @@ import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
 import { PrivateStateStore } from "./private-state-store.js";
 import { PlanFollowUpMonitor } from "./plan-follow-up-monitor.js";
-import { resolvePrivateStatePath } from "./runtime-paths.js";
+import { resolvePrivateStatePath, serviceProtectedRoots } from "./runtime-paths.js";
 import {
   resolveCodexExecutable,
   spawnStdioAppServer,
@@ -253,8 +253,9 @@ const notificationRoute = channelConfiguration?.notificationRoute;
 let channelReady = false;
 
 
+// Fixture business files sit beside the state directory, never inside it: file tools refuse the whole state directory.
 const fixtureBusinessRoot = fixtureMode && process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY
-  ? fs.realpathSync(process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY) : path.dirname(privateStatePath);
+  ? fs.realpathSync(process.env.WORKFLOW_FIXTURE_BUSINESS_DIRECTORY) : `${path.dirname(privateStatePath)}-business`;
 const vaultRoot = fixtureMode
   ? path.join(fixtureBusinessRoot, "demo-vault")
   : "/Users/loong_zhou/Documents/demo/demo";
@@ -364,10 +365,7 @@ const feishuMediaRoutes = feishuTransport && feishuConfiguration ? feishuConfigu
   }));
 }) : [];
 const localFileTools = new LocalFileTools(workflowModulePermissions, {
-  groupProtectedRoots: [path.dirname(privateStatePath), diagnosticDirectory, process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex"),
-    path.join(os.homedir(), ".agents"), path.join(os.homedir(), ".openclaw"),
-    process.env.CHANNEL_CONFIG_PATH ?? path.join(path.dirname(privateStatePath), "channel.json"),
-    ...(process.env.PENNY_CONFIG_PATH ? [path.resolve(process.env.PENNY_CONFIG_PATH)] : [])],
+  protectedRoots: serviceProtectedRoots(process.env, os.homedir(), path.dirname(privateStatePath), diagnosticDirectory),
   ...(fixtureMode && process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT
     ? { budget: { maxScannedFiles: Number(process.env.WORKFLOW_FIXTURE_FILE_SCAN_LIMIT) } } : {}),
   diagnostics,
