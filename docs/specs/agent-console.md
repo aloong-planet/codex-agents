@@ -1,7 +1,7 @@
 # Agent console
 
-> Status: specified; login, local-only access and the console shell are implemented, and the first console page is MCP 管理 ([MCP catalog](mcp-catalog.md)); the other console pages are not.
-> Pending: the sidebar lists only the console pages that exist (today MCP 管理) and has no private sections or 「本机」 section yet (agent-console::US-002/AC-01, AC-02, US-001/AC-03).
+> Status: specified; login, local-only access and the console shell are implemented, with the console pages 团队管理 ([team management](team-management.md)) and MCP 管理 ([MCP catalog](mcp-catalog.md)); the other console pages are not.
+> Pending: the sidebar lists only the console pages that exist (today 团队管理 and MCP 管理) and has no private sections or 「本机」 section yet (agent-console::US-002/AC-01, AC-02, US-001/AC-03).
 > Related: [agent dispatch](agent-dispatch.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [channel boundaries](channel-switching.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: no read projection combines requests, Assignments, reports and delivery outcomes, and no storage exists for Team Leader chats or private requests.
 
