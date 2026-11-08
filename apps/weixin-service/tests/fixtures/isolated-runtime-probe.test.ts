@@ -7,7 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CodexConversation } from "../../src/codex-conversation.js";
 import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "../../src/isolated-model-runtime.js";
 import { resolveCodexExecutable, spawnStdioAppServer } from "../../src/stdio-app-server-transport.js";
-import { AppServerSession, assistantMessage, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer, skillCatalog } from "./isolated-runtime-probe.js";
+import { AppServerSession, assistantMessage, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer, sampleBundledSkill,
+  skillCatalog } from "./isolated-runtime-probe.js";
 
 describe.skipIf(!runsInstalledAppServer)("isolated runtime probe", () => {
   let work: string, hostHome: string, environment: NodeJS.ProcessEnv, model: FakeResponsesEndpoint;
@@ -34,12 +35,15 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtime probe", () => {
       const listed = await session.listSkills(leaky.cwd);
       expect(listed.map((skill) => skill.name)).toEqual(expect.arrayContaining(["host-probe", "linked-probe"]));
       expect(listed.some((skill) => skill.scope === "system")).toBe(true);
+      const bundled = await sampleBundledSkill(session, leaky.cwd);
       const thread = await session.request("thread/start", { cwd: leaky.cwd, approvalPolicy: "never" }) as { thread: { id: string } };
       const from = model.requests.length;
-      expect(await session.turn(thread.thread.id, [{ type: "text", text: "$host-probe please" }])).toBe("completed");
+      expect(await session.turn(thread.thread.id, [{ type: "text", text: `$host-probe $${bundled.name} please` }])).toBe("completed");
       const request = model.modelRequestsSince(from).at(-1)!;
       expect(skillCatalog(request)).toEqual(expect.arrayContaining(["host-probe", "linked-probe"]));
       expect(modelInputText(request)).toContain("HOST-AGENTS-BODY-5B3F");
+      // Positive control for the bundled-skill absence checks: with bundled skills on, naming one injects its body.
+      expect(modelInputText(request)).toContain(bundled.bodyLine);
     } finally { session.close(); }
   }, 60_000);
 

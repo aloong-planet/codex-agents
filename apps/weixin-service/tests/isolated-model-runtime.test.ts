@@ -2,6 +2,10 @@
 // The "installed Codex App Server" cases run the real executable against a loopback fake model and are opt-in
 // (CODEX_ISOLATED_RUNTIME_TEST=1, `pnpm test:isolated-runtime`): CI has no Codex executable, so rerun them after every
 // Codex upgrade. Gap: only the API-key form of auth.json is exercised; the ChatGPT-token form needs a real login.
+// Gap: each kind's root, scope, readable roots and options are copied from main.ts, and these cases create and spawn the
+// runtime themselves. No automated case drives main.ts's own creation and spawn of these runtimes (its fixture mode uses
+// fixture transports), so a change there that alters a runtime's environment or overrides is caught only by the owner's
+// real-channel acceptance, until a whole-application case can route isolated runtimes to a fake model.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +16,8 @@ import { createIsolatedModelRuntime, ISOLATED_MODEL_DISABLED_FEATURES } from "..
 import { createScheduledResearch } from "../src/scheduled-research.js";
 import { resolveCodexExecutable, spawnStdioAppServer } from "../src/stdio-app-server-transport.js";
 import { PENDING_RESPONSE_RUNTIME_PROFILE } from "../src/workflow-pending-response-router.js";
-import { AppServerSession, assistantMessage, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer, skillCatalog } from "./fixtures/isolated-runtime-probe.js";
+import { AppServerSession, assistantMessage, type BundledSkillSample, FakeResponsesEndpoint, modelInputText, plantSkill, runsInstalledAppServer,
+  sampleBundledSkill, skillCatalog } from "./fixtures/isolated-runtime-probe.js";
 
 it("creates separate model homes without importing host settings, skills or unrelated credentials", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-model-test-"));
@@ -54,7 +59,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
   const syntheticKey = "sk-synthetic-ticket22";
   const marker = { own: "OWN-CODEX-HOME-BODY-7A1C", ownHome: "OWN-HOME-BODY-2D9E", host: "HOST-AGENTS-BODY-5B3F",
     linked: "HOST-LINKED-BODY-8C4A", hostCodex: "HOST-CODEX-HOME-BODY-1E6D" } as const;
-  let work: string, environment: NodeJS.ProcessEnv, hostSkill: string, model: FakeResponsesEndpoint;
+  let work: string, environment: NodeJS.ProcessEnv, hostSkill: string, model: FakeResponsesEndpoint, bundled: BundledSkillSample;
 
   beforeAll(async () => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-runtime-skills-"));
@@ -67,6 +72,10 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     fs.writeFileSync(path.join(hostCodexHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: syntheticKey }));
     environment = { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: hostHome, CODEX_HOME: hostCodexHome };
     model = await FakeResponsesEndpoint.start();
+    // One of the bundled skills this binary ships, read from a runtime that has bundled skills switched back on.
+    const sampler = createIsolatedModelRuntime({ root: path.join(work, "bundled-sample"), scope: "sampler", environment });
+    const session = await AppServerSession.open(model.route({ ...sampler, configOverrides: [...sampler.configOverrides, "skills.bundled.enabled=true"] }));
+    try { bundled = await sampleBundledSkill(session, sampler.cwd); } finally { session.close(); }
   });
   afterAll(async () => { await model?.close(); fs.rmSync(work, { recursive: true, force: true }); });
 
@@ -84,6 +93,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     expect(input).toContain(marker.own);
     expect(input).toContain(marker.ownHome);
     for (const hostMarker of [marker.host, marker.linked, marker.hostCodex]) expect(input).not.toContain(hostMarker);
+    expect(input).not.toContain(bundled.bodyLine);
   };
 
   // Scopes, roots, readable roots and conversation options as main.ts passes them for each runtime.
@@ -117,7 +127,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     try {
       const threadId = await conversation.startOrResume(undefined, runtime.cwd);
       const from = model.requests.length;
-      await conversation.reply(threadId, "$host-probe $linked-probe $host-codex-probe $own-probe $own-home-probe please");
+      await conversation.reply(threadId, `$host-probe $linked-probe $host-codex-probe $${bundled.name} $own-probe $own-home-probe please`);
       const request = model.modelRequestsSince(from).at(-1)!;
       expect(skillCatalog(request)?.sort()).toEqual(["own-home-probe", "own-probe"]);
       expectOnlyOwnSkills(modelInputText(request));
@@ -125,7 +135,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     } finally { await conversation.close(); }
   }, 60_000);
 
-  it("a skill input item cannot load a host skill", async () => {
+  it("a skill input item cannot load a host or bundled skill", async () => {
     const { runtime, own } = runtimeWithOwnSkills("group-model-runtimes", "feishu.group.skill-item", media("skill-item"));
     model.respondWith(() => [assistantMessage("fake-model-reply")]);
     const session = await AppServerSession.open(model.route(runtime));
@@ -135,10 +145,12 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       const from = model.requests.length;
       // The App Server matches a skill item by the exact path skills/list reports (the real path); an alias is ignored.
       expect(await session.turn(thread.thread.id, [{ type: "text", text: "use these" },
-        { type: "skill", name: "host-probe", path: fs.realpathSync(hostSkill) }, { type: "skill", name: "own-probe", path: fs.realpathSync(own) }])).toBe("completed");
+        { type: "skill", name: "host-probe", path: fs.realpathSync(hostSkill) }, { type: "skill", name: bundled.name, path: fs.realpathSync(bundled.path) },
+        { type: "skill", name: "own-probe", path: fs.realpathSync(own) }])).toBe("completed");
       const input = modelInputText(model.modelRequestsSince(from).at(-1)!);
       expect(input).toContain(marker.own);
       expect(input).not.toContain(marker.host);
+      expect(input).not.toContain(bundled.bodyLine);
     } finally { session.close(); }
   }, 60_000);
 
@@ -149,7 +161,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     const from = model.requests.length;
     // The fake model performs no web search, so the research step refuses the report; the request it sent is the subject.
     await expect(research({ signal: new AbortController().signal, destination: { accountId: "feishu.bot.probe", target: "feishu.group.probe" }, name: "Probe research",
-      instruction: "$host-probe $linked-probe $host-codex-probe $own-probe $own-home-probe", plannedAt: "2026-11-08T09:00:00.000Z", timezone: "Asia/Shanghai" }))
+      instruction: `$host-probe $linked-probe $host-codex-probe $${bundled.name} $own-probe $own-home-probe`, plannedAt: "2026-11-08T09:00:00.000Z", timezone: "Asia/Shanghai" }))
       .rejects.toThrow("research_search_missing");
     const request = model.modelRequestsSince(from).at(-1)!;
     expect(skillCatalog(request)?.sort()).toEqual(["own-home-probe", "own-probe"]);

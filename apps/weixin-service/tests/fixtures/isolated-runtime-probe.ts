@@ -173,3 +173,19 @@ export class AppServerSession {
 
   close(): void { this.transport.close(); }
 }
+
+export type BundledSkillSample = { name: string; path: string; bodyLine: string };
+
+/** A bundled system skill as a runtime with bundled skills enabled lists it, with one line of its body to look for in a
+ * model request. Taken from what the installed binary ships, so a Codex upgrade that renames its skills cannot leave the
+ * check naming a skill that no longer exists. */
+export async function sampleBundledSkill(session: AppServerSession, cwd: string): Promise<BundledSkillSample> {
+  const bundled = (await session.listSkills(cwd)).filter((skill) => skill.scope === "system").sort((a, b) => a.name.localeCompare(b.name))[0];
+  if (!bundled) throw new Error("bundled_skill_unavailable");
+  const text = fs.readFileSync(bundled.path, "utf8");
+  const body = text.startsWith("---\n") ? text.slice(text.indexOf("\n---", 4) + 4) : text;
+  // A line the serialized model input carries verbatim: JSON.stringify escapes only quotes, backslashes and controls.
+  const bodyLine = body.split("\n").map((line) => line.trim()).find((line) => line.length >= 40 && !line.startsWith("#") && !/["\\\u0000-\u001f]/u.test(line));
+  if (!bodyLine) throw new Error("bundled_skill_body_unavailable");
+  return { name: bundled.name, path: bundled.path, bodyLine };
+}
