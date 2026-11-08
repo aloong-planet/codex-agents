@@ -16,6 +16,11 @@
 // - Redirects are driven for the MCP POST requests and the OAuth requests. The optional GET stream is not asserted (the
 //   SDK ignores its failure and the connection stays up), and the session-termination DELETE is not driven: the HTTP
 //   test server is stateless and opens no session. Both go through the same SDK redirect handling as the POST.
+// - The spec row on a loopback http URL on port 80 redirected to https on port 443 is not driven: the SDK follows that
+//   upgrade, and the case must show that no configured header reaches the https origin. Every origin here is 127.0.0.1
+//   on an ephemeral port, so no case tells an exact-origin check from a host-only or upgrade-tolerant one. Driving it
+//   needs an http listener on port 80 and an https recorder on 443 with a certificate the test workers trust (for
+//   example NODE_EXTRA_CA_CERTS set before they start), which this environment does not grant.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
