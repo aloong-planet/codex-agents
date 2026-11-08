@@ -1309,7 +1309,9 @@ test("keeps ordinary chat in the main Codex turn without creating a workflow run
     .map((record) => record.attributes.stage);
   await expect.poll(sessionStages).toEqual(expect.arrayContaining(["app_server_initialize", "thread_start"]));
   if (process.env.WORKFLOW_SIMULATOR_MODEL === "live") {
-    expect(after.codex.transcript.at(-1)?.text).toBe("收到");
+    // The live model may repeat the prompt's full stop; the structural check above still
+    // requires the main model's own answer with no workflow result.
+    expect(after.codex.transcript.at(-1)?.text).toMatch(/^收到。?$/u);
     const literal = await sendFixtureWorkflowInbound(page, "请只原样回复下面这一行，不增删符号：章节【一】【二】，文件名为报告【终版】.md。");
     expect(literal.codex.transcript.at(-1)?.text).toBe("章节【一】【二】，文件名为报告【终版】.md。");
     assertNoFileDelivery(after, literal);

@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { NodeFileSandbox } from "../src/file-sandbox.js";
+// Waits for the worker process to start or exit are process waits.
+import { processWaitLimitMs } from "./support/process-wait.js";
 
 // Real worker and framed IPC. The injected prelude only reports this test-owned PID;
 // SIGSTOP is a synthetic stall, not a claim about the historical production trigger.
@@ -82,7 +84,7 @@ describe("file_sandbox_lifecycle", () => {
     try {
       await expect(f.sandbox.execute(query)).rejects.toThrow("file_sandbox_operation_failed");
       const failedPid = f.pid();
-      await expect.poll(() => alive(failedPid), { timeout: 1500 }).toBe(false);
+      await expect.poll(() => alive(failedPid), { timeout: processWaitLimitMs }).toBe(false);
       fs.writeFileSync(path.join(f.directory, "continue"), "ready");
       expect((await f.sandbox.execute(query)).entries.map((entry) => entry.fileName)).toEqual(["probe.txt"]);
     } finally { await f.cleanup(); }
@@ -98,7 +100,7 @@ describe("file_sandbox_lifecycle", () => {
       await f.sandbox.execute(query);
       expect(f.pid()).toBe(pid);
       process.kill(pid, "SIGKILL");
-      await expect.poll(() => alive(pid)).toBe(false);
+      await expect.poll(() => alive(pid), { timeout: processWaitLimitMs }).toBe(false);
       expect((await f.sandbox.execute(query)).entries.map((entry) => entry.fileName)).toEqual(["probe.txt"]);
       expect(f.pid()).not.toBe(pid);
     } finally { await f.cleanup(); }
@@ -171,11 +173,11 @@ process.stdout.write = (frame, ...args) => originalWrite(
         }
         if (stage !== "before_start") {
           result = expect(f.sandbox.execute(query)).rejects.toThrow("file_sandbox_closed");
-          await expect.poll(() => { try { return f.pid() > 0; } catch { return false; } }).toBe(true);
+          await expect.poll(() => { try { return f.pid() > 0; } catch { return false; } }, { timeout: processWaitLimitMs }).toBe(true);
           pid = f.pid();
         }
         await Promise.all([f.sandbox.close(), f.sandbox.close(), result]);
-        if (pid !== undefined) await expect.poll(() => alive(pid)).toBe(false);
+        if (pid !== undefined) await expect.poll(() => alive(pid), { timeout: processWaitLimitMs }).toBe(false);
         await expect(f.sandbox.execute(query)).rejects.toThrow("file_sandbox_closed");
       } finally { await f.cleanup(); }
     });

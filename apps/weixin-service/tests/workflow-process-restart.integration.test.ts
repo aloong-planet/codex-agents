@@ -11,6 +11,7 @@ import { AccountMemoryStore } from "../src/account-memory-store.js";
 import { CodexServiceStore } from "../src/codex-service-store.js";
 import { WorkflowEngine } from "../src/workflow-engine.js";
 import { WorkflowRunTargetStore } from "../src/workflow-run-target-store.js";
+import { signalProcessGroup } from "./support/process-group.js";
 
 // Full service processes and the public fixture inbound endpoint; never a Tencent send.
 // Main-model tool decisions are injected for deterministic Pending setup. Opt in to
@@ -19,7 +20,8 @@ import { WorkflowRunTargetStore } from "../src/workflow-run-target-store.js";
 // main was not performed (safety denied); a separately authorized isolated build
 // would be needed to verify that additional negative gate. No phone receipt here.
 type State = {
-  codex: { status: string; transcript: Array<{ id: string; role: string; text: string; status: string }> };
+  codex: { status: string; transcript: Array<{ id: string; role: string; text: string; status: string;
+    businessResult?: { source: string; results: unknown[] } }> };
   workflows: { runs: Array<{
     runRef: string; workflowId: string; status: string; errorCode?: string;
     effects: Array<{ stepId: string; state: string }>;
@@ -87,18 +89,21 @@ describe.skipIf(process.env.CODEX_WEIXIN_PROCESS_TEST !== "1")("full service pro
   it.each(["accepted", "running"] as const)("production_resolver_retirement %s notifies once and preserves normal inbound after restart", async (legacy) => {
     const fixture = await startFixture({ legacy, liveMain: true });
     try {
+      // The notifier and channels start after the Codex service reports idle, so the notice arrives
+      // during the rest of startup: a process wait (tests/support/process-wait.ts), bounded here by
+      // the fixture start bound.
       await expect.poll(async () => (await fixture.state()).fixtureTextOutbox.filter((entry) =>
-        entry.message === "之前的文件查找任务已结束。若仍需要这个文件，请重新告诉我。" )).toHaveLength(1);
+        entry.message === "之前的文件查找任务已结束。若仍需要这个文件，请重新告诉我。" ), { timeout: 20_000 }).toHaveLength(1);
       const retired = await fixture.state();
       expect(retired.workflows.runs).toEqual([expect.objectContaining({ status: "failed",
         errorCode: "workflow_file_resolver_retired", effects: [] })]);
       expect(retired.fixtureOutbox).toEqual([]);
       const received = await fixture.inbound("你好，请只回复收到。");
-      expect(reply(received)).toBe("收到");
+      expectOrdinaryAcknowledgement(received);
       expect(received.fixtureOutbox).toEqual([]);
       await fixture.restart();
       const again = await fixture.inbound("你好，请只回复收到。");
-      expect(reply(again)).toBe("收到");
+      expectOrdinaryAcknowledgement(again);
       expect(again.fixtureTextOutbox.filter((entry) => entry.message.includes("之前的文件查找任务"))).toEqual([]);
       expect(again.workflows.runs).toEqual(retired.workflows.runs);
       expect(again.fixtureOutbox).toEqual([]);
@@ -198,8 +203,19 @@ describe.skipIf(process.env.CODEX_WEIXIN_PROCESS_TEST !== "1")("full service pro
   }, 180_000);
 });
 
+function lastReply(state: State) {
+  return state.codex.transcript.filter((entry) => entry.role === "assistant" && entry.status !== "ack").at(-1);
+}
+
 function reply(state: State): string | undefined {
-  return state.codex.transcript.filter((entry) => entry.role === "assistant" && entry.status !== "ack").at(-1)?.text;
+  return lastReply(state)?.text;
+}
+
+// The live main model may repeat the prompt's full stop. The reply must still be the main
+// model's own ordinary answer, carrying no workflow result.
+function expectOrdinaryAcknowledgement(state: State): void {
+  expect(lastReply(state)).toMatchObject({ text: expect.stringMatching(/^收到。?$/u), status: "accepted",
+    businessResult: { source: "main_model", results: [] } });
 }
 
 async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; liveMain?: boolean; seedMemory?: boolean; legacy?: "accepted" | "running" } = {}) {
@@ -253,9 +269,7 @@ async function startFixture(options: { gate?: "read" | "edit" | "snapshot"; live
     const exited = once(process, "exit");
     const reap = () => {
       // Reap only this test's isolated process group, including its App Server children.
-      try { globalThis.process.kill(-pid, "SIGKILL"); } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
+      signalProcessGroup(pid, "SIGKILL");
       child = undefined;
     };
     try {
