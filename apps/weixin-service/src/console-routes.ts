@@ -97,7 +97,12 @@ export function createConsoleRoutes(options: { catalog: McpCatalog }): ConsoleRo
     }
     const match = /^\/api\/mcp\/servers\/([^/]+)(?:\/(delete|reconnect|tools|approve))?$/.exec(pathname);
     if (!match) throw new RequestError(404, "未找到");
-    const name = decodeURIComponent(match[1]!);
+    let name: string;
+    try {
+      name = decodeURIComponent(match[1]!);
+    } catch {
+      throw new RequestError(400, "服务器名称无效");
+    }
     switch (match[2]) {
       case undefined:
         json(res, 200, { server: catalog.update(name, object(input.server, "服务器配置"), { confirmed: input.confirmed, actor }) });

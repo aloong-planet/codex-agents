@@ -68,7 +68,7 @@ test("registers a local program only after confirming its exact command", async 
   const line = [process.execPath, ...testServerArgs(files)].join(" ");
   await fillLocalProgram(page, "local", testServerArgs(files), `SECRET_TOKEN=${SECRET_SENTINEL}`);
   await expect(page.locator("#amc-launch")).toHaveText(line);
-  await page.locator("#amc-grant").scrollIntoViewIfNeeded();
+  await page.locator(".acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await testInfo.attach("confirmation-card", { body: await page.screenshot(), contentType: "image/png" });
   await page.locator("#amc-close").click();
   await expect(page.locator("#amc-drawer")).toBeHidden();
@@ -107,6 +107,11 @@ test("registers a local program only after confirming its exact command", async 
   await expect(row(page, "broken")).toContainText("***");
   await expect(row(page, "broken")).toContainText(/将于 \d{2}:\d{2}:\d{2} 自动重试/);
   await expect(page.locator("body")).not.toContainText(SECRET_SENTINEL);
+  // The page follows the service every 2 seconds; an opened output tail must stay open across that refresh.
+  await page.locator("#amc-status summary").click();
+  await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
+  await page.waitForTimeout(2_500);
+  await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
   await testInfo.attach("failed-server", { body: await page.screenshot(), contentType: "image/png" });
 
   // The shell below 900px: a menu bar opens the sidebar, and the page never scrolls sideways.
@@ -177,7 +182,7 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   await expect(page.locator("#amc-launch")).toHaveText([process.execPath, ...testServerArgs(second)].join(" "));
   await expect(page.locator("#amc-grant")).toContainText("登记后还要在团队管理里绑定到能力档，执行者才能使用；绑定时会再次确认。");
   await expect(page.locator("#amc-grant")).not.toContainText("已绑定到");
-  await page.locator("#amc-grant").scrollIntoViewIfNeeded();
+  await page.locator(".acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await testInfo.attach("command-change-card", { body: await page.screenshot(), contentType: "image/png" });
   await page.getByRole("button", { name: "确认并保存" }).click();
   await expect(page.locator("#amc-note")).toHaveText("已保存：新事务使用新配置。");

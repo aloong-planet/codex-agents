@@ -132,6 +132,9 @@ describe("MCP catalog API", () => {
     const listed = await fetch(`${origin}/api/mcp/servers`, { headers: { cookie } });
     expect(listed.status).toBe(200);
     expect(await listed.json()).toEqual({ servers: [] });
+    const malformed = await fetch(`${origin}/api/mcp/servers/%E0%A4%A/delete`, { method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: "{}" });
+    expect(malformed.status).toBe(400);
+    expect(await malformed.json()).toEqual({ error: "服务器名称无效" });
     const page = await fetch(`${origin}/console/mcp`, { headers: { cookie } });
     expect(page.status).toBe(200);
     expect(await page.text()).toContain("<title>MCP 管理</title>");

@@ -26,6 +26,8 @@
   let preview = null;
   let deleting = false;
   let previewTimer = null;
+  /** What the drawer sections last showed; the 2-second refresh redraws them only when it changed. */
+  let drawerKey = "";
 
   const chip = (state) => `<span class="${STATES[state][1]}">${STATES[state][0]}</span>`;
   const current = () => servers.find((server) => server.name === selected);
@@ -145,9 +147,15 @@
   function renderServerSections() {
     const server = current();
     if (!server) return;
+    const key = JSON.stringify([server, deleting]);
+    if (key === drawerKey) return;
+    drawerKey = key;
+    const outputOpen = Boolean($("amc-status").querySelector("details")?.open);
     $("amc-kind").textContent = ["本机程序（stdio）", STATES[server.state][0], server.counts.total ? `${server.counts.total} 个工具${server.counts.usable < server.counts.total ? `，可用 ${server.counts.usable} 个` : ""}` : ""].filter(Boolean).join(" · ");
     $("amc-title").textContent = server.name;
     $("amc-status").innerHTML = statusHtml(server);
+    const output = $("amc-status").querySelector("details");
+    if (output && outputOpen) output.open = true;
     $("amc-tools").innerHTML = toolsHtml(server);
     $("amc-used").innerHTML = usedHtml(server);
     $("amc-danger").innerHTML = dangerHtml(server);
@@ -179,6 +187,7 @@
     note = { text: "", state: "clean" };
     form = formFrom(nextMode === "server" ? servers.find((server) => server.name === name) : null);
     preview = null;
+    drawerKey = "";
     render();
     if (nextMode === "new") void updatePreview();
   }

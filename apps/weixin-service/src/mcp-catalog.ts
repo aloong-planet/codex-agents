@@ -37,8 +37,8 @@ import {
  * a server through `toolsFor` and `call`, which re-check the current configuration.
  *
  * - `mcp-catalog.json` holds the readable configuration, disabled tools and pinned definitions; `mcp-secrets.json`
- *   holds environment values. Both are owner-only and replaced atomically, so a deleted server's secrets leave the
- *   disk with the rewrite.
+ *   holds environment values. Both are owner-only and replaced atomically; after a deletion no state file holds the
+ *   server's secrets.
  * - A server's first tool listing is pinned. Later new or changed definitions wait for the owner's review.
  * - After a failure the host retries from 30 seconds, doubling up to 10 minutes. Servers that do not announce
  *   tool-list changes are listed again every 10 minutes.
@@ -145,7 +145,6 @@ export type McpCatalogOptions = {
   retryMs?: number;
   /** Tool-list refresh for servers without change notifications, in milliseconds; 0 disables it. */
   refreshMs?: number;
-  platform?: string;
   now?: () => number;
 };
 
@@ -539,7 +538,7 @@ export class McpCatalog {
         const plan = launchPlan(server, {
           homeDirectory: this.homeDirectory,
           stateDirectory: this.options.stateDirectory,
-          platform: this.options.platform ?? process.platform,
+          platform: process.platform,
           execPath: process.execPath,
           srtPath: server.sandbox ? srtPath() : "",
           tmpDirectory: os.tmpdir(),
