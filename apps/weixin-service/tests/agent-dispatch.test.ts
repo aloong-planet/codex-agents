@@ -935,3 +935,19 @@ it("starts no Executor when a cross-team Team Leader's start message is not conf
   expect(posts(deliveries)).toEqual([`cli_alice: ${LEAD_START}`, `cli_sam: ${ANNOUNCED}`, `cli_bill: ${BILL_START}`,
     "cli_alice: 接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。"]);
 });
+
+it("posts each Assignment's own result as a cross-team closing when its Team Leader's closing turn fails, and relays that report", async () => {
+  const turns = crossTurns();
+  // An empty closing message fails the production closing parser, as an invalid model output does.
+  turns.bill!.closing = { message: "  " };
+  const leader = teamLeaders(turns);
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, { run: async (_job, assignment) => ({ status: "completed", message: `${assignment.title}已完成。` }), close: () => {} }, deliveries,
+    { assign: toBill });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  const fallback = "执行者 3「编写脚本」已完成。编写脚本已完成。\n执行者 4「核对接口」已完成。核对接口已完成。";
+  expect(posts(deliveries).slice(3)).toEqual([`cli_bill: ${fallback}\n结果经 Sam 交回 Alice 汇总。`, "cli_alice: ALICE_CLOSING"]);
+  expect(leaderTurns(leader, "close", "alice")[0]?.relay).toEqual({ parts: [{ title: HELP.title, team: "Bill 团队", report: fallback }] });
+});

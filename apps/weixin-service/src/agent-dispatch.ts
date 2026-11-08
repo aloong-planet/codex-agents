@@ -675,7 +675,10 @@ export class AgentDispatch {
     }
     this.transaction(() => { this.saveAssignment(ended); this.save(current); if (post) this.queueNotice(post.id, post.notice); });
     if (post) await this.deliverNotice(post.id, post.notice);
-    if (!this.closing && !current.cancelRequested && ended.teamId !== current.agentId) await this.closeTeam(job.id, ended.teamId);
+    // A failed closing here must not end the attempt while other Executors run: the request's own close tries it again.
+    if (!this.closing && !current.cancelRequested && ended.teamId !== current.agentId) {
+      await this.closeTeam(job.id, ended.teamId).catch(() => this.failure("dispatch_team_closing_failed"));
+    }
   }
 
   /**

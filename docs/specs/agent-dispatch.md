@@ -393,7 +393,8 @@ Recall and capture use only the caller's scope. The Team Leader and Executor sco
 The group memory is captured from the group's posts, never from an Executor. A post belongs to a request when it carries the request's own work forward:
 
 - the mentioned team's scope explanation, the Coordinator's reassignment notice, its proposal and its acknowledgement of a supplement to that proposal;
-- the Team Leader's start message, pending choice, and closing or result message, and a re-sent copy of that message.
+- the Team Leader's start message, pending choice, and closing or result message, and a re-sent copy of that message;
+- the Coordinator's cross-team announcement, and each cross-team Team Leader's start message, pending choice, failure post and closing.
 
 Replies that refuse a control message, and clarifications without a request, belong to none. Each capture takes the request's accepted posts that no earlier capture took, so an attempt started by a supplement or a retry adds only its own posts. A re-sent report is captured once, when it is accepted.
 
