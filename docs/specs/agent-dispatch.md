@@ -240,7 +240,7 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 
 **Team registry.** A single team registry replaces the fixed four-role configuration and every hard-coded coordinator identity. The registry holds:
 
-- the Coordinator, the teams and their Team Leader applications, and each team's group bindings and state (onboarding, active, draining);
+- the Coordinator, the teams and their Team Leader applications, and each team's group bindings and state (onboarding, accepting, draining);
 - each agent's Agent Profile.
 
 It starts from the existing local configuration with the same four roles and is later edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).

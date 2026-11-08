@@ -1,6 +1,7 @@
 import { Ajv } from "ajv";
 import type { CodexConversation, CodexTurnModel } from "./codex-conversation.js";
 import type { DispatchClassificationInput, DispatchClassifier, DispatchDecision } from "./agent-dispatch-types.js";
+import { COORDINATOR_ID } from "./team-registry.js";
 
 export const DISPATCH_OUTPUT_SCHEMA = {
   type: "object", additionalProperties: false, required: ["kind", "agentId", "requestId", "summary", "message"],
@@ -17,7 +18,7 @@ export function parseDispatchDecision(value: unknown, input: DispatchClassificat
   if (value.agentId !== null && !input.agents.some((agent) => agent.id === value.agentId)) throw new Error("dispatch_agent_unknown");
   if (value.requestId !== null && !input.requests.some((request) => request.id === value.requestId)) throw new Error("dispatch_request_unknown");
   if (["dispatch", "propose"].includes(value.kind)) {
-    if (!value.agentId || value.agentId === "sam" || value.requestId !== null || !value.summary.trim()) throw new Error("dispatch_decision_invalid");
+    if (!value.agentId || value.agentId === COORDINATOR_ID || value.requestId !== null || !value.summary.trim()) throw new Error("dispatch_decision_invalid");
   } else if (["confirm", "decline", "supplement", "cancel", "retry", "retry_report"].includes(value.kind)) {
     if (!value.requestId || value.agentId !== null) throw new Error("dispatch_decision_invalid");
   } else if (value.requestId !== null || value.agentId !== null) throw new Error("dispatch_decision_invalid");

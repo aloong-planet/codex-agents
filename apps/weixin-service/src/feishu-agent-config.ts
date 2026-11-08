@@ -1,11 +1,12 @@
 import type { FeishuConversationIdentity } from "./feishu-conversation-identity.js";
 import type { DispatchAgentDefinition } from "./agent-dispatch-types.js";
+import { COORDINATOR_ID } from "./team-registry.js";
 
 export type FeishuDispatchAgent = DispatchAgentDefinition & { appId: string; appSecret: string };
 export type FeishuDispatchConfiguration = { groupChatIds: readonly string[]; agents: readonly Readonly<FeishuDispatchAgent>[] };
 
 const defaults: Readonly<Record<string, Omit<DispatchAgentDefinition, "id">>> = {
-  sam: { name: "Sam", responsibility: "协调、澄清和分派任务，不执行具体业务事务。" },
+  [COORDINATOR_ID]: { name: "Sam", responsibility: "协调、澄清和分派任务，不执行具体业务事务。" },
   alice: { name: "Alice", responsibility: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。" },
   bill: { name: "Bill", responsibility: "日常生活事务，包括吃穿住行的规划和安排。" },
   jack: { name: "Jack", responsibility: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。" },
@@ -30,9 +31,9 @@ export function parseFeishuDispatch(value: unknown, coordinator: { appId: string
     const agent = record(value), id = text(agent.id, 32);
     if (!/^[a-z][a-z0-9_-]*$/.test(id) || Object.keys(agent).some((key) => !["id", "name", "responsibility", "appId", "appSecret"].includes(key))) throw new Error("agent_configuration_invalid");
     const name = text(agent.name ?? defaults[id]?.name, 40), responsibility = text(agent.responsibility ?? defaults[id]?.responsibility, 2000);
-    if (id === "sam" && (agent.appId !== undefined || agent.appSecret !== undefined)) throw new Error("agent_configuration_invalid");
-    const appId = id === "sam" ? coordinator.appId : text(agent.appId, 32);
-    const appSecret = id === "sam" ? coordinator.appSecret : text(agent.appSecret, 512);
+    if (id === COORDINATOR_ID && (agent.appId !== undefined || agent.appSecret !== undefined)) throw new Error("agent_configuration_invalid");
+    const appId = id === COORDINATOR_ID ? coordinator.appId : text(agent.appId, 32);
+    const appSecret = id === COORDINATOR_ID ? coordinator.appSecret : text(agent.appSecret, 512);
     if (!/^cli_[a-fA-F0-9]{16}$/.test(appId) || /\s/u.test(appSecret)) throw new Error("agent_configuration_invalid");
     return Object.freeze({ id, name, responsibility, appId, appSecret });
   });
