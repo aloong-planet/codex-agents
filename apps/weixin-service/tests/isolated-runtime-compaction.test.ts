@@ -3,10 +3,11 @@
 // copy of main.ts's construction (the production close, createIsolatedRuntime, spawnIsolatedAppServer and each spawned
 // transport's `exited`). Opt-in (CODEX_ISOLATED_RUNTIME_TEST=1, `pnpm test:isolated-runtime`) because CI has no Codex
 // executable; rerun after every Codex upgrade, since what a retry needs from the home is the App Server's behavior.
-// Gap: main.ts's own exit wiring for Executors (collecting each spawned transport's `exited` and returning it as the runtime's
-// `exited`) is driven by no case: real-main cases run Executors on the fixture App Server, which has no process, and this
-// file uses its copy. Retest: a live dispatch run, or the owner's acceptance, checks that a released Executor's home holds
-// only its rollout and that no `dispatch_executor_home_deferred` line appears.
+// Gap: no case asserts main.ts's own exit wiring for Executors (collecting each spawned transport's `exited` and returning it
+// as the runtime's `exited`); this file uses its copy. The only real-main case that runs Executors on the installed App Server,
+// in channel-startup.integration.test.ts (opt-in `DISPATCH_RESULT_SCOPE_LIVE=1`), checks no home. Retest: add to that case,
+// or check in the owner's acceptance, that a released Executor's home holds only its rollout and that no
+// `dispatch_executor_home_deferred` line appears.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
