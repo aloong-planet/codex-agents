@@ -106,7 +106,7 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     try {
       const listed = await session.listSkills(runtime.cwd);
       expect(listed.map((skill) => skill.name).sort()).toEqual(["own-home-probe", "own-probe"]);
-      const ownSources = [["codex-home", "skills"], ["home", ".agents", "skills"]].map((parts) => fs.realpathSync(path.join(runtimeRoot, ...parts)) + path.sep);
+      const ownSources = [["codex-home", "skills"], ["home", ".agents", "skills"]].map((parts) => path.join(fs.realpathSync(runtimeRoot), ...parts) + path.sep);
       for (const skill of listed) expect(ownSources.some((source) => fs.realpathSync(skill.path).startsWith(source)), skill.path).toBe(true);
       expect(listed.filter((skill) => skill.scope === "system")).toEqual([]);
     } finally { session.close(); }
