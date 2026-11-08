@@ -211,9 +211,12 @@ describe("launch plan (mcp-catalog::US-001/AC-03 sandbox)", () => {
       },
     });
   });
-  it.each([[[]], [["api.example.com"]]])("never adds a domain the owner did not list (%j)", (domains) => {
-    const plan = launchPlan({ name: "boxed", command: "npx", args: ["-y", "some-server"], sandbox: { domains, read: [], write: [] } }, launch);
-    expect((plan.sandbox?.settings as { network: { allowedDomains: string[] } }).network.allowedDomains).toEqual(domains);
+  it.each([
+    [[], []],
+    [["api.example.com"], ["api.example.com"]],
+  ])("never adds a domain the owner did not list (%j)", (domains, expected) => {
+    const plan = launchPlan({ name: "boxed", command: "npx", args: ["-y", "some-server"], sandbox: { domains: [...domains], read: [], write: [] } }, launch);
+    expect((plan.sandbox?.settings as { network: { allowedDomains: string[] } }).network.allowedDomains).toEqual(expected);
   });
   it.each([
     ["the Node.js installation is in the home directory", { execPath: "/h/owner/bin/node" }, "Node.js 安装目录不能是家目录本身或它的上级：/h/owner"],

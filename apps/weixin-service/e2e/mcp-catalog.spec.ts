@@ -12,6 +12,9 @@ import { test } from "./fixtures.js";
 // MCP 管理 (docs/specs/mcp-catalog.md) in a real browser, against the fixture service and real local MCP programs.
 // Rules are covered by tests/mcp-catalog-rules.test.ts and the catalog by tests/mcp-catalog.test.ts; these journeys
 // check that the page, the API and the service's connections are wired together.
+// Coverage gap: of the text a server supplies, the output tail, the error line (table row and 原因) and the tool
+// description are given markup and checked as text; the server's name and version and the tool names are not. They
+// are separate call sites of the same escaping, and a markup tool name would also change the tool's proxy name.
 const LONG = { timeout: 15_000 };
 const LOOKUP = { name: "lookup", description: "Finds an item.", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } };
 
@@ -107,13 +110,18 @@ test("registers a local program only after confirming its exact command", async 
   await page.getByRole("button", { name: "确认并添加" }).click();
   await expect(row(page, "broken")).toContainText("连接失败", LONG);
   await expect(row(page, "broken")).toContainText("***");
+  // The error line comes from the program; it is shown as text in the row and under 原因 (agent-console::REQ-005/AC-04).
+  const markup = '<a href="https://evil.example/login">重新登录</a><img src="x">';
+  await expect(row(page, "broken")).toContainText(markup);
+  await expect(page.locator("#amc-rows a, #amc-rows img")).toHaveCount(0);
   await expect(row(page, "broken")).toContainText(/将于 \d{2}:\d{2}:\d{2} 自动重试/);
   await expect(page.locator("body")).not.toContainText(SECRET_SENTINEL);
   // The page follows the service every 2 seconds; an opened output tail must stay open across that refresh.
   await page.locator("#amc-status summary").click();
   await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
   // The program's output is shown as text: its markup creates no link or image (agent-console::REQ-005/AC-04).
-  await expect(page.locator("#amc-status pre")).toContainText('<a href="https://evil.example/login">重新登录</a><img src="x">');
+  await expect(page.locator("#amc-status pre")).toContainText(markup);
+  await expect(page.locator("#amc-status .amc-kv")).toContainText(markup);
   await expect(page.locator("#amc-status a, #amc-status img")).toHaveCount(0);
   await page.waitForTimeout(2_500);
   await expect(page.locator("#amc-status details")).toHaveAttribute("open", "");
