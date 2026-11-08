@@ -30,7 +30,7 @@ export class FixtureTeamLeader implements TeamLeader {
   }
 
   private record(phase: FixtureLeaderRequest["phase"], input: LeaderTurnInput, extra: Record<string, unknown>): void {
-    this.requests.push({ phase, teamId: input.leader.id, input: structuredClone({ brief: input.brief, profiles: input.profiles, ...extra }) });
+    this.requests.push({ phase, teamId: input.leader.id, input: structuredClone({ brief: input.brief, profiles: input.profiles, directory: input.directory, memory: input.memory, ...extra }) });
     if (this.requests.length > 40) this.requests.shift();
   }
 }

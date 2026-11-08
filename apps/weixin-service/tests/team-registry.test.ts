@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { TeamRegistry, type TeamDefinitions } from "../src/team-registry.js";
+import { acceptingTeams, TeamRegistry, type TeamDefinitions } from "../src/team-registry.js";
 
 // Registry seam only. The local configuration follows the documented shape in docs/ops/feishu-agent-dispatch.md;
 // the owner's real channel.json is production data and is not read. Real-main wiring is in team-management.integration.test.ts.
 // Bill's seed: sentences 2–5 of the specialist paragraph at 3601e19, plus the budget-and-schedule half of its last sentence (ticket 04, decision D2).
 const BILL_EXECUTOR_INSTRUCTIONS = "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。";
+// Jack's seed: the code-and-tests example of the goal-scope rule, moved out of shared Executor text (ticket 06, Q5).
+const JACK_EXECUTOR_INSTRUCTIONS = "代码与测试任务的结果报告：只要求提供代码和测试用例、明确不要运行时，交付代码和用例即可分别记 completed；测试尚未运行应在 message 中如实说明，不新增运行测试的失败项。若用户实际要求运行而未能运行，则该目标必须如实记为未完成，不能用代码审阅替代执行。";
 const HOST_TOOLS = ["files.read", "schedules.create"];
 const SAM = { appId: "cli_0123456789abcdef", appSecret: "sam-secret" };
 
@@ -48,6 +50,7 @@ describe("team registry", () => {
       const bindings = [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }];
       const executorProfiles = [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }];
       const billProfiles = [{ id: "executor-1", name: "能力档 1", instructions: BILL_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
+      const jackProfiles = [{ id: "executor-1", name: "能力档 1", instructions: JACK_EXECUTOR_INSTRUCTIONS, hostTools: HOST_TOOLS }];
       const leaderProfile = { instructions: "", hostTools: [] };
       expect(registry.current()).toEqual({ version: 1, basedOn: null, source: "local_configuration", definitions: {
         coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调、澄清和分派任务，不执行具体业务事务。",
@@ -59,7 +62,7 @@ describe("team registry", () => {
           { id: "bill", teamName: "生活团队", responsibility: "日常生活事务，包括吃穿住行的规划和安排。",
             leader: { name: "Bill", appId: "cli_2222222222222222", profile: leaderProfile }, executorProfiles: billProfiles, bindings },
           { id: "jack", teamName: "技术团队", responsibility: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。",
-            leader: { name: "Jack", appId: "cli_3333333333333333", profile: leaderProfile }, executorProfiles, bindings },
+            leader: { name: "Jack", appId: "cli_3333333333333333", profile: leaderProfile }, executorProfiles: jackProfiles, bindings },
         ],
       } });
       expect(registry.version(1)).toEqual(registry.current());
@@ -139,8 +142,7 @@ describe("team registry", () => {
   const bill = (definitions: TeamDefinitions, change: (team: TeamDefinitions["teams"][number]) => TeamDefinitions["teams"][number]) =>
     ({ ...definitions, teams: definitions.teams.map((team) => team.id === "bill" ? change(team) : team) });
   it.each([
-    ["a team bound to only some dispatch groups", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" }] })), SAM, "team_registry_roster_unsupported"],
-    ["a draining binding", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "draining" }] })), SAM, "team_registry_roster_unsupported"],
+    ["a binding to a chat outside the dispatch groups", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, bindings: [...team.bindings, { chatId: "oc_gamma", state: "accepting" }] })), SAM, "team_registry_roster_unsupported"],
     ["two teams sharing one application", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_3333333333333333" } })), SAM, "team_registry_roster_unsupported"],
     ["an application without a stored secret", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_7777777777777777" } })), SAM, "team_registry_secret_missing"],
     ["a connection that is not the Coordinator's application", undefined, { appId: "cli_8888888888888888", appSecret: "other" }, "team_registry_roster_unsupported"],
@@ -153,6 +155,20 @@ describe("team registry", () => {
       const current = change ? registry.save(change(seeded.definitions), { basedOn: 1 }) : seeded;
       expect(() => registry.roster(connection)).toThrow(new RegExp(`^${code}$`));
       expect(registry.current()).toEqual(current);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["bound to only some dispatch groups", [{ chatId: "oc_alpha", state: "accepting" }]],
+    ["onboarding in one group", [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "onboarding" }]],
+    ["draining in one group", [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "draining" }]],
+  ] as const)("serves a roster view for a team %s", (_case, bindings) => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      registry.save(bill(seeded.definitions, (team) => ({ ...team, bindings })), { basedOn: 1 });
+      const roster = registry.roster(SAM);
+      expect([roster.agents.map(({ id }) => id), roster.groupChatIds]).toEqual([["sam", "alice", "bill", "jack"], ["oc_alpha", "oc_beta"]]);
     } finally { registry.close(); }
   });
 
@@ -174,5 +190,28 @@ describe("team registry", () => {
         executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: HOST_TOOLS }],
         bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }] });
     } finally { registry.close(); }
+  });
+});
+
+describe("teams accepting work in a group", () => {
+  const team = (id: string, teamName: string, bindings: TeamDefinitions["teams"][number]["bindings"]): TeamDefinitions["teams"][number] => ({
+    id, teamName, responsibility: `${teamName}的职责`, leader: { name: id, appId: `cli_${id}`, profile: { instructions: "", hostTools: [] } },
+    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "", hostTools: [] }], bindings });
+  const definitions: TeamDefinitions = {
+    coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调", appId: SAM.appId, profile: { instructions: "", hostTools: [] } },
+    dispatchGroups: ["oc_alpha", "oc_beta", "oc_gamma"],
+    teams: [
+      team("alice", "运营团队", [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }]),
+      team("bill", "生活团队", [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "onboarding" }]),
+      team("jack", "技术团队", [{ chatId: "oc_beta", state: "draining" }]),
+      team("lily", "设计团队", [{ chatId: "oc_alpha", state: "removed" }]),
+    ],
+  };
+  it.each([
+    ["oc_alpha", [{ id: "alice", name: "运营团队", responsibility: "运营团队的职责" }, { id: "bill", name: "生活团队", responsibility: "生活团队的职责" }]],
+    ["oc_beta", [{ id: "alice", name: "运营团队", responsibility: "运营团队的职责" }]],
+    ["oc_gamma", []],
+  ] as const)("lists only the teams accepting work in %s, by team name and responsibility", (chatId, expected) => {
+    expect(acceptingTeams(definitions, chatId)).toEqual(expected);
   });
 });
