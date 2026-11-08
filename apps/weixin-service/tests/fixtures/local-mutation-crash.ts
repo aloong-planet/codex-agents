@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { LocalFileTools } from "../../src/local-file-tools.js";
+import { unrelatedProtectedRoots } from "../support/service-state.js";
 
 // Exercise the real journal and sandbox through the public tool boundary. No model or channel.
 const root = process.argv[2]!;
@@ -34,7 +35,7 @@ const tools = new LocalFileTools({ get: () => ({
   moduleId: "notes", revision: 1, saved: true,
   scopes: [{ scopeId: "vault", label: "Recovery fixture", directory: path.join(root, "files"), read: true, write: true }],
 }) }, {
-  moduleIds: ["notes"], spoolDirectory: path.join(root, "spool"), operationDatabasePath: path.join(root, "operations.sqlite"),
+  moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool"), operationDatabasePath: path.join(root, "operations.sqlite"),
   afterMutationPrepared: () => {
     if (phase === "prepared-rejected") throw new Error("fixture_preparation_rejected");
     if (phase === "prepared-target-change") fs.writeFileSync(path.join(root, "files", "item.txt"), "user changed during preparation");

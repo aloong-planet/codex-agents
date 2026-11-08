@@ -32,6 +32,7 @@ import { WorkflowToolGateway } from "../src/workflow-tool-gateway.js";
 import { createProductionWorkflowToolCatalog, WorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost, type TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 import { createWeixinSendFilesToolRegistration, createWorkflowToolReplyProjector, WorkflowToolProductionControl } from "../src/workflow-tool-production.js";
+import { unrelatedProtectedRoots } from "./support/service-state.js";
 
 const dirs: string[] = [];
 // Coverage boundary: this suite invokes the production tool gateway, not the
@@ -357,7 +358,7 @@ async function createFixture(sendResults: SendTextResult[] = []) {
   });
   const createLocalFiles = () => new LocalFileTools(permissions, {
     moduleIds: ["notes"],
-    spoolDirectory: snapshotRoot,
+    protectedRoots: unrelatedProtectedRoots, spoolDirectory: snapshotRoot,
     operationDatabasePath: path.join(root, "operations.sqlite"),
   });
   let localFiles = createLocalFiles();
