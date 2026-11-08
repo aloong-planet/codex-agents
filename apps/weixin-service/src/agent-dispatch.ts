@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { DispatchAgent, DispatchClassifier, DispatchDelivery, DispatchExecutor, DispatchJob, DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
+import { COORDINATOR_ID } from "./team-registry.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
 type Notice = { event: InboundContent; agentId: string; senderAccountId: string; text: string; bindingHash: string; presentation?: Omit<PendingPresentation, "acceptedAt"> };
@@ -125,7 +126,7 @@ export class AgentDispatch {
           if (superseded) { superseded.status = "cancelled"; this.save(superseded); }
         }
         if (pending?.handled) {
-          const agent = this.options.agents.find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === "sam");
+          const agent = this.options.agents.find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = this.jobs().find((job) => job.runRef === pending.runRef && job.event.target === event.target && job.event.senderId === event.senderId);
           const presentation = pending.result.status === "waiting" && pending.runRef ? this.options.presentation(event, pending.runRef) : undefined;
@@ -143,7 +144,7 @@ export class AgentDispatch {
         if (decision.kind === "dispatch" || decision.kind === "propose") {
           const agent = this.options.agents.find((candidate) => candidate.id === decision.agentId)!;
           const named = this.options.agents.find(({ id }) => id === event.mentionedAgentIds?.[0]);
-          if (decision.kind === "dispatch" && named && named.id !== "sam" && named.id !== agent.id) {
+          if (decision.kind === "dispatch" && named && named.id !== COORDINATOR_ID && named.id !== agent.id) {
             const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 Sam 重新分派，由他独立处理。`;
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation });
             if (!informed.ok) { this.finishInput(event.key); continue; }
@@ -260,7 +261,7 @@ export class AgentDispatch {
   }
 
   private async coordinate(event: InboundContent, bindingHash: string, text: string) {
-    const sam = this.options.agents.find(({ id }) => id === "sam")!;
+    const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
     return this.deliverNotice(`${event.key}:coordination`, { event, bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, text });
   }
   private notice(job: DispatchJob, text: string, result = false): Notice {

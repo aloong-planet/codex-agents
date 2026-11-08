@@ -75,6 +75,7 @@ import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fix
 import { AgentDispatch } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { CodexDispatchExecutor } from "./agent-dispatch-executor.js";
+import { COORDINATOR_ID, TeamRegistry } from "./team-registry.js";
 import { createDemoServer } from "./http-server.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
@@ -179,7 +180,23 @@ const durableEffectLedger = new DurableEffectLedger(
   path.join(path.dirname(privateStatePath), "effects.sqlite"),
 );
 const weixinConfiguration = channelConfiguration?.entries.find((entry) => entry.channel === "weixin");
-const feishuConfiguration = channelConfiguration?.entries.find((entry) => entry.channel === "feishu");
+const workflowToolCatalog = createProductionWorkflowToolCatalog({
+  files: false,
+  media: true,
+  directFiles: true,
+  delivery: true,
+  schedules: true,
+});
+// Every reader of the dispatch roster takes it from the team registry; local `feishu.dispatch` only feeds the registry's import.
+const feishuConfiguration = (() => {
+  const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
+  if (!entry?.dispatch) return entry;
+  const registry = new TeamRegistry(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
+  try {
+    registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
+    return Object.freeze({ ...entry, dispatch: registry.roster(entry.connection) });
+  } finally { registry.close(); }
+})();
 const directChannel = fixtureMode || !weixinConfiguration
   ? undefined
   : new DirectIlinkChannel({
@@ -209,7 +226,7 @@ const feishuChannel = feishuConfiguration
   ? new FeishuChannel(feishuConfiguration, feishuTransport!,
       durableInboundStore, durableEffectLedger, (code) => process.stderr.write(`${code}\n`), Date.now, feishuInboundMedia)
   : undefined;
-const dispatchApplications = new Map((feishuConfiguration?.dispatch?.agents.filter(({ id }) => id !== "sam") ?? []).map((agent) => {
+const dispatchApplications = new Map((feishuConfiguration?.dispatch?.agents.filter(({ id }) => id !== COORDINATOR_ID) ?? []).map((agent) => {
   const transport = fixtureMode ? new FixtureFeishuTransport(false, `ou_fixture${agent.id}`)
     : new FeishuSdkTransport({ appId: agent.appId, appSecret: agent.appSecret, mode: "outbound" });
   const application = { agentId: agent.id, transport, ready: false };
@@ -587,13 +604,6 @@ const scheduledTasks = new ScheduledTasks({
   ...(notificationRoute ? { notificationRoute } : {}),
   channel: notificationChannel,
   onError: () => process.stderr.write("定时任务状态暂不可用；已停止本轮推进，请检查本地存储。\n"),
-});
-const workflowToolCatalog = createProductionWorkflowToolCatalog({
-  files: false,
-  media: true,
-  directFiles: true,
-  delivery: true,
-  schedules: true,
 });
 const workflowToolGateway = new WorkflowToolGateway(
   workflowToolCatalog,
