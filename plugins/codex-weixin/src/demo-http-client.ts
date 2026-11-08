@@ -1,3 +1,5 @@
+import type { PluginCredentials } from "./console-control-client.js";
+
 export type ModelSafeDemoState = {
   phase: string;
   notice: string;
@@ -153,13 +155,14 @@ export class DemoHttpClient {
   private credential: Promise<string> | undefined;
 
   /**
-   * `authorize` returns the console cookie (`name=value`) for the local service. The credential is kept in
-   * memory only; a 401 means it was revoked or replaced, so the client authorizes once more and retries.
+   * `credentials` supplies the console cookie (`name=value`) for the local service, shared by every plugin
+   * process. A 401 means the cookie was revoked or replaced, so the client asks for a different one once and
+   * retries.
    */
   constructor(
     baseUrl = "http://127.0.0.1:4317",
     private readonly fetchFn: FetchLike = fetch,
-    private readonly authorize?: () => Promise<string>,
+    private readonly credentials?: PluginCredentials,
   ) {
     this.baseUrl = requireLoopbackBaseUrl(baseUrl);
   }
@@ -217,20 +220,22 @@ export class DemoHttpClient {
   }
 
   private async send(url: string, init: RequestInit & { headers: Record<string, string> }): Promise<Response> {
-    if (!this.authorize) return this.fetchFn(url, init);
+    const credentials = this.credentials;
+    if (!credentials) return this.fetchFn(url, init);
+    let pending = this.credential ?? credentials.current();
     for (let attempt = 0; ; attempt += 1) {
-      const current = this.credential ?? this.authorize();
-      this.credential = current;
+      this.credential = pending;
       let cookie: string;
       try {
-        cookie = await current;
+        cookie = await pending;
       } catch (error) {
-        if (this.credential === current) this.credential = undefined;
+        if (this.credential === pending) this.credential = undefined;
         throw error;
       }
       const response = await this.fetchFn(url, { ...init, headers: { ...init.headers, cookie } });
       if (response.status !== 401 || attempt > 0) return response;
-      if (this.credential === current) this.credential = undefined;
+      // Concurrent requests that saw the same refusal share one renewal.
+      pending = this.credential === pending ? credentials.renew(cookie) : this.credential ?? credentials.renew(cookie);
     }
   }
 

@@ -97,8 +97,11 @@ describe("console control channel", () => {
     const access = new ConsoleAccess({ directory: stateDirectory });
     const controlFile = path.join(stateDirectory, "console-control.json");
     const first = await ConsoleControlServer.start({ stateDirectory, access, port: 4317 });
-    const firstToken = (JSON.parse(fs.readFileSync(controlFile, "utf8")) as { token: string }).token;
+    const leftBehind = fs.readFileSync(controlFile, "utf8");
+    const firstToken = (JSON.parse(leftBehind) as { token: string }).token;
     await first.close();
+    // A killed service leaves its connection file behind; the next start must not reuse that token.
+    fs.writeFileSync(controlFile, leftBehind, { mode: 0o600 });
 
     const second = await ConsoleControlServer.start({ stateDirectory, access, port: 4317 });
     cleanups.push(() => second.close());

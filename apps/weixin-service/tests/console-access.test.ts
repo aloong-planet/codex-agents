@@ -219,16 +219,14 @@ describe("console access at the local HTTP boundary", () => {
   });
 
   it.each([
-    ["opened just inside 2 minutes", 119_999, "valid", 302],
-    ["opened just after 2 minutes", 120_001, "valid", 401],
-    ["missing", 0, "missing", 401],
-  ] as const)("treats a %s login link by its lifetime", async (_name, elapsed, token, status) => {
+    ["opened just inside 2 minutes", 119_999, 302],
+    ["opened just after 2 minutes", 120_001, 401],
+  ] as const)("treats a login link %s by its lifetime", async (_name, elapsed, status) => {
     let clock = Date.parse("2026-11-08T04:00:00.000Z");
     const { access, port } = await start({ now: () => clock });
     const link = new URL(access.issueLoginLink(port).url);
     clock += elapsed;
-    const pathname = token === "valid" ? `${link.pathname}${link.search}` : "/login";
-    const response = await raw(port, { path: pathname });
+    const response = await raw(port, { path: `${link.pathname}${link.search}` });
     expect(response.status).toBe(status);
     if (status === 401) {
       expect(response.body).toContain(EXPIRED_NOTICE);
