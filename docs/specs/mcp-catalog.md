@@ -1,8 +1,7 @@
 # MCP catalog
 
-> Status: local programs implemented; URL servers, JSON import, attachment to profiles and proxy tools specified, not implemented.
+> Status: local programs, URL servers and JSON import implemented; attachment to profiles and proxy tools specified, not implemented.
 > Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0029](../adr/0029-keep-service-state-outside-every-file-grant.md).
-> Pending: only local programs (stdio) can be registered; URL servers (mcp-catalog::US-001/AC-04) and JSON import (mcp-catalog::US-002) do not exist yet.
 > Pending: no profile can attach a server, so no agent receives proxy tools, the table and drawer always show no attached profile, and delete is never disabled (mcp-catalog::US-003/AC-03, US-005/AC-01, REQ-002 attached-server wording, REQ-003/AC-02, AC-03, AC-05).
 
 ## Problem Statement
@@ -22,7 +21,7 @@ As the owner, I want to register an MCP server once, so that profiles on the tea
 - mcp-catalog::US-001/AC-01: "添加服务器" opens the configuration form in the drawer. Field labels carry required and optional tags, and longer explanations sit in info tips.
 - mcp-catalog::US-001/AC-02: The name has 1–32 letters, digits, `_` or `-`, is unique, and is fixed after creation; it is part of every tool name.
 - mcp-catalog::US-001/AC-03: A local program (stdio) takes a command, arguments one per line, a working directory (default: the home directory) and environment variables. An optional macOS sandbox adds allowed domains and readable and writable directories.
-- mcp-catalog::US-001/AC-04: A URL server (Streamable HTTP) takes a URL and either headers or OAuth client_credentials (issuer, client ID, secret, scope), optionally presenting the token with DPoP.
+- mcp-catalog::US-001/AC-04: A URL server (Streamable HTTP) takes a URL, headers, and optionally OAuth client_credentials (issuer, client ID, secret, scope), presenting the token with DPoP when chosen. Headers may sit beside OAuth except `Authorization` and `DPoP`, which carry the OAuth token; DPoP needs OAuth. The URL and the issuer use https, or http on a loopback host (localhost, 127.0.0.0/8, ::1).
 - mcp-catalog::US-001/AC-05: Every server has a per-call timeout of 1–600 seconds (default 60), a trusted switch that decides whether its tool annotations are believed, and an enabled switch.
 - mcp-catalog::US-001/AC-06: Saving a new server shows a confirmation card with the exact command and arguments, or the exact address. Nothing is stored or started until the owner confirms it.
 
@@ -30,7 +29,7 @@ As the owner, I want to register an MCP server once, so that profiles on the tea
 
 As the owner, I want to paste an existing `{"mcpServers": {…}}` document, so that I can bring in servers I already use elsewhere.
 
-- mcp-catalog::US-002/AC-01: "导入 JSON" opens in the same drawer. Checking the document lists each server as to be imported or skipped, with the reason for skipping: a server with the same name exists, or the transport is SSE.
+- mcp-catalog::US-002/AC-01: "导入 JSON" opens in the same drawer. Checking the document lists each server as to be imported or skipped, with the reason for skipping: a server with the same name exists, or the transport is SSE. Other reasons are an unsupported transport, an invalid name, no command or URL, both a command and a URL, or the message of a field that fails its check. A server to be imported names the values it brings without content: a value that is only a placeholder such as `${NAME}` or `${input:…}` is imported empty, for the owner to fill in.
 - mcp-catalog::US-002/AC-02: A confirmation card shows the commands and addresses of the servers to be imported. Only confirming it imports them.
 - mcp-catalog::US-002/AC-03: Imported servers are untrusted and attached to no profile.
 
@@ -62,7 +61,7 @@ As the owner, I want to delete servers I no longer use, without silently taking 
 
 ### mcp-catalog::REQ-001 Write-only secrets (direct acceptance)
 
-Environment values, header values and OAuth secrets can only be written. Saved values show as `••••••`, whatever their length, and an unchanged field keeps its value. Secrets of 6 characters or more appear as `***` in errors and in program output; shorter values are not masked there, because they cannot be told apart from ordinary text. No console API returns a secret.
+Environment values, header values and OAuth secrets can only be written. Saved values show as `••••••`, whatever their length, and an unchanged field keeps its value; a value imported empty shows empty. A saved OAuth client secret is kept only while the issuer stays the same. Secrets of 6 characters or more appear as `***` in errors and in program output; shorter values are not masked there, because they cannot be told apart from ordinary text. No console API returns a secret.
 
 ### mcp-catalog::REQ-002 Confirm what a server runs (direct acceptance)
 
@@ -107,14 +106,31 @@ Applies to: every agent. Capability beyond module permissions reaches an agent o
 | Call exceeds the timeout | Call fails with a timeout result under mcp-catalog::REQ-003/AC-03 |
 | Tool output contains instructions to change roles, tools or destinations | Treated as data under [agent-dispatch::REQ-008/AC-05](agent-dispatch.md) |
 | Imported JSON contains an existing name, SSE transport, malformed JSON or no `mcpServers` | Skipped with a reason, or refused as malformed, under mcp-catalog::US-002/AC-01 |
+| Imported JSON holds a placeholder value such as `${GITHUB_TOKEN}`, or an entry with `"disabled": true` | Imported with that value empty and named 需要填写; the disabled entry is imported switched off, under mcp-catalog::US-002/AC-01 |
+| Owner confirms an import after the check's result changed, for example a server of the same name was added meanwhile | Nothing imported; the owner checks again, under mcp-catalog::US-002/AC-02 |
+| Owner adds an `Authorization` or `DPoP` header beside OAuth, or ticks DPoP without OAuth | Refused under mcp-catalog::US-001/AC-04 |
+| A URL or issuer uses http on a host that is not this machine | Refused under mcp-catalog::US-001/AC-04 |
+| Owner changes the OAuth issuer and leaves the client secret as `••••••` | Refused; the secret must be entered again, under mcp-catalog::REQ-001 |
+| The MCP server names an authorization server other than the configured issuer | Connection fails; the client secret is not sent, under mcp-catalog::REQ-003/AC-01 |
+| An authorization server's metadata lacks `authorization_endpoint` | Connection fails with the metadata error: the client SDK requires the field even for client_credentials, under mcp-catalog::US-003/AC-01 |
+| A connected URL server stops answering | The next failed call or periodic listing reconnects at once; then the state shows the error and the next retry, under mcp-catalog::REQ-003/AC-04 |
 | Owner deletes a server still attached to a profile | Delete disabled under mcp-catalog::US-005/AC-01 |
 | Service restarts | Enabled servers reconnect; pinned definitions and reviews persist under mcp-catalog::REQ-003/AC-01 and mcp-catalog::US-004/AC-03 |
 
 ## Implementation Decisions
 
-**Configuration shape.** The catalog follows the owner's agent-link configuration: name, transport (stdio command, arguments, working directory and environment; or Streamable HTTP URL with headers or OAuth client_credentials and optional DPoP), optional macOS sandbox, timeout, trusted and enabled, plus per-tool disable flags and pinned tool definitions. Secrets are stored apart from the readable configuration: two owner-only files in the service's state directory, each replaced atomically, so that after a deletion no state file holds the server's secrets.
+**Configuration shape.** The catalog follows the owner's agent-link configuration: name, transport (stdio command, arguments, working directory and environment; or Streamable HTTP URL with headers and optional OAuth client_credentials with DPoP), optional macOS sandbox, timeout, trusted and enabled, plus per-tool disable flags and pinned tool definitions. Secrets (environment values, header values, OAuth client secrets) are stored apart from the readable configuration: two owner-only files in the service's state directory, each replaced atomically, so that after a deletion, or after a change of transport drops the other transport's secrets, no state file holds them. Servers saved before URL servers existed carry no transport and load as local programs.
 
-**Confirmation is enforced by the host.** A new server, and a change of its command or arguments, carry the exact launch line the confirmation card showed; the host recomputes the line and refuses a mismatch, so a skipped or stale card stores and starts nothing. The card's line comes from the host, quoted as a POSIX shell reads it.
+**Confirmation is enforced by the host.** A new server, and a change of its command, arguments, URL or transport, carry the exact launch line or address the confirmation card showed; the host recomputes it and refuses a mismatch, so a skipped or stale card stores and starts nothing. The card's line comes from the host: a command quoted as a POSIX shell reads it, an address as the normalized URL it connects to.
+
+**URL servers.** A URL server connects over Streamable HTTP with its headers on every request. With OAuth, the host is a client_credentials client authenticating with `client_secret_basic`, and the configured issuer is the SDK's `expectedIssuer`, so the secret goes only to that authorization server even when the MCP server names another. With DPoP the token is bound to a proof key. Access tokens and DPoP keys live in memory, one set per connection: a reconnection or a restart requests a new token, and no token is written to disk. A scope challenge is an error, because a client_credentials client cannot widen its scope by asking again. A URL server has no process whose exit announces a lost connection, so a failed call or listing that the server did not answer reconnects at once; a JSON-RPC error or a timed-out call keeps the connection. URL servers are listed again every 10 minutes even when they announce tool changes, because those notifications travel on an optional stream.
+
+**Import.** The import reads `mcpServers` and ignores other top-level keys (Claude Desktop keeps its settings beside it):
+- An entry with `command` (and `type` absent or `stdio`) is a local program: `command`, `args`, `cwd` and `env`.
+- An entry with `url` (and `type` absent, `http`, `streamable-http` or `streamableHttp`) is a URL server: `url` and `headers`. `type: "sse"` is skipped as SSE; another type is skipped as unsupported.
+- `"disabled": true` imports the server switched off. Unknown keys are ignored, and no sandbox, OAuth or timeout is imported.
+- Values are taken literally, except a value that is only a placeholder another client would expand, which is imported empty.
+- The confirmation carries the names and lines of the servers the check offered; the host checks the same document again and refuses a mismatch. All of them are stored in one change with one audit entry.
 
 **Connection manager.** One host-side manager owns all connections. It connects enabled servers, retries after failures, refreshes tool lists, compares them with pinned definitions, and executes proxy calls. A proxy call is checked against the caller's request snapshot and the current configuration before it is forwarded. Following agent-link: a connection attempt times out after 30 seconds; retries start after 30 seconds and double up to 10 minutes; servers that do not announce tool-list changes are listed again every 10 minutes; a server's first tool listing is pinned as a whole, and pins survive a change of command; the requires-human-interaction mark is `_meta["anthropic/requiresUserInteraction"] = true`; a program's environment is its own variables plus the basic ones (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM`, `SHELL`, `TMPDIR`, `XDG_*`, `NODE_EXTRA_CA_CERTS`); the output tail keeps the last 4,000 characters.
 
