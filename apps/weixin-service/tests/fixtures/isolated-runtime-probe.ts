@@ -184,8 +184,9 @@ export async function sampleBundledSkill(session: AppServerSession, cwd: string)
   if (!bundled) throw new Error("bundled_skill_unavailable");
   const text = fs.readFileSync(bundled.path, "utf8");
   const body = text.startsWith("---\n") ? text.slice(text.indexOf("\n---", 4) + 4) : text;
-  // A line the serialized model input carries verbatim: JSON.stringify escapes only quotes, backslashes and controls.
-  const bodyLine = body.split("\n").map((line) => line.trim()).find((line) => line.length >= 40 && !line.startsWith("#") && !/["\\\u0000-\u001f]/u.test(line));
+  // A line that the serialized model input (modelInputText) carries verbatim, because JSON.stringify leaves it unchanged.
+  const bodyLine = body.split("\n").map((line) => line.trim())
+    .find((line) => line.length >= 40 && !line.startsWith("#") && JSON.stringify(line) === `"${line}"`);
   if (!bodyLine) throw new Error("bundled_skill_body_unavailable");
   return { name: bundled.name, path: bundled.path, bodyLine };
 }
