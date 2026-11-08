@@ -88,6 +88,28 @@ Natural-language routing can clarify instead of dispatching when information is 
 
 Requests stored before Team Leaders handled them keep their stored handling. At the first start after deploying this change, only two kinds of group message can appear without anyone acting: an interruption report for a request that was running when the previous process stopped, and notices that the previous process had queued but not yet sent. Both are what the previous version would have posted at its next start. Inspect `/api/state` for running requests before the deploy if you need to anticipate them.
 
+## Executor runtime homes
+
+Each Executor's runtime home is `group-model-runtimes/dispatch-<64 hex>/` in the state directory. Once the Executor's runtime is released and its App Server process has exited, the home keeps only its thread rollouts: `codex-home/sessions/` and, if present, `codex-home/archived_sessions/`. Everything else in the home is removed:
+
+- the App Server's SQLite databases with their `-wal` and `-shm` files;
+- its logs, locks and temporary files;
+- the copied login (`auth.json`), `config.toml` and the model catalog;
+- the empty `home/` and `workspace/` directories.
+
+A retry resumes the Assignment's thread from its rollout. The App Server rebuilds its databases, and the service writes the configuration, login copy and catalog again.
+
+The first start after deploying this compacts every existing Executor home in the same way, including the homes of the earlier one-specialist dispatch, before any dispatch work runs. Every later start repeats the sweep. The homes of the Coordinator (`dispatch-coordinator`), the Team Leaders (`dispatch-leader-…`) and group conversations are not touched, and no rollout is ever opened, changed or removed. Compacted Executor homes need no restore when rolling back to the previous release: it resumes Executor threads from the same rollouts.
+
+When the service cannot confirm a home's records, it keeps the whole home and writes one line to standard error, for example `dispatch_executor_home_kept:rollout_missing:dispatch-<64 hex>`. The reasons are:
+
+- `rollout_missing`: the thread recorded for the home has no rollout there, or no thread is recorded and the home holds no rollout;
+- `removal_failed`: an entry could not be removed; what remains is kept and the next start tries again;
+- `home_invalid`: the home or its `codex-home` is not a real directory;
+- `compaction_failed`: the session store could not be read.
+
+`dispatch_executor_home_deferred:process_running:dispatch-<64 hex>` means a released runtime's App Server had not exited within 10 seconds; the next start compacts that home. `dispatch_executor_homes_unreadable` means the start could not list `group-model-runtimes/`, so it compacted no home. A kept home is reported again at every start. Inspect it; do not delete its rollouts.
+
 ## Rollback and diagnosis
 
 For operational rollback, first stop intake and inspect existing in-flight work. Remove `feishu.dispatch` to restore mention-only handling on the current binary, keeping the same state. If returning Sam to long connection, remove `webhook`, set `receiveMode` to `websocket` (or omit it), restore that mode in Sam's platform console, and restart once. Reminders created under a Team Leader's bot still need their original application route; disabling dispatch does not transfer them to Sam. Reconcile those tasks before removing their configuration.

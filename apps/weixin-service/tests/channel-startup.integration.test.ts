@@ -346,13 +346,13 @@ it.each(["missing", "invalid"])("fails before opening a channel for %s startup c
   } finally { await stop(child); rmSync(directory, { recursive: true, force: true }); }
 }, 15000);
 
-it("refuses to start with the fixture coordination switch outside fixture mode", async () => {
+it.each(["WORKFLOW_FIXTURE_COORDINATION_RUNTIME", "WORKFLOW_FIXTURE_COMPACTION_HOLD"])("refuses to start with the fixture switch %s outside fixture mode", async (fixtureSwitch) => {
   const directory = mkdtempSync(join(tmpdir(), "channel-fixture-switch-"));
   const production = { ...process.env };
   delete production.DEMO_MODE;
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     cwd: fileURLToPath(new URL("../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"],
-    env: { ...production, WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1", HOME: directory, CHANNEL_CONFIG_PATH: join(directory, "channel.json"), WEIXIN_OTEL_ENABLED: "0" },
+    env: { ...production, [fixtureSwitch]: "1", HOME: directory, CHANNEL_CONFIG_PATH: join(directory, "channel.json"), WEIXIN_OTEL_ENABLED: "0" },
   });
   let output = "";
   child.stdout?.on("data", (chunk) => { output += String(chunk); });

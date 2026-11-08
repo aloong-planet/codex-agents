@@ -1,13 +1,20 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
+import { RuntimePool } from "../src/runtime-pool.js";
 import { TeamRegistry } from "../src/team-registry.js";
+import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures.
 // Registry versions are saved through TeamRegistry, the store's own public class. Fixture mode injects already-decoded Coordinator
@@ -389,3 +396,116 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     for (const path of [directory, business, checkout]) rmSync(path, { recursive: true, force: true });
   }
 }, 90000);
+
+// Executor home compaction (agent-dispatch::QR-002). In fixture mode the fixture App Server writes a rollout for each Executor
+// thread it starts, so homes compact as in production. Gap: it does not resume from that rollout; resume after compaction is
+// shown on the installed App Server in isolated-runtime-compaction.test.ts, which CI cannot run.
+// Gap: the startup sweep is shown to finish before the service is ready, with no queued work at start; no case orders it
+// against `agentDispatch.start()`. Retest condition: a restart case with a queued retry whose failed attempt's home was left
+// uncompacted, asserting the sweep compacts that home before the retry's Executor runtime is created on it.
+const executorHomes = (directory: string) => readdirSync(join(directory, "group-model-runtimes")).filter((name) => /^dispatch-[0-9a-f]{64}$/u.test(name))
+  .map((name) => join(directory, "group-model-runtimes", name));
+const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
+/** Waits until home holds only one rollout (of `threadId` when given) and the directories leading to it; returns that rollout. */
+async function onlyRolloutRemains(home: string, threadId?: string): Promise<string> {
+  const rollout = new RegExp(`^codex-home/sessions/\\d{4}/\\d{2}/\\d{2}/rollout-.+-${threadId ?? "[0-9a-f-]{36}"}\\.jsonl$`, "u");
+  const deadline = Date.now() + processWaitLimitMs;
+  for (;;) {
+    const listing = homeListing(home), files = listing.filter((entry) => !entry.endsWith("/"));
+    const ancestors = files.length === 1 ? files[0]!.split("/").slice(0, -1).map((_part, index, parts) => `${parts.slice(0, index + 1).join("/")}/`) : [];
+    if (files.length === 1 && rollout.test(files[0]!) && JSON.stringify(listing.filter((entry) => entry.endsWith("/"))) === JSON.stringify(ancestors)) return files[0]!;
+    if (Date.now() > deadline) throw new Error(`home not compacted: ${JSON.stringify(listing)}`);
+    await delay(25);
+  }
+}
+
+it("compacts an ended Executor's home to its rollout, and reruns the retried Assignment on the same thread", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_compaction_failed", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述"),
+      { modelReply: JSON.stringify({ message: "缺少商品照片，文案未完成。", results: [{ subject: "整理闲鱼商品描述", status: "failed" }] }) }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    const thread = failed.fixtureModelRequests![0]!.threadId, homes = executorHomes(directory);
+    expect(homes).toHaveLength(1);
+    const kept = await onlyRolloutRemains(homes[0]!, thread);
+    await running.post("/api/fixture/inbound", groupMessage("om_compaction_retry", "重试", { kind: "retry", agentId: null, requestId: failed.agentDispatch!.jobs[0]!.id, summary: "", message: "" },
+      { modelReply: executorReply("商品文案已整理好。", "整理闲鱼商品描述") }));
+    const completed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && state.agentFixtureOutboxes?.alice?.text.length === 4);
+    console.log(JSON.stringify({ kind: "dispatch_home_compaction_retry", commands: ["帮我整理闲鱼商品描述", "重试"], jobs: completed.agentDispatch,
+      outboxes: completed.agentFixtureOutboxes, threads: completed.fixtureModelRequests!.map(({ threadId }) => threadId), home: homeListing(homes[0]!) }));
+    expect(completed.fixtureModelRequests!.map(({ threadId }) => threadId)).toEqual([thread, thread]);
+    expect(completed.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ executor: "执行者 1", status: "completed", attempt: 1 })]);
+    expect(executorHomes(directory)).toEqual(homes);
+    expect(await onlyRolloutRemains(homes[0]!, thread)).toBe(kept);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("finishes on the next start a compaction that a crash cut off, with the rollout intact", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-crash-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    // The fixture-only hold stops compaction after its first removal and blocks the service until it is killed.
+    running = await start(directory, { WORKFLOW_FIXTURE_COMPACTION_HOLD: "1" });
+    await running.post("/api/fixture/inbound", groupMessage("om_compaction_held", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述"),
+      { modelReply: executorReply("商品文案已整理好。", "整理闲鱼商品描述") }));
+    const deadline = Date.now() + processWaitLimitMs;
+    while (!existsSync(join(directory, "fixture-compaction-held"))) {
+      if (Date.now() > deadline) throw new Error("compaction hold not reached");
+      await delay(25);
+    }
+    await running.crash(); running = undefined;
+    const [home] = executorHomes(directory);
+    const cut = homeListing(home!), rollout = cut.find((entry) => /\/rollout-[^/]+\.jsonl$/u.test(entry))!;
+    expect(cut).toEqual(expect.arrayContaining(["codex-home/config.toml", "workspace/", rollout]));
+    const hash = sha256(join(home!, rollout));
+    running = await start(directory);
+    console.log(JSON.stringify({ kind: "dispatch_home_compaction_crash", command: "帮我整理闲鱼商品描述", cut, home: homeListing(home!) }));
+    expect(await onlyRolloutRemains(home!)).toBe(rollout);
+    expect(sha256(join(home!, rollout))).toBe(hash);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+it("compacts the Executor homes left before the upgrade at the first start, and no other runtime home", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    // Session rows as the executor before compaction wrote them: the production class without homes, over a fake App Server conversation.
+    const scopes: string[] = [];
+    const recorder = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
+      agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_aaaaaaaaaaaaaaaa" }],
+      runtimes: new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 1000, close: ({ agent }) => agent.close() }),
+      createRuntime: (_job, scope) => { scopes.push(scope); return { agent: conversation(scopes.length === 1 ? "thread-ended" : "thread-recorded"), cwd: join(directory, scope) }; },
+      tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+      profile: () => ({ instructions: "", memoryScope: "group", tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("no tool calls"); } } }),
+      contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+      memory: () => "", capture: async () => {}, existingResult: () => undefined,
+    });
+    const job = { id: "om_before_upgrade", bindingHash: "binding", agentId: "alice", senderAccountId: "cli_aaaaaaaaaaaaaaaa", summary: "整理商品文案", status: "running" as const, attempt: 0,
+      event: { key: "om_before_upgrade", accountId: "cli_0123456789abcdef", target: "feishu.group.oc_alpha", senderId: "ou_owner", conversationType: "group" as const,
+        messageId: "om_before_upgrade", source: "text" as const, text: "帮我整理商品文案", receivedAt: 1 } };
+    for (const id of ["om_before_upgrade:assignment:0", "om_before_upgrade:assignment:1"]) {
+      await recorder.run(job, { id, requestId: job.id, teamId: "alice", profileId: "executor-1", profileName: "能力档 1", executor: "执行者 1",
+        title: "整理商品文案", brief: "整理闲鱼商品描述", status: "running", attempt: 0 }, new AbortController().signal);
+    }
+    await recorder.close();
+    const root = join(directory, "group-model-runtimes"), home = (name: string) => join(root, name);
+    seedExecutorHome(home(scopes[0]!), [{ threadId: "thread-ended" }]);
+    seedExecutorHome(home(scopes[1]!), [{ threadId: "thread-other" }]);
+    seedExecutorHome(home(`dispatch-${"0".repeat(64)}`), [{ threadId: "thread-pre05" }]);
+    const others = [`dispatch-leader-${"b".repeat(64)}`, "dispatch-coordinator", "feishu.group.seeded-elsewhere"];
+    for (const name of others) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
+    const unchanged = Object.fromEntries([scopes[1]!, ...others].map((name) => [name, homeListing(home(name))]));
+    running = await start(directory);
+    console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])),
+      diagnostics: running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home")) }));
+    expect(homeListing(home(scopes[0]!))).toEqual(keptListing("thread-ended"));
+    expect(homeListing(home(`dispatch-${"0".repeat(64)}`))).toEqual(keptListing("thread-pre05"));
+    expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
+    expect(running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home"))).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);

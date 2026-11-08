@@ -48,7 +48,7 @@ The console never authors, uploads, pastes or edits skill content. Skills enter 
 
 ### skill-library::REQ-002 Executors load exactly their profile's skills (direct acceptance)
 
-When an Executor is created, the host copies the skills its profile selects, in the versions of the request's snapshot, into that Executor's own runtime home ([agent-dispatch::REQ-016/AC-04](agent-dispatch.md)). No other skill is visible to it.
+When an Executor is created, the host copies the skills its profile selects, in the versions of the request's snapshot, into that Executor's own runtime home ([agent-dispatch::REQ-016/AC-04](agent-dispatch.md)). It copies them again whenever that Executor's runtime is created for a retry, because a released home keeps only its rollouts ([ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)). No other skill is visible to it.
 
 ## Failure modes and boundaries
 
