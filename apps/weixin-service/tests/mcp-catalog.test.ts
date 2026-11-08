@@ -592,14 +592,14 @@ describe("URL servers", () => {
     register(catalog, remote);
     expect(stateText(state)).toContain(HEADER_SENTINEL);
     expect(stateText(state)).toContain(CLIENT_SECRET_SENTINEL);
-
-    catalog.update("remote", { ...remote, headers: { "X-Api-Key": "••••••" }, oauth: null }, { actor });
-    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
-    expect(stateText(state)).toContain(HEADER_SENTINEL);
     await catalog.remove("remote", actor);
     expect(stateText(state)).not.toContain(HEADER_SENTINEL);
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
 
     register(catalog, remote);
+    expect(stateText(state)).toContain(CLIENT_SECRET_SENTINEL);
+    catalog.update("remote", { ...remote, headers: { "X-Api-Key": "••••••" }, oauth: null }, { actor });
+    expect(stateText(state)).not.toContain(CLIENT_SECRET_SENTINEL);
     expect(stateText(state)).toContain(HEADER_SENTINEL);
     const local = input("remote", testServerFiles(work));
     catalog.update("remote", local, { confirmed: catalog.preview(local, "remote").launchLine, actor });
