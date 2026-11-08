@@ -145,6 +145,11 @@ export type McpCatalogOptions = {
   retryMs?: number;
   /** Tool-list refresh for servers without change notifications, in milliseconds; 0 disables it. */
   refreshMs?: number;
+  /**
+   * Where each sandboxed server gets its own npm cache, outside the state and temporary directories; defaults to
+   * `~/Library/Caches/codex-weixin/mcp`.
+   */
+  cacheDirectory?: string;
   now?: () => number;
 };
 
@@ -186,6 +191,7 @@ function readJson(file: string): unknown {
 export class McpCatalog {
   private readonly options: McpCatalogOptions;
   private readonly homeDirectory: string;
+  private readonly cacheDirectory: string;
   private servers: StoredServer[] = [];
   private secrets: Record<string, Record<string, string>> = {};
   private readonly connections = new Map<string, Connection>();
@@ -194,6 +200,7 @@ export class McpCatalog {
   constructor(options: McpCatalogOptions) {
     this.options = options;
     this.homeDirectory = options.homeDirectory ?? os.homedir();
+    this.cacheDirectory = options.cacheDirectory ?? path.join(this.homeDirectory, "Library", "Caches", "codex-weixin", "mcp");
     const stored = readJson(path.join(options.stateDirectory, CATALOG_FILE)) as { servers?: StoredServer[] } | undefined;
     this.servers = Array.isArray(stored?.servers) ? stored.servers.filter((server) => typeof server?.name === "string") : [];
     const secrets = readJson(path.join(options.stateDirectory, SECRETS_FILE)) as { env?: Record<string, Record<string, string>> } | undefined;
@@ -280,6 +287,8 @@ export class McpCatalog {
     await this.disconnect(name);
     this.connections.delete(name);
     fs.rmSync(path.join(this.options.stateDirectory, "mcp-sandbox", `${name}.json`), { force: true });
+    // A later server of the same name must not inherit what this one left in its npm cache.
+    fs.rmSync(path.join(this.cacheDirectory, name), { recursive: true, force: true });
   }
 
   /** Unchecking a tool disables it from the next call on (mcp-catalog::US-004/AC-01). */
@@ -542,16 +551,23 @@ export class McpCatalog {
           execPath: process.execPath,
           srtPath: server.sandbox ? srtPath() : "",
           tmpDirectory: os.tmpdir(),
+          cacheDirectory: path.join(this.cacheDirectory, name),
+          isFile: (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } },
         });
         if (plan.sandbox) {
           fs.mkdirSync(path.dirname(plan.sandbox.settingsFile), { recursive: true, mode: 0o700 });
           fs.writeFileSync(plan.sandbox.settingsFile, JSON.stringify(plan.sandbox.settings, null, 2), { mode: 0o600 });
+          const cache = path.join(this.cacheDirectory, name);
+          fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+          fs.chmodSync(cache, 0o700);
+          // An empty user configuration, so that npm never reads the owner's ~/.npmrc.
+          fs.writeFileSync(path.join(cache, "npmrc"), "", { mode: 0o600 });
         }
         const transport = new StdioClientTransport({
           command: plan.command,
           args: plan.args,
           cwd: plan.cwd,
-          env: childEnvironment(this.options.env ?? process.env, this.secrets[name] ?? {}),
+          env: childEnvironment(this.options.env ?? process.env, { ...this.secrets[name], ...plan.env }),
           stderr: "pipe",
         });
         transport.stderr?.on("data", (chunk: Buffer) => {

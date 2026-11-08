@@ -3,9 +3,14 @@
 // retrying and restarting it is the behaviour under test.
 //
 // Coverage gaps:
-// - The sandbox case runs only on macOS (CI runs on macos-15). The sandbox's network filter is checked only
+// - The sandbox cases run only on macOS (CI runs on macos-15). The sandbox's network filter is checked only
 //   through the generated rules in mcp-catalog-rules.test.ts, because a real check needs outbound network.
+// - The npx case runs a local, dependency-free package packed into a tarball, so npx downloads nothing but unpacks
+//   it into the server's own cache as it would a registry package. A package fetched from the npm registry with
+//   registry.npmjs.org allowed is not driven: running third-party registry code is not permitted in this test
+//   environment. It needs a manual check with network access.
 // - The child-environment case can show only the absence of keys the parent environment held; it plants four.
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +20,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { McpCallRefused, McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
 import { SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+
+const LOCAL_NPX_PACKAGE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "mcp-local-npx-package");
 
 const BROWSER = { id: "b1", label: "Chrome · macOS", authorizedAt: "2026-11-08T00:00:00.000Z", lastUsedAt: "2026-11-08T00:00:00.000Z" };
 const actor = { browser: BROWSER };
@@ -359,7 +366,12 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     const writable = temporary("mcp-sandbox-write-");
     fs.writeFileSync(path.join(readable, "in.txt"), "readable content");
     fs.writeFileSync(path.join(home, "private.txt"), "home content");
-    register(catalog, input("boxed", testServerFiles(work), { sandbox: { domains: [], read: [readable], write: [writable] } }));
+    // A file named as an argument is readable by itself; its directory and siblings are not.
+    fs.mkdirSync(path.join(home, "notes"));
+    fs.writeFileSync(path.join(home, "notes", "named.txt"), "named content");
+    fs.writeFileSync(path.join(home, "notes", "sibling.txt"), "sibling content");
+    const files = testServerFiles(work);
+    register(catalog, input("boxed", files, { args: [...testServerArgs(files), "--named", path.join(home, "notes", "named.txt")], sandbox: { domains: [], read: [readable], write: [writable] } }));
     await connected(catalog, "boxed");
 
     const call = (tool: string, args: Record<string, unknown>) => catalog.call(`mcp__boxed__${tool}`, args);
@@ -367,7 +379,30 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     expect(await call("write_file", { path: path.join(writable, "out.txt"), text: "ok" })).toEqual({ text: "written", isError: false });
     expect(fs.readFileSync(path.join(writable, "out.txt"), "utf8")).toBe("ok");
     expect(await call("read_file", { path: path.join(home, "private.txt") })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
+    expect(await call("read_file", { path: path.join(home, "notes", "named.txt") })).toEqual({ text: "named content", isError: false });
+    expect(await call("read_file", { path: path.join(home, "notes", "sibling.txt") })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(await call("write_file", { path: path.join(readable, "new.txt"), text: "no" })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(fs.existsSync(path.join(readable, "new.txt"))).toBe(false);
   });
+
+  it("an npx server starts with the server's own npm cache, whatever the owner entered", async () => {
+    const { work, home, open } = setup();
+    const catalog = open();
+    const ownerCache = path.join(work, "owner-npm-cache");
+    const packed = temporary("mcp-npx-pack-");
+    const npm = path.join(path.dirname(process.execPath), "npm");
+    const tarball = path.join(packed, execFileSync(npm, ["pack", LOCAL_NPX_PACKAGE, "--pack-destination", packed, "--cache", path.join(packed, "cache")], { encoding: "utf8" }).trim().split("\n").at(-1)!);
+    const server = { name: "npxbox", command: "npx", args: ["-y", `--package=${tarball}`, "mcp-local-npx-test-server"], env: { npm_config_cache: ownerCache }, sandbox: { domains: [], read: [], write: [] } };
+    register(catalog, server);
+    // The whole view is compared, so that a failure shows npm's error and output.
+    await vi.waitFor(() => expect(catalog.viewServer("npxbox")).toMatchObject({ state: "connected" }), { timeout: 60_000, interval: 200 });
+
+    const own = path.join(home, "Library", "Caches", "codex-weixin", "mcp", "npxbox");
+    expect(JSON.parse((await catalog.call("mcp__npxbox__npm_settings", {})).text)).toEqual({ cache: path.join(own, "npm"), userconfig: path.join(own, "npmrc") });
+    expect(fs.readdirSync(path.join(own, "npm")).length).toBeGreaterThan(0);
+    expect(fs.existsSync(ownerCache)).toBe(false);
+
+    await catalog.remove("npxbox", actor);
+    expect(fs.existsSync(own)).toBe(false);
+  }, 90_000);
 });

@@ -73,15 +73,27 @@ function stringList(value: unknown, what: string): string[] {
   return value as string[];
 }
 
-function sandboxDirectories(value: unknown, what: string, context: { homeDirectory: string; stateDirectory: string }): string[] {
+type SandboxContext = { homeDirectory: string; stateDirectory: string };
+
+/** A directory a sandboxed program may read: never the home, `/` or an ancestor of the home, nor in or around the state directory. */
+function checkSandboxDirectory(directory: string, what: string, context: SandboxContext): string {
+  const resolved = path.resolve(directory);
+  const home = path.resolve(context.homeDirectory);
+  if (resolved === path.sep || resolved === home || home.startsWith(resolved + path.sep)) throw new McpConfigError(`${what}不能是家目录本身或它的上级：${resolved}`);
+  if (insideOrAround(resolved, context.stateDirectory)) throw new McpConfigError(`${what}不能包含服务的状态目录，也不能在其中：${resolved}`);
+  return resolved;
+}
+
+function insideOrAround(target: string, stateDirectory: string): boolean {
+  const state = path.resolve(stateDirectory);
+  return target === state || state.startsWith(target + path.sep) || target.startsWith(state + path.sep);
+}
+
+function sandboxDirectories(value: unknown, what: string, context: SandboxContext): string[] {
   const out: string[] = [];
   for (const raw of stringList(value, what).map((item) => item.trim()).filter(Boolean)) {
     if (!path.isAbsolute(raw)) throw new McpConfigError(`${what}应为绝对路径：${raw}`);
-    const resolved = path.resolve(raw);
-    const home = path.resolve(context.homeDirectory);
-    if (resolved === path.sep || resolved === home || home.startsWith(resolved + path.sep)) throw new McpConfigError(`${what}不能是家目录本身或它的上级：${resolved}`);
-    const state = path.resolve(context.stateDirectory);
-    if (resolved === state || state.startsWith(resolved + path.sep) || resolved.startsWith(state + path.sep)) throw new McpConfigError(`${what}不能包含服务的状态目录，也不能在其中：${resolved}`);
+    const resolved = checkSandboxDirectory(raw, what, context);
     if (!out.includes(resolved)) out.push(resolved);
   }
   return out;
@@ -114,6 +126,8 @@ export function normalizeStdio(
       write: sandboxDirectories(raw.write, "可读写的目录", context),
     };
   }
+  // A sandboxed program can read its working directory, so it passes the same checks as a readable directory.
+  if (sandbox && cwd) checkSandboxDirectory(cwd, "工作目录", context);
   return { command, args, ...(cwd ? { cwd } : {}), envNames: [...new Set(envNames)], ...(sandbox ? { sandbox } : {}) };
 }
 
@@ -204,38 +218,61 @@ export type LaunchPlan = {
   command: string;
   args: string[];
   cwd: string;
+  /** Variables the service sets for a sandboxed program; they win over owner-entered ones of the same names. */
+  env: Record<string, string>;
   /** For a sandboxed program: the settings `srt` reads, to be written to `settingsFile`. */
   sandbox?: { settingsFile: string; settings: unknown };
 };
 
 /**
- * How a local program starts. Unsandboxed: as configured. Sandboxed (macOS only): through `srt` with its own rules —
- * network only to the allowed domains, no reads in the home or state directory except the configured directories
- * and the program's own, writes only to the writable directories and the temporary directory. Readable directories
- * stay read-only even inside the temporary directory.
+ * How a local program starts. Unsandboxed: as configured. Sandboxed (macOS only), through `srt` with only what the
+ * owner typed plus the minimum the service supplies:
+ * - reads: the Node.js prefix, each command path or absolute argument that is an existing file (the file itself,
+ *   never its directory, and never one in the state directory), the working directory, the readable and writable
+ *   directories, and the server's own npm cache; the home and state directories are otherwise unreadable;
+ * - writes: the writable directories, the temporary directory and the server's own npm cache; readable directories
+ *   and named files stay read-only even inside the temporary directory;
+ * - npm uses the server's own cache and an empty user configuration, so `~/.npm` and `~/.npmrc` are never touched;
+ * - network: only the allowed domains.
+ * A Node.js prefix that fails the readable-directory checks refuses the start instead of widening the sandbox.
  */
 export function launchPlan(
   settings: Pick<ServerSettings, "name" | "command" | "args" | "cwd" | "sandbox">,
-  context: { homeDirectory: string; stateDirectory: string; platform: string; execPath: string; srtPath: string; tmpDirectory: string },
+  context: {
+    homeDirectory: string;
+    stateDirectory: string;
+    platform: string;
+    execPath: string;
+    srtPath: string;
+    tmpDirectory: string;
+    /** The server's own npm cache directory, outside the state and temporary directories. */
+    cacheDirectory: string;
+    isFile: (file: string) => boolean;
+  },
 ): LaunchPlan {
   const cwd = settings.cwd ?? context.homeDirectory;
-  if (!settings.sandbox) return { command: settings.command, args: [...settings.args], cwd };
+  if (!settings.sandbox) return { command: settings.command, args: [...settings.args], cwd, env: {} };
   if (context.platform !== "darwin") throw new McpConfigError(`沙箱只支持 macOS，${settings.name} 设为在沙箱中运行，未启动`);
-  const own = [settings.command, ...settings.args].filter((item) => path.isAbsolute(item)).map((item) => path.dirname(item));
+  const nodePrefix = checkSandboxDirectory(path.dirname(path.dirname(context.execPath)), "Node.js 安装目录", context);
+  const files = [...new Set([settings.command, ...settings.args]
+    .filter((item) => path.isAbsolute(item))
+    .map((item) => path.resolve(item))
+    .filter((file) => context.isFile(file) && !insideOrAround(file, context.stateDirectory)))];
   const settingsFile = path.join(context.stateDirectory, "mcp-sandbox", `${settings.name}.json`);
   const rules = {
     network: { allowedDomains: settings.sandbox.domains, deniedDomains: [] },
     filesystem: {
       denyRead: [context.homeDirectory, context.stateDirectory],
-      allowRead: [...new Set([path.dirname(path.dirname(context.execPath)), ...own, ...(settings.cwd ? [settings.cwd] : []), ...settings.sandbox.read, ...settings.sandbox.write])],
-      allowWrite: [...settings.sandbox.write, context.tmpDirectory],
-      denyWrite: settings.sandbox.read.filter((directory) => !settings.sandbox!.write.includes(directory)),
+      allowRead: [...new Set([nodePrefix, ...files, ...(settings.cwd ? [settings.cwd] : []), ...settings.sandbox.read, ...settings.sandbox.write, context.cacheDirectory])],
+      allowWrite: [...settings.sandbox.write, context.tmpDirectory, context.cacheDirectory],
+      denyWrite: [...settings.sandbox.read.filter((directory) => !settings.sandbox!.write.includes(directory)), ...files],
     },
   };
   return {
     command: context.execPath,
     args: [context.srtPath, "--settings", settingsFile, "--", settings.command, ...settings.args],
     cwd,
+    env: { npm_config_cache: path.join(context.cacheDirectory, "npm"), npm_config_userconfig: path.join(context.cacheDirectory, "npmrc") },
     sandbox: { settingsFile, settings: rules },
   };
 }

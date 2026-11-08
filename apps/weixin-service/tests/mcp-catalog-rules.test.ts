@@ -40,6 +40,11 @@ describe("timeout (mcp-catalog::US-001/AC-05)", () => {
 });
 
 describe("local program fields (mcp-catalog::US-001/AC-03)", () => {
+  it("checks the working directory only when the program is sandboxed", () => {
+    expect(normalizeStdio({ command: "node", cwd: "/h/owner" }, context)).toEqual({ command: "node", args: [], cwd: "/h/owner", envNames: [] });
+    expect(normalizeStdio({ command: "node", cwd: "/h/owner/work", sandbox: {} }, context)).toMatchObject({ cwd: "/h/owner/work" });
+  });
+
   it("keeps arguments as entered, defaults the working directory and normalizes the sandbox", () => {
     expect(normalizeStdio({
       command: " node ",
@@ -69,6 +74,10 @@ describe("local program fields (mcp-catalog::US-001/AC-03)", () => {
     [{ command: "node", sandbox: { write: ["/"] } }, "可读写的目录不能是家目录本身或它的上级：/"],
     [{ command: "node", sandbox: { read: ["/h/owner/.state/weixin"] } }, "可读的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin"],
     [{ command: "node", sandbox: { write: ["/h/owner/.state/weixin"] } }, "可读写的目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin"],
+    [{ command: "node", cwd: "/h/owner", sandbox: {} }, "工作目录不能是家目录本身或它的上级：/h/owner"],
+    [{ command: "node", cwd: "/", sandbox: {} }, "工作目录不能是家目录本身或它的上级：/"],
+    [{ command: "node", cwd: "/h/owner/.state/weixin", sandbox: {} }, "工作目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin"],
+    [{ command: "node", cwd: "/h/owner/.state/weixin/mcp", sandbox: {} }, "工作目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin/mcp"],
   ])("refuses %j", (input, message) => {
     expect(() => normalizeStdio(input, context)).toThrow(message);
   });
@@ -168,31 +177,45 @@ describe("a local program's environment (mcp-catalog::REQ-003/AC-01)", () => {
 });
 
 describe("launch plan (mcp-catalog::US-001/AC-03 sandbox)", () => {
-  const launch = { ...context, platform: "darwin", execPath: "/opt/node/bin/node", srtPath: "/srt/cli.js", tmpDirectory: "/tmp" };
+  const existing = new Set(["/opt/tools/server", "/data/in/file.txt", "/h/owner/.state/weixin/leak.txt"]);
+  const launch = {
+    ...context, platform: "darwin", execPath: "/opt/node/bin/node", srtPath: "/srt/cli.js", tmpDirectory: "/tmp",
+    cacheDirectory: "/h/owner/Library/Caches/codex-weixin/mcp/boxed", isFile: (file: string) => existing.has(file),
+  };
   it("runs an unsandboxed program as configured, in the home directory by default", () => {
-    expect(launchPlan({ name: "plain", command: "node", args: ["a.js"] }, launch)).toEqual({ command: "node", args: ["a.js"], cwd: "/h/owner" });
+    expect(launchPlan({ name: "plain", command: "node", args: ["a.js"] }, launch)).toEqual({ command: "node", args: ["a.js"], cwd: "/h/owner", env: {} });
   });
-  it("runs a sandboxed program through srt with its own rules", () => {
+  it("lets a sandboxed program read only what the owner named, each named file alone, and its own npm cache", () => {
     expect(launchPlan({
-      name: "boxed", command: "/opt/tools/server", args: ["--root", "/data/in/file.txt"], cwd: "/data/work",
-      sandbox: { domains: ["api.example.com"], read: ["/h/owner/ref", "/data/out"], write: ["/data/out"] },
+      name: "boxed", command: "/opt/tools/server", args: ["--root", "/data/in/file.txt", "/data/in", "/missing/file.txt", "/h/owner/.state/weixin/leak.txt"], cwd: "/data/work",
+      sandbox: { domains: ["registry.npmjs.org"], read: ["/h/owner/ref", "/data/out"], write: ["/data/out"] },
     }, launch)).toEqual({
       command: "/opt/node/bin/node",
-      args: ["/srt/cli.js", "--settings", "/h/owner/.state/weixin/mcp-sandbox/boxed.json", "--", "/opt/tools/server", "--root", "/data/in/file.txt"],
+      args: ["/srt/cli.js", "--settings", "/h/owner/.state/weixin/mcp-sandbox/boxed.json", "--", "/opt/tools/server", "--root", "/data/in/file.txt", "/data/in", "/missing/file.txt", "/h/owner/.state/weixin/leak.txt"],
       cwd: "/data/work",
+      env: {
+        npm_config_cache: "/h/owner/Library/Caches/codex-weixin/mcp/boxed/npm",
+        npm_config_userconfig: "/h/owner/Library/Caches/codex-weixin/mcp/boxed/npmrc",
+      },
       sandbox: {
         settingsFile: "/h/owner/.state/weixin/mcp-sandbox/boxed.json",
         settings: {
-          network: { allowedDomains: ["api.example.com"], deniedDomains: [] },
+          network: { allowedDomains: ["registry.npmjs.org"], deniedDomains: [] },
           filesystem: {
             denyRead: ["/h/owner", "/h/owner/.state/weixin"],
-            allowRead: ["/opt/node", "/opt/tools", "/data/in", "/data/work", "/h/owner/ref", "/data/out"],
-            allowWrite: ["/data/out", "/tmp"],
-            denyWrite: ["/h/owner/ref"],
+            allowRead: ["/opt/node", "/opt/tools/server", "/data/in/file.txt", "/data/work", "/h/owner/ref", "/data/out", "/h/owner/Library/Caches/codex-weixin/mcp/boxed"],
+            allowWrite: ["/data/out", "/tmp", "/h/owner/Library/Caches/codex-weixin/mcp/boxed"],
+            denyWrite: ["/h/owner/ref", "/opt/tools/server", "/data/in/file.txt"],
           },
         },
       },
     });
+  });
+  it.each([
+    ["the home directory", "/h/owner/bin/node", "Node.js 安装目录不能是家目录本身或它的上级：/h/owner"],
+    ["the state directory", "/h/owner/.state/weixin/node/bin/node", "Node.js 安装目录不能包含服务的状态目录，也不能在其中：/h/owner/.state/weixin/node"],
+  ])("refuses to start when the Node.js installation is in %s instead of widening the sandbox", (_case, execPath, message) => {
+    expect(() => launchPlan({ name: "boxed", command: "node", args: [], sandbox: { domains: [], read: [], write: [] } }, { ...launch, execPath })).toThrow(message);
   });
   it("refuses a sandbox outside macOS instead of running without one", () => {
     expect(() => launchPlan({ name: "boxed", command: "node", args: [], sandbox: { domains: [], read: [], write: [] } }, { ...launch, platform: "linux" }))
