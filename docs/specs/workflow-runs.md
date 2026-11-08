@@ -575,7 +575,7 @@ One protected set serves group and private targets; `LocalFileTools` requires it
 
 ### Testing Decisions
 
-Unit cases drive the public `LocalFileTools` with the real worker for both a private and a group target. Whole-application coverage reuses the Feishu fixture inbound entry with a grant that contains the state directory, the Codex home and both configuration files. The opt-in installed-App-Server probe confirms that a refused plant leaves the runtime's skill listing unchanged. Fixture mode keeps its business files outside the state directory (`WORKFLOW_FIXTURE_BUSINESS_DIRECTORY`, default `<state directory>-business`), as production does. No UI change; prototype exemption.
+Unit cases drive the public `LocalFileTools` with the real worker for both a private and a group target. Whole-application coverage reuses the Weixin and Feishu fixture inbound entries with a grant that contains the state directory, the Codex home, both configuration files, the service HOME and the diagnostics directory. The opt-in installed-App-Server probe confirms that a refused plant leaves the runtime's skill listing unchanged. Fixture mode keeps its business files outside the state directory (`WORKFLOW_FIXTURE_BUSINESS_DIRECTORY`, default `<state directory>-business`), as production does. No UI change; prototype exemption.
 
 ## Out of Scope
 

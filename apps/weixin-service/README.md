@@ -298,7 +298,7 @@ Playwright整例默认120秒；单轮交互采用30秒空闲超时，覆盖POST�
 
 `test:process-access:live` 使用真实主模型、真实 Router 和持久测试记忆，经公开 fixture 入站产生文件候选，再通过权限设置接口撤销读取并重启。它验证实际 thread 更换、原 Pending 不丢失但不能发送已撤权文件，以及新会话能够回答测试专用记忆事实。没有注入主模型工具决定；外发仍只进入 fixture，不能视为手机验收。工具契约 description 升级的持久化组合另由 `workflow-file-send-integration.test.ts` 覆盖，该测试的模型/渠道是边界假件。
 
-跨进程测试通过 `WORKFLOW_FIXTURE_STATE_DIRECTORY` 复用测试自己创建的临时目录；只在 `DEMO_MODE=fixture` 时生效，目录必须已存在。首次运行创建样本和初始授权，重启不覆盖已有文件、授权或状态。默认未指定时仍使用全新临时目录。测试保留各进程日志及 `evidence.json`，退出时停止自己的隔离进程组，不停止生产服务，也不执行腾讯外发。
+跨进程测试通过 `WORKFLOW_FIXTURE_STATE_DIRECTORY` 复用测试自己创建的临时目录；只在 `DEMO_MODE=fixture` 时生效，目录必须已存在。笔记与媒体样本放在状态目录旁的 `<状态目录>-business`，与生产一样不在受保护的状态目录内；可用 `WORKFLOW_FIXTURE_BUSINESS_DIRECTORY` 另行指定。首次运行创建样本和初始授权，重启不覆盖已有文件、授权或状态。默认未指定时仍使用全新临时目录。测试保留各进程日志及 `evidence.json`，退出时停止自己的隔离进程组，不停止生产服务，也不执行腾讯外发。
 
 设计与审查见 [docs/design.md](./docs/design.md) 和
 [docs/design-review.md](./docs/design-review.md)。源码调研的 canonical 报告位于
