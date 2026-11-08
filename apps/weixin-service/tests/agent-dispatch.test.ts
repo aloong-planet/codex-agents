@@ -15,8 +15,7 @@ import { conversation } from "./support/dispatch-runtime.js";
 // The request lifecycle at the AgentDispatch boundary. Durable stores are real; external conversations, deliveries and the
 // Coordinator's decisions are substitutes. The nested-wait case runs the production Team Leader wrapper and Executor over a
 // real pool, because holding a slot while waiting for another one would span all three.
-// Gap: each group post that reports a state change (a pending choice, a failure, the over-limit question, a choice's cancel
-// reply) is queued in the same transaction as that change. No case shows it: nothing awaits between the two writes, so only a
+// Gap: each group post that reports a state change (a pending choice, a failure, a choice's cancel reply) is queued in the same transaction as that change. No case shows it: nothing awaits between the two writes, so only a
 // process kill could fall between them, and a test can stop an instance only at an await; failing the post's insert instead
 // would need a storage seam the product does not have. Code review covers it (ticket 07, R-1).
 const agents: DispatchAgent[] = [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
