@@ -167,7 +167,7 @@ describe("launch plan (mcp-catalog::US-001/AC-03 sandbox)", () => {
   it("runs a sandboxed program through srt with its own rules", () => {
     expect(launchPlan({
       name: "boxed", command: "/opt/tools/server", args: ["--root", "/data/in/file.txt"], cwd: "/data/work",
-      sandbox: { domains: ["api.example.com"], read: ["/h/owner/ref"], write: ["/data/out"] },
+      sandbox: { domains: ["api.example.com"], read: ["/h/owner/ref", "/data/out"], write: ["/data/out"] },
     }, launch)).toEqual({
       command: "/opt/node/bin/node",
       args: ["/srt/cli.js", "--settings", "/h/owner/.state/weixin/mcp-sandbox/boxed.json", "--", "/opt/tools/server", "--root", "/data/in/file.txt"],
@@ -180,7 +180,7 @@ describe("launch plan (mcp-catalog::US-001/AC-03 sandbox)", () => {
             denyRead: ["/h/owner", "/h/owner/.state/weixin"],
             allowRead: ["/opt/node", "/opt/tools", "/data/in", "/data/work", "/h/owner/ref", "/data/out"],
             allowWrite: ["/data/out", "/tmp"],
-            denyWrite: [],
+            denyWrite: ["/h/owner/ref"],
           },
         },
       },

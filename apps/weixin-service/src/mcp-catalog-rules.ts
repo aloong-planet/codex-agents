@@ -211,7 +211,8 @@ export type LaunchPlan = {
 /**
  * How a local program starts. Unsandboxed: as configured. Sandboxed (macOS only): through `srt` with its own rules —
  * network only to the allowed domains, no reads in the home or state directory except the configured directories
- * and the program's own, writes only to the writable directories and the temporary directory.
+ * and the program's own, writes only to the writable directories and the temporary directory. Readable directories
+ * stay read-only even inside the temporary directory.
  */
 export function launchPlan(
   settings: Pick<ServerSettings, "name" | "command" | "args" | "cwd" | "sandbox">,
@@ -228,7 +229,7 @@ export function launchPlan(
       denyRead: [context.homeDirectory, context.stateDirectory],
       allowRead: [...new Set([path.dirname(path.dirname(context.execPath)), ...own, ...(settings.cwd ? [settings.cwd] : []), ...settings.sandbox.read, ...settings.sandbox.write])],
       allowWrite: [...settings.sandbox.write, context.tmpDirectory],
-      denyWrite: [],
+      denyWrite: settings.sandbox.read.filter((directory) => !settings.sandbox!.write.includes(directory)),
     },
   };
   return {
