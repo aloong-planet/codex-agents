@@ -142,6 +142,7 @@ describe("team registry", () => {
     ["two teams sharing one application", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_3333333333333333" } })), SAM, "team_registry_roster_unsupported"],
     ["an application without a stored secret", (definitions: TeamDefinitions) => bill(definitions, (team) => ({ ...team, leader: { ...team.leader, appId: "cli_7777777777777777" } })), SAM, "team_registry_secret_missing"],
     ["a connection that is not the Coordinator's application", undefined, { appId: "cli_8888888888888888", appSecret: "other" }, "team_registry_roster_unsupported"],
+    ["two teams sharing one agent ID", (definitions: TeamDefinitions) => ({ ...definitions, teams: definitions.teams.map((team) => team.id === "jack" ? { ...team, id: "bill" } : team) }), SAM, "team_registry_roster_unsupported"],
   ] as const)("refuses a roster view for %s", (_case, change, connection, code) => {
     const registry = new TeamRegistry(databasePath());
     try {
@@ -149,6 +150,14 @@ describe("team registry", () => {
       const current = change ? registry.save(change(seeded.definitions), { basedOn: 1 }) : seeded;
       expect(() => registry.roster(connection)).toThrow(new RegExp(`^${code}$`));
       expect(registry.current()).toEqual(current);
+    } finally { registry.close(); }
+  });
+
+  it("refuses a roster view before the first import", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      expect(registry.current()).toBeUndefined();
+      expect(() => registry.roster(SAM)).toThrow(/^team_registry_empty$/);
     } finally { registry.close(); }
   });
 
