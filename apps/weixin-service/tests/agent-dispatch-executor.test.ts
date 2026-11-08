@@ -5,6 +5,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_EXIT_WAIT_MS, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent,
   type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
 import type { DispatchAssignment, DispatchJob } from "../src/agent-dispatch-types.js";
+import type { ChannelTurnAdapter } from "../src/channel-turn-adapter.js";
+import type { InboundContent } from "../src/channel-contract.js";
 import { compactRuntimeHome } from "../src/runtime-home-compaction.js";
 import { RuntimePool } from "../src/runtime-pool.js";
 import { conversation } from "./support/dispatch-runtime.js";
@@ -247,5 +249,35 @@ it.each([
     const result = await executor.run(job("request-one"), assignment("request-one:assignment:0:1"), new AbortController().signal);
     expect(result.status).toBe("failed");
     expect(result.cause).toBe(cause);
+  } finally { await executor.close(); }
+});
+
+// agent-dispatch::REQ-010/AC-01: a cross-team Assignment runs under its own team, so what its Executor produces goes out under
+// that team's Team Leader. The runtime's turn prepares itself as the App Server does, which binds the workflow tools to the turn's event.
+it("runs a cross-team Assignment as its own team, whose Team Leader's application sends what it produces", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-cross-team-")); directories.push(directory);
+  const agent = conversation("thread-1");
+  const prompts: string[] = [], bound: InboundContent[] = [], created: string[] = [];
+  agent.runTurn.mockImplementation(async (_thread, turn) => {
+    const prepared = await (turn as ChannelTurnAdapter).prepare();
+    prompts.push(JSON.stringify(prepared.input)); await prepared.binding?.release();
+    return { owner: "model_owned", finalText: '{"message":"脚本已写好。","results":[{"subject":"脚本","status":"completed"}]}' };
+  });
+  const executor = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
+    agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }, { id: "bill", name: "Bill", responsibility: "衣食住行", senderAccountId: "cli_bill" }],
+    runtimes: new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: ({ agent: owned }) => owned.close() }),
+    createRuntime: (_job, scope, _tools, agentId) => { created.push(agentId); return { agent, cwd: `/isolated/${scope}` }; },
+    tools: { bind: (_thread, event) => { bound.push(event); return { promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} } as never; } },
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" }, tools: { definitions: () => [], contractHash: () => "contract-1",
+      execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined,
+  });
+  try {
+    await expect(executor.run(job("request-one"), { ...assignment("request-one:assignment:0:3"), teamId: "bill", executor: "执行者 3", title: "编写脚本" },
+      new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(created).toEqual(["bill"]);
+    expect(bound.map(({ agentId, senderAccountId }) => ({ agentId, senderAccountId }))).toEqual([{ agentId: "bill", senderAccountId: "cli_bill" }]);
+    expect(prompts[0]).toContain("你是 Bill 团队的执行者 3");
   } finally { await executor.close(); }
 });

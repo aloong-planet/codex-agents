@@ -20,11 +20,27 @@ describe("Team Leader plan validation", () => {
     expect(parseLeaderPlan({ assignments: [{ profileId: "meal", title: " 采购清单 ", brief: "三人份晚餐" }, { profileId: "trip", title: "规划行程", brief: " 南京一日游 " },
       { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: [" 先定行程再订餐 ", "预算按 300 元控制"] }, bill))
       .toEqual({ assignments: [{ profileId: "meal", title: "采购清单", brief: "三人份晚餐" }, { profileId: "trip", title: "规划行程", brief: "南京一日游" },
-        { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: ["先定行程再订餐", "预算按 300 元控制"] });
+        { profileId: "meal", title: "预订午餐", brief: "两人" }], decisions: ["先定行程再订餐", "预算按 300 元控制"], help: [] });
   });
 
   it("accepts a plan with five decisions", () => {
     expect(parseLeaderPlan({ ...plan("trip"), decisions: ["一", "二", "三", "四", "五"] }, bill).decisions).toHaveLength(5);
+  });
+
+  // agent-dispatch::REQ-013/AC-01: the plan names up to three parts for the Coordinator to place with other teams.
+  it("accepts a plan asking for help with up to three parts", () => {
+    const help = [{ title: " 自动上架脚本 ", brief: " 只交付代码，不运行 " }, { title: "竞品比价", brief: "三家" }, { title: "拍照", brief: "白底" }];
+    expect(parseLeaderPlan({ ...plan("trip"), help }, bill).help).toEqual([{ title: "自动上架脚本", brief: "只交付代码，不运行" }, { title: "竞品比价", brief: "三家" },
+      { title: "拍照", brief: "白底" }]);
+  });
+
+  // agent-dispatch::REQ-011/AC-02: the ceiling counts every Assignment the request already holds, whichever team planned it.
+  it.each([
+    ["accepts four more on six planned", 6, 4, undefined],
+    ["refuses five more on six planned", 6, 5, "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工"],
+  ])("%s", (_case, existing, count, reason) => {
+    if (reason) expect(() => parseLeaderPlan(plan("trip", count), bill, existing)).toThrow(expect.objectContaining({ code: "leader_plan_invalid", reason }));
+    else expect(parseLeaderPlan(plan("trip", count), bill, existing).assignments).toHaveLength(count);
   });
 
   it.each([
@@ -36,15 +52,22 @@ describe("Team Leader plan validation", () => {
     ["six decisions", { ...plan("trip"), decisions: ["一", "二", "三", "四", "五", "六"] }],
     ["an empty decision", { ...plan("trip"), decisions: ["  "] }],
     ["eleven Assignments, over the ceiling", plan("trip", 11)],
+    ["four help items", { ...plan("trip"), help: ["一", "二", "三", "四"].map((title) => ({ title, brief: "说明" })) }],
+    ["a help item with an empty title", { ...plan("trip"), help: [{ title: "  ", brief: "说明" }] }],
   ])("refuses %s", (_case, value) => {
     expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid" }));
   });
 
-  const supplementOf = (affected: number[], assignments = plan("trip").assignments.slice(0, 0)) => ({ affected, assignments, decisions: [] as string[] });
+  const supplementOf = (affected: number[], assignments = plan("trip").assignments.slice(0, 0), extra: { parts?: number[]; help?: Array<{ title: string; brief: string }> } = {}) =>
+    ({ affected, assignments, decisions: [] as string[], ...extra });
+  const decoded = (affected: number[], assignments: unknown[] = [], extra: { parts?: number[]; help?: unknown[] } = {}) =>
+    ({ affected, assignments, decisions: [], parts: [], help: [], ...extra });
+  // Positions number what the turn was shown: three Assignments, and two requested parts where a row passes them; the ceiling
+  // counts every Assignment of the request (agent-dispatch::REQ-007/AC-04, REQ-011/AC-02).
   it.each([
-    ["an answer naming one of three Assignments", supplementOf([2]), { affected: [2], assignments: [], decisions: [] }],
-    ["an answer adding an Assignment", supplementOf([], plan("meal").assignments), { affected: [], assignments: plan("meal").assignments, decisions: [] }],
-    ["an answer bringing the request to the ceiling of ten", supplementOf([], plan("meal", 7).assignments), { affected: [], assignments: plan("meal", 7).assignments, decisions: [] }],
+    ["an answer naming one of three Assignments", supplementOf([2]), decoded([2])],
+    ["an answer adding an Assignment", supplementOf([], plan("meal").assignments), decoded([], plan("meal").assignments)],
+    ["an answer bringing the request to the ceiling of ten", supplementOf([], plan("meal", 7).assignments), decoded([], plan("meal", 7).assignments)],
     ["position 0", supplementOf([0]), "leader_plan_invalid"],
     ["a position past the request's Assignments", supplementOf([4]), "leader_plan_invalid"],
     ["a repeated position", supplementOf([1, 1]), "leader_plan_invalid"],
@@ -52,9 +75,16 @@ describe("Team Leader plan validation", () => {
     ["a new Assignment on another team's preset", supplementOf([], plan("code").assignments), "leader_plan_invalid"],
     ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid",
       "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工"],
-  ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string) => {
-    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
-    else expect(parseLeaderSupplement(value, bill, 3)).toEqual(expected);
+    ["new Assignments taking a request holding nine past the ceiling, though three are shown", supplementOf([], plan("meal", 2).assignments), "leader_plan_invalid",
+      "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工", { total: 9, parts: 0 }],
+    ["an answer naming one of two requested parts", supplementOf([], undefined, { parts: [2] }), decoded([], [], { parts: [2] }), undefined, { total: 3, parts: 2 }],
+    ["a part past the requested parts", supplementOf([], undefined, { parts: [3] }), "leader_plan_invalid", "parts 只能取 1 到 2", { total: 3, parts: 2 }],
+    ["a repeated part", supplementOf([], undefined, { parts: [1, 1] }), "leader_plan_invalid", "parts 不能重复", { total: 3, parts: 2 }],
+    ["a part named by a turn shown no requested parts", supplementOf([1], undefined, { parts: [1] }), "leader_plan_invalid", "parts 必须为空"],
+    ["an answer asking only for help", supplementOf([], undefined, { help: [{ title: " 拍照 ", brief: "白底" }] }), decoded([], [], { help: [{ title: "拍照", brief: "白底" }] })],
+  ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string, view?: { total: number; parts: number }) => {
+    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3, view)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
+    else expect(parseLeaderSupplement(value, bill, 3, view)).toEqual(expected);
   });
 
   it.each([
@@ -68,9 +98,9 @@ describe("Team Leader plan validation", () => {
   });
 
   it.each([
-    ["corrects an invalid plan once", [JSON.stringify(plan("code")), JSON.stringify(plan("trip"))], { result: plan("trip") }, 2],
+    ["corrects an invalid plan once", [JSON.stringify(plan("code")), JSON.stringify(plan("trip"))], { result: { ...plan("trip"), help: [] } }, 2],
     ["refuses a plan still invalid after one correction", ["{broken", "{broken"], { error: "leader_plan_invalid" }, 2],
-    ["has a plan over the ceiling merged in its correction turn", [JSON.stringify(plan("trip", 11)), JSON.stringify(plan("trip", 10))], { result: plan("trip", 10) }, 2],
+    ["has a plan over the ceiling merged in its correction turn", [JSON.stringify(plan("trip", 11)), JSON.stringify(plan("trip", 10))], { result: { ...plan("trip", 10), help: [] } }, 2],
   ])("%s", async (_case, outputs, expected, turns) => {
     const refusals: Array<string | undefined> = [];
     const turn = vi.fn(async (refusal?: LeaderOutputError) => { refusals.push(refusal?.reason); return outputs[refusals.length - 1]!; });
@@ -106,10 +136,10 @@ describe("Team Leader wrapper", () => {
   it("plans through a tool-free constrained turn on a persisted thread and releases it", async () => {
     const external = conversation("leader-thread", JSON.stringify(plan("meal")));
     const leader = leaderWith((_scope, work) => work(external, "/isolated/leader"));
-    await expect(leader.plan(input())).resolves.toEqual(plan("meal"));
+    await expect(leader.plan(input())).resolves.toEqual({ ...plan("meal"), help: [] });
     expect(external.startOrResume).toHaveBeenCalledWith(undefined, "/isolated/leader", []);
     expect(external.runTurn).toHaveBeenCalledWith("leader-thread", expect.any(String), undefined, undefined, expect.objectContaining({
-      model: "fixture-model", effort: "low", outputSchema: expect.objectContaining({ required: ["assignments", "decisions"] }) }));
+      model: "fixture-model", effort: "low", outputSchema: expect.objectContaining({ required: ["assignments", "decisions", "help"] }) }));
     const prompt = external.runTurn.mock.calls[0]![1] as string;
     for (const fragment of ["你是 Bill，生活团队的负责人", "负责人规则", "帮我规划周末一日行程", "规划周末一日行程", '"id":"trip"', '"id":"meal"']) expect(prompt).toContain(fragment);
     expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("leader-thread");
@@ -134,7 +164,7 @@ describe("Team Leader wrapper", () => {
     const external = conversation("leader-thread");
     external.runTurn.mockResolvedValueOnce(reply(plan("code"))).mockResolvedValueOnce(reply(plan("trip")));
     const leader = leaderWith((_scope, work) => work(external, "/isolated/leader"));
-    await expect(leader.plan(input())).resolves.toEqual(plan("trip"));
+    await expect(leader.plan(input())).resolves.toEqual({ ...plan("trip"), help: [] });
     expect(external.runTurn.mock.calls.map(([threadId]) => threadId)).toEqual(["leader-thread", "leader-thread"]);
     expect(external.startOrResume.mock.calls[1]![0]).toBe("leader-thread");
     expect(external.runTurn.mock.calls[1]![1]).toContain('上一次输出未通过校验：profileId "code" 不是本团队的预设能力档');
@@ -147,10 +177,10 @@ describe("Team Leader wrapper", () => {
     const leader = leaderWith((_scope, work) => work(external, "/isolated/leader"));
     const assignments = [{ position: 1, executor: "执行者 7", profileName: "餐饮", title: "预订午餐", status: "completed" },
       { position: 2, executor: "执行者 8", profileName: "行程", title: "规划行程", status: "completed" }];
-    await expect(leader.supplement(input(), assignments, "改成下午出发")).resolves.toEqual({ affected: [2], assignments: [], decisions: ["只调整行程"] });
+    await expect(leader.supplement(input(), assignments, "改成下午出发")).resolves.toEqual({ affected: [2], assignments: [], decisions: ["只调整行程"], parts: [], help: [] });
     expect(external.runTurn).toHaveBeenCalledTimes(2);
     expect(external.runTurn.mock.calls.map(([threadId, , , , options]) => [threadId, (options as unknown as { outputSchema: { required: string[] } }).outputSchema.required]))
-      .toEqual([["leader-thread", ["affected", "assignments", "decisions"]], ["leader-thread", ["affected", "assignments", "decisions"]]]);
+      .toEqual([["leader-thread", ["affected", "assignments", "decisions", "parts", "help"]], ["leader-thread", ["affected", "assignments", "decisions", "parts", "help"]]]);
     for (const fragment of ["改成下午出发", "执行者 8", "规划行程"]) expect(external.runTurn.mock.calls[0]![1]).toContain(fragment);
     expect(external.runTurn.mock.calls[1]![1]).toContain("上一次输出未通过校验：affected 只能取 1 到 2");
     expect(external.releaseThread.mock.calls).toEqual([["leader-thread"], ["leader-thread"]]);

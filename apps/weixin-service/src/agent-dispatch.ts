@@ -2,10 +2,10 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { InboundContent, SendTextResult } from "./channel-contract.js";
-import type { DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
-  DispatchPendingResult } from "./agent-dispatch-types.js";
+import type { CrossTeamDecision, DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
+  DispatchPart, DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { LeaderOutputError, type LeaderPlanAssignment, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
+import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
@@ -40,23 +40,49 @@ export function failureCause(failure: AssignmentFailure): string {
   if (code.startsWith("main_reply_")) return "执行者未返回有效的结果报告";
   return "执行连接中断或处理出错";
 }
-/** A request's outcome once none of its Assignments is unfinished (agent-dispatch::REQ-008/AC-01); cancelled ones do not count. */
-export function requestOutcome(statuses: readonly AssignmentStatus[]): "completed" | "partially_failed" | "failed" | "cancelled" {
+/**
+ * A request's outcome once none of its Assignments is unfinished (agent-dispatch::REQ-008/AC-01); cancelled ones do not count. A
+ * failure outranks a part no team took, which a retry may help as well; with every Assignment completed, a part no team took
+ * leaves the request partially unassigned (agent-dispatch::REQ-013/AC-02).
+ */
+export function requestOutcome(statuses: readonly AssignmentStatus[], untaken = false): "completed" | "partially_failed" | "partially_unassigned" | "failed" | "cancelled" {
   const counted = statuses.filter((status) => status !== "cancelled");
   if (!counted.length) return "cancelled";
-  if (counted.every((status) => status === "completed")) return "completed";
+  if (counted.every((status) => status === "completed")) return untaken ? "partially_unassigned" : "completed";
   return counted.includes("completed") ? "partially_failed" : "failed";
 }
+/** The closing's line for the parts no team took; after a retry asked again, they still have none (agent-dispatch::REQ-013/AC-02). */
+function untakenLine(parts: readonly DispatchPart[]): string {
+  const untaken = parts.filter(({ teamId }) => teamId === null);
+  if (!untaken.length) return "";
+  return `${untaken.map(({ title }) => title).join("、")}${untaken.some(({ asked }) => (asked ?? 1) > 1) ? "仍" : ""}没有团队承接，本次未处理；有团队可以承接后，可以明确要求重试。`;
+}
+/** Assignments as a supplement turn shows them, numbered from 1 among those shown. */
+const shown = (assignments: readonly DispatchAssignment[]) => assignments.map((assignment, index) =>
+  ({ position: index + 1, executor: assignment.executor, profileName: assignment.profileName, title: assignment.title, status: assignment.status }));
 /** An Executor's name, from its durable sequence. */
 function executorName(sequence: number): string { return `执行者 ${sequence}`; }
 const executorLabel = (assignment: DispatchAssignment) => `${assignment.executor}（${assignment.profileName}）`;
 /**
- * The Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01). Several
- * Assignments go one per line, as every group post with several items does.
+ * A Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01), and for the
+ * lead, one line per part the Coordinator placed with another team. Several items go one per line, as every group post with
+ * several items does. A cross-team Team Leader's last line says where its results go (agent-dispatch::REQ-013/AC-04).
  */
-function startMessage(assignments: readonly DispatchAssignment[]): string {
-  const items = assignments.map((assignment) => `${executorLabel(assignment)}处理：${assignment.title}`);
-  return items.length === 1 ? `我安排${items[0]}。完成后会在本群汇报。` : `我安排：\n${items.join("\n")}\n完成后会在本群汇报。`;
+function startMessage(assignments: readonly DispatchAssignment[], help?: Readonly<{ parts: readonly string[]; coordinator: string }>, last = "完成后会在本群汇报。"): string {
+  const parts = help?.parts ?? [];
+  const items = [...assignments.map((assignment) => `${executorLabel(assignment)}处理：${assignment.title}`), ...parts.map((part) => `${part}需要其他团队支持，已请 ${help!.coordinator} 协调。`)];
+  return items.length === 1 && !parts.length ? `我安排${items[0]}。${last}` : `我安排：\n${items.join("\n")}\n${last}`;
+}
+/** The Coordinator's announcement of the parts it placed: which team takes which part, at whose request (agent-dispatch::US-003/AC-04). */
+function crossTeamAnnouncement(coordinator: string, lead: string, placed: ReadonlyArray<{ part: string; leader: string }>): string {
+  const ending = `完成后经 ${coordinator} 交回 ${lead} 汇总。`;
+  return placed.length === 1 ? `应 ${lead} 请求，${placed[0]!.part}交给 ${placed[0]!.leader} 队；${ending}`
+    : `应 ${lead} 请求：\n${placed.map(({ part, leader }) => `${part}交给 ${leader} 队`).join("\n")}\n${ending}`;
+}
+/** Each Assignment's own result, one per line: the closing when the Team Leader's closing turn fails. */
+function resultLines(assignments: readonly DispatchAssignment[]): string[] {
+  return assignments.map((assignment) => `${assignment.executor}「${assignment.title}」${assignment.status === "completed" ? "已完成"
+    : assignment.status === "cancelled" ? "已停止" : "未能完成"}。${assignment.result ?? ""}`);
 }
 /** The message an Assignment's Executor receives; group discussion never travels with it. */
 function inputOf(event: InboundContent): InboundContent {
@@ -76,6 +102,8 @@ export class AgentDispatch {
   private closing = false;
   private readonly intake = new Map<string, Promise<void>>();
   private readonly workers = new Map<string, { operation: Promise<void>; abort: AbortController }>();
+  /** Cross-team closings in progress, by request, team and attempt, so concurrent ends close a team's part once. */
+  private readonly closingTeams = new Set<string>();
 
   constructor(databasePath: string, private readonly options: {
     agents: readonly DispatchAgent[];
@@ -150,7 +178,8 @@ export class AgentDispatch {
       ({ id, agentId, senderAccountId, summary, status, result, attempt, runRef, accountId: event.accountId, target: event.target, requester: event.senderId,
         definitionsVersion: definitionsVersion ?? null,
         assignments: this.assignments(id).map(({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run }) =>
-          ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run })) })),
+          ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run })),
+        parts: (this.job(id)?.parts ?? []).map(({ title, teamId, attempt: asked }) => ({ title, teamId, attempt: asked })) })),
     notices: this.database.prepare("SELECT id, state FROM dispatch_notice ORDER BY sequence").all() };
   }
 
@@ -186,7 +215,8 @@ export class AgentDispatch {
         if (assignment.status !== "running") continue;
         assignment.status = "interrupted"; assignment.result = INTERRUPTED; assignment.cause = failureCause({ kind: "shutdown" });
         this.saveAssignment(assignment);
-        this.queueNotice(`${job.id}:interrupted:${assignment.id}:${assignment.attempt}`, { ...this.notice(job,
+        // Each post goes out under the Team Leader of the Assignment's own team (agent-dispatch::REQ-013/AC-04).
+        this.queueNotice(`${job.id}:interrupted:${assignment.id}:${assignment.attempt}`, { ...this.teamNotice(job, assignment.teamId,
           `服务中断，${executorLabel(assignment)}的分工「${assignment.title}」已中断，无法确认已完成的内容，不会自动重放。`), requestId: job.id });
       }
       job.status = "queued"; this.save(job);
@@ -334,10 +364,13 @@ export class AgentDispatch {
             if (previous?.state === "rejected" && retried.every((notice) => notice.state === "rejected")) {
               await this.deliverNotice(`${originalId}:retry:${event.key}`, JSON.parse(String(previous.payload)) as Notice);
             } else await this.coordinate(event, bindingHash, "这条汇报已被接收或发送结果无法确认，不能自动重发。业务操作不会重新执行。");
-          } else if (job.status === "failed" || job.status === "partially_failed") {
+          } else if (job.status === "failed" || job.status === "partially_failed" || job.status === "partially_unassigned") {
+            // A retry reruns only the failed and interrupted Assignments, each with its Executor, and asks the Coordinator again
+            // for the parts no team took. A request that failed before its Team Leader divided it, or before it answered a
+            // supplement, is planned or answered again.
+            const divided = job.dividedAttempt === job.attempt || job.reaskAttempt === job.attempt;
             job.status = "queued"; job.attempt++; job.retry = true; job.fixtureMessageId = event.messageId;
-            // A retry reruns only the failed and interrupted Assignments, each with its Executor; a request that failed before
-            // its Team Leader divided it, or before it answered a supplement, is planned or answered again.
+            if (divided) job.reaskAttempt = job.attempt; else delete job.reaskAttempt;
             this.transaction(() => {
               for (const assignment of this.assignments(job.id)) {
                 if (assignment.status !== "failed" && assignment.status !== "interrupted") continue;
@@ -368,9 +401,7 @@ export class AgentDispatch {
       job = this.job(job.id)!;
       const starting = this.assignments(job.id).filter(({ attempt, status }) => attempt === job.attempt && status === "queued");
       if (starting.length) {
-        const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`, { ...this.notice(job, startMessage(starting)), requestId: job.id });
-        if (!start.ok) throw new Error("dispatch_receipt_unavailable");
-        if (signal.aborted) throw new Error("dispatch_cancelled");
+        await this.announce(job, starting, signal);
         this.transaction(() => { for (const assignment of starting) { assignment.status = "running"; this.saveAssignment(assignment); } });
         await this.postDecisions(job);
         await Promise.all(starting.map((assignment) => this.runAssignment(job, assignment, signal)));
@@ -381,11 +412,18 @@ export class AgentDispatch {
       const assignments = this.assignments(job.id);
       if (!job.cancelRequested) {
         if (assignments.some(({ status }) => status === "waiting")) { job.status = "waiting"; this.save(job); return; }
-        closing = await this.closeRequest(job, team, assignments);
-        await this.rememberDivision(job, team, assignments, closing);
+        // A cross-team part cut off before its closing, by a restart or a pending choice, closes before the request does.
+        for (const teamId of new Set(assignments.map(({ teamId: id }) => id))) if (teamId !== job.agentId) await this.closeTeam(job.id, teamId);
+        if (this.closing) return;
         job = this.job(job.id)!;
-        job.status = requestOutcome(assignments.map(({ status }) => status));
-        job.result = closing + (job.status === "completed" ? "" : this.options.completedWork(job, assignments));
+        const own = assignments.filter(({ teamId }) => teamId === job.agentId);
+        closing = await this.closeRequest(job, team, own);
+        await this.rememberDivision(job, team, own, closing);
+        job = this.job(job.id)!;
+        const parts = job.parts ?? [];
+        job.status = requestOutcome(assignments.map(({ status }) => status), parts.some(({ teamId }) => teamId === null));
+        const untaken = untakenLine(parts);
+        job.result = closing + (job.status === "completed" ? "" : this.options.completedWork(job, assignments)) + (untaken ? `\n${untaken}` : "");
       }
     } catch (error) {
       if (this.closing) return;
@@ -410,63 +448,187 @@ export class AgentDispatch {
   }
 
   /**
-   * Gives the attempt its Assignments: a new request's plan or a promoted supplement's answer. The Team Leader's turns keep
-   * the request within its ceiling of Assignments (agent-dispatch::REQ-011/AC-02).
+   * Gives the attempt its Assignments: a new request's plan or a promoted supplement's answer, with the cross-team parts the
+   * Coordinator placed and their teams' plans. Every turn ends before anything is stored, so a division that a ceiling or an
+   * invalid plan refuses leaves no Assignment and no Executor (agent-dispatch::REQ-011/AC-02, REQ-008/AC-05).
    */
   private async divide(job: DispatchJob, team: DispatchTeamView, signal: AbortSignal): Promise<void> {
     const assignments = this.assignments(job.id);
-    if (assignments.some(({ attempt }) => attempt === job.attempt)) return;
-    // A team that stopped accepting work in this group since admission gets no new Assignment there (agent-dispatch::REQ-015/AC-01).
-    const accepting = () => { if (!this.options.roster(job.event).some(({ id }) => id === job.agentId)) throw new Error("dispatch_team_unavailable"); };
-    if (!assignments.length) {
-      accepting();
-      const plan = await this.options.leader.plan(this.leaderInput(job, team));
-      if (signal.aborted) throw new Error("dispatch_cancelled");
-      this.addAssignments(job, team, plan.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId })), [], plan.decisions);
+    const views = new Map([[job.agentId, team]]);
+    if (assignments.length && (job.reaskAttempt === job.attempt || assignments.some(({ attempt }) => attempt === job.attempt))) {
+      if (job.reaskAttempt === job.attempt) await this.reask(job, assignments.length, views, signal);
       return;
     }
-    // A promoted supplement: the lead Team Leader decides which Assignments it affects (agent-dispatch::REQ-007/AC-04).
-    const answer = await this.options.leader.supplement(this.leaderInput(job, team), assignments.map((assignment, index) =>
-      ({ position: index + 1, executor: assignment.executor, profileName: assignment.profileName, title: assignment.title, status: assignment.status })),
-    (job.executionEvent ?? job.event).text);
-    if (signal.aborted) throw new Error("dispatch_cancelled");
-    const added = answer.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
-    if (added.length) accepting();
-    this.addAssignments(job, team, added, answer.affected, answer.decisions);
+    // A team that stopped accepting work in this group since admission gets no new Assignment there (agent-dispatch::REQ-015/AC-01).
+    const accepting = (teamId: string) => { if (!this.options.roster(job.event).some(({ id }) => id === teamId)) throw new Error("dispatch_team_unavailable"); };
+    const cancelled = () => { if (signal.aborted) throw new Error("dispatch_cancelled"); };
+    if (!assignments.length) {
+      accepting(job.agentId);
+      const plan = await this.options.leader.plan(this.leaderInput(job, team), 0);
+      cancelled();
+      const added = plan.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
+      const placed = await this.place(job, plan.help, added.length, views, signal);
+      this.addAssignments(job, views, { added: [...added, ...placed.added], affected: [], decisions: { texts: plan.decisions, byTeam: placed.decisions },
+        parts: placed.parts, needs: placed.needs });
+      return;
+    }
+    // A promoted supplement: the lead decides which of its own Assignments and requested parts it affects; the Coordinator
+    // relays it to the Team Leader of each affected part, who decides for its own Assignments (agent-dispatch::REQ-007/AC-04).
+    const text = (job.executionEvent ?? job.event).text;
+    const own = assignments.filter(({ teamId }) => teamId === job.agentId);
+    const answer = await this.options.leader.supplement(this.leaderInput(job, team, this.leadRelay(job)), shown(own), text, assignments.length);
+    cancelled();
+    const added: PlannedAssignment[] = answer.assignments.map((assignment) => ({ ...assignment, teamId: job.agentId }));
+    if (added.length) accepting(job.agentId);
+    const affected = answer.affected.map((position) => own[position - 1]!.id);
+    const byTeam: Record<string, string[]> = {}, needs: NonNullable<DispatchJob["needs"]> = [];
+    const relayed = [...new Set(answer.parts.map((position) => job.parts![position - 1]!.teamId).filter((id): id is string => id !== null))];
+    for (const teamId of relayed) {
+      const view = this.options.team(teamId, job.definitionsVersion!);
+      if (!view) throw new Error("dispatch_team_unavailable");
+      const theirs = assignments.filter((assignment) => assignment.teamId === teamId);
+      const reply = await this.options.leader.supplement(this.leaderInput(job, view, this.crossRelay(job, teamId)), shown(theirs), text, assignments.length + added.length);
+      cancelled();
+      if (reply.assignments.length) accepting(teamId);
+      affected.push(...reply.affected.map((position) => theirs[position - 1]!.id));
+      added.push(...reply.assignments.map((assignment) => ({ ...assignment, teamId })));
+      byTeam[teamId] = reply.decisions;
+      needs.push(...reply.help.map((help) => ({ teamId, ...help })));
+      views.set(teamId, view);
+    }
+    const placed = await this.place(job, answer.help, assignments.length + added.length, views, signal);
+    for (const [teamId, texts] of Object.entries(placed.decisions)) byTeam[teamId] = [...(byTeam[teamId] ?? []), ...texts];
+    this.addAssignments(job, views, { added: [...added, ...placed.added], affected, decisions: { texts: answer.decisions, byTeam },
+      parts: [...(job.parts ?? []), ...placed.parts], needs: [...(job.needs ?? []), ...needs, ...placed.needs] });
   }
 
   /**
-   * Gives the current attempt its Assignments: `added` become new Assignments, each with its own Executor; the Assignments at
-   * the 1-based `affected` positions rerun with their own Executors on the attempt's message, the supplement.
+   * Places the parts the lead asked other teams to take (agent-dispatch::REQ-013/AC-02): the Coordinator chooses among the
+   * teams accepting work in the group, and each chosen team's Team Leader plans its part. `planned` counts the request's
+   * Assignments so far, for the ceiling. A part the Coordinator places with no team, or whose decision is invalid, is not taken.
+   * A cross-team Team Leader's own help requests are not placed; they are kept as needs for the lead (agent-dispatch::REQ-013/AC-01).
    */
-  private addAssignments(job: DispatchJob, team: DispatchTeamView, added: readonly PlannedAssignment[], affected: readonly number[], decisions: readonly string[]): void {
+  private async place(job: DispatchJob, help: readonly LeaderHelp[], planned: number, views: Map<string, DispatchTeamView>, signal: AbortSignal) {
+    const placed = { added: [] as PlannedAssignment[], decisions: {} as Record<string, string[]>, parts: [] as DispatchPart[], needs: [] as NonNullable<DispatchJob["needs"]> };
+    if (!help.length) return placed;
+    const offered = this.offeredTeams(job);
+    let decisions: CrossTeamDecision[] = help.map((_part, index) => ({ part: index + 1, agentId: null, summary: "" }));
+    if (offered.length) {
+      const lead = this.options.agents.find(({ id }) => id === job.agentId)!;
+      try {
+        decisions = await this.options.classifier.assign({ requestId: job.id, coordinator: this.coordinator().name, message: (job.executionEvent ?? job.event).text,
+          summary: job.summary, lead: { id: lead.id, name: lead.name, responsibility: lead.responsibility }, parts: help.map((part, index) => ({ part: index + 1, ...part })),
+          teams: offered.map(({ id, name, responsibility }) => ({ id, name, responsibility })), fixtureMessageId: this.fixtureMessageId(job) });
+      } catch (error) {
+        if (this.closing) throw error;
+        this.failure("dispatch_cross_team_decision_failed");
+      }
+      if (signal.aborted) throw new Error("dispatch_cancelled");
+    }
+    placed.parts = help.map((part, index) => ({ ...part, attempt: job.attempt, teamId: decisions[index]!.agentId, summary: decisions[index]!.summary }));
+    for (const teamId of [...new Set(placed.parts.map(({ teamId: id }) => id).filter((id): id is string => id !== null))]) {
+      const view = this.options.team(teamId, job.definitionsVersion!)!;
+      const plan = await this.options.leader.plan(this.leaderInput(job, view, this.crossRelay(job, teamId, placed.parts)), planned + placed.added.length);
+      if (signal.aborted) throw new Error("dispatch_cancelled");
+      placed.added.push(...plan.assignments.map((assignment) => ({ ...assignment, teamId })));
+      placed.decisions[teamId] = plan.decisions;
+      placed.needs.push(...plan.help.map((need) => ({ teamId, ...need })));
+      views.set(teamId, view);
+    }
+    return placed;
+  }
+
+  /**
+   * An explicit retry asks the Coordinator again for every part no team took, since a team may accept it now; a part placed
+   * now is planned by its team's Team Leader (agent-dispatch::REQ-013/AC-02). Each part is asked once per attempt.
+   */
+  private async reask(job: DispatchJob, planned: number, views: Map<string, DispatchTeamView>, signal: AbortSignal): Promise<void> {
+    const untaken = (job.parts ?? []).flatMap((part, index) => part.teamId === null && part.attempt < job.attempt ? [index] : []);
+    if (!untaken.length) return;
+    const placed = await this.place(job, untaken.map((index) => ({ title: job.parts![index]!.title, brief: job.parts![index]!.brief })), planned, views, signal);
+    const parts = [...job.parts!];
+    for (const [position, index] of untaken.entries()) parts[index] = { ...placed.parts[position]!, asked: (parts[index]!.asked ?? 1) + 1 };
+    this.addAssignments(job, views, { added: placed.added, affected: [], decisions: { texts: [], byTeam: placed.decisions }, parts, needs: [...(job.needs ?? []), ...placed.needs] });
+  }
+
+  /**
+   * The teams a part may be placed with: those accepting work in the group, under the current roster, that the request's
+   * definitions version knows; never the lead or the Coordinator (agent-dispatch::REQ-015/AC-01, REQ-017).
+   */
+  private offeredTeams(job: DispatchJob): DispatchAgent[] {
+    const roster = new Set(this.options.roster(job.event).map(({ id }) => id));
+    return this.options.agents.filter(({ id }) => id !== COORDINATOR_ID && id !== job.agentId && roster.has(id) && this.options.team(id, job.definitionsVersion!) !== undefined);
+  }
+
+  /**
+   * Stores a division as the attempt's Assignments: `added` become new Assignments, each with its own Executor from its team's
+   * presets; the `affected` Assignments rerun with their own Executors on the attempt's message, the supplement.
+   */
+  private addAssignments(job: DispatchJob, views: ReadonlyMap<string, DispatchTeamView>, division: Readonly<{ added: readonly PlannedAssignment[]; affected: readonly string[];
+    decisions: NonNullable<DispatchJob["decisions"]> extends infer D ? Omit<D, "attempt"> : never; parts: DispatchPart[]; needs: NonNullable<DispatchJob["needs"]> }>): void {
     const input = inputOf(job.executionEvent ?? job.event);
     this.transaction(() => {
-      const existing = this.assignments(job.id);
-      for (const position of affected) {
-        const assignment = existing[position - 1]!;
+      for (const id of division.affected) {
+        const assignment = this.assignment(id)!;
         assignment.attempt = job.attempt; assignment.status = "queued"; assignment.input = input; delete assignment.cause;
         this.saveAssignment(assignment);
       }
-      for (const [index, planned] of added.entries()) {
-        const profile = team.profiles.find(({ id }) => id === planned.profileId)!;
+      for (const [index, planned] of division.added.entries()) {
+        const profile = views.get(planned.teamId)!.profiles.find(({ id }) => id === planned.profileId)!;
         const id = `${job.id}:assignment:${job.attempt}:${index + 1}`;
         const sequence = Number(this.database.prepare("INSERT INTO dispatch_assignment (id, request_id, payload) VALUES (?, ?, '{}')").run(id, job.id).lastInsertRowid);
         this.saveAssignment({ id, requestId: job.id, teamId: planned.teamId, profileId: profile.id, profileName: profile.name, executor: executorName(sequence), sequence,
           title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt, input });
       }
       const current = this.job(job.id)!;
-      if (decisions.length) current.decisions = { attempt: job.attempt, texts: [...decisions] }; else delete current.decisions;
+      const { texts } = division.decisions, byTeam = Object.fromEntries(Object.entries(division.decisions.byTeam ?? {}).filter(([, list]) => list.length));
+      if (texts.length || Object.keys(byTeam).length) current.decisions = { attempt: job.attempt, texts: [...texts], ...(Object.keys(byTeam).length ? { byTeam } : {}) };
+      else delete current.decisions;
+      if (division.parts.length) current.parts = division.parts;
+      if (division.needs.length) current.needs = division.needs;
+      current.dividedAttempt = job.attempt;
       this.save(current);
     });
   }
 
-  /** The Team Leader's team-internal decisions, each its own post after the start message; a failed post never stops the work. */
+  /**
+   * The start posts of an attempt, each confirmed before any Executor starts: the lead's, naming the parts the Coordinator
+   * placed this attempt; the Coordinator's announcement of those parts, whose delivery holds nothing up; then each cross-team
+   * Team Leader's (agent-dispatch::US-003/AC-01, US-003/AC-04, REQ-013/AC-04).
+   */
+  private async announce(job: DispatchJob, starting: readonly DispatchAssignment[], signal: AbortSignal): Promise<void> {
+    const coordinator = this.coordinator().name, lead = this.agentName(job.agentId);
+    const placed = (job.parts ?? []).filter(({ attempt, teamId }) => attempt === job.attempt && teamId !== null);
+    const own = starting.filter(({ teamId }) => teamId === job.agentId);
+    if (own.length) {
+      const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}`, { ...this.notice(job,
+        startMessage(own, placed.length ? { parts: placed.map(({ title }) => title), coordinator } : undefined)), requestId: job.id });
+      if (!start.ok) throw new Error("dispatch_receipt_unavailable");
+    }
+    if (placed.length) {
+      await this.deliverNotice(`${job.id}:cross-team:${job.attempt}`, { ...this.coordinatorNotice(job,
+        crossTeamAnnouncement(coordinator, lead, placed.map(({ title, teamId }) => ({ part: title, leader: this.agentName(teamId!) })))), requestId: job.id });
+    }
+    for (const teamId of [...new Set(starting.map(({ teamId: id }) => id))].filter((id) => id !== job.agentId)) {
+      const start = await this.deliverNotice(`${job.id}:receipt:${job.attempt}:${teamId}`, { ...this.teamNotice(job, teamId,
+        startMessage(starting.filter((assignment) => assignment.teamId === teamId), undefined, `完成后经 ${coordinator} 交回 ${lead} 汇总。`)), requestId: job.id });
+      if (!start.ok) throw new Error("dispatch_receipt_unavailable");
+    }
+    if (signal.aborted) throw new Error("dispatch_cancelled");
+  }
+
+  /** Each Team Leader's team-internal decisions, each its own post after the start posts; a failed post never stops the work. */
   private async postDecisions(job: DispatchJob): Promise<void> {
     if (job.decisions?.attempt !== job.attempt) return;
     for (const [index, text] of job.decisions.texts.entries()) {
       if (this.closing) return;
       await this.deliverNotice(`${job.id}:decision:${job.attempt}:${index}`, { ...this.notice(job, text), requestId: job.id });
+    }
+    for (const [teamId, texts] of Object.entries(job.decisions.byTeam ?? {})) {
+      for (const [index, text] of texts.entries()) {
+        if (this.closing) return;
+        await this.deliverNotice(`${job.id}:decision:${job.attempt}:${teamId}:${index}`, { ...this.teamNotice(job, teamId, text), requestId: job.id });
+      }
     }
   }
 
@@ -495,25 +657,63 @@ export class AgentDispatch {
         // A pending choice goes out verbatim under the Team Leader's identity; its resolution ends the Assignment.
         const input = ended.input ?? current.executionEvent ?? current.event;
         const presentation = ended.runRef ? this.options.presentation(input, ended.runRef) : undefined;
-        post = { id: `${job.id}:pending:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current, ended.result!), ...(presentation ? { presentation } : {}), requestId: job.id } };
+        post = { id: `${job.id}:pending:${ended.id}:${ended.attempt}`, notice: { ...this.teamNotice(current, ended.teamId, ended.result!), ...(presentation ? { presentation } : {}),
+          requestId: job.id } };
         current.reportId = post.id;
       } else if (ended.status === "failed" && this.assignments(job.id).some(({ id, status }) => id !== ended.id && UNFINISHED.includes(status))) {
-        post = { id: `${job.id}:failure:${ended.id}:${ended.attempt}`, notice: { ...this.notice(current,
+        post = { id: `${job.id}:failure:${ended.id}:${ended.attempt}`, notice: { ...this.teamNotice(current, ended.teamId,
           `${executorLabel(ended)}的分工「${ended.title}」未能完成：${ended.cause}。其余分工继续处理。`), requestId: job.id } };
       }
     }
     this.transaction(() => { this.saveAssignment(ended); this.save(current); if (post) this.queueNotice(post.id, post.notice); });
     if (post) await this.deliverNotice(post.id, post.notice);
+    if (!this.closing && !current.cancelRequested && ended.teamId !== current.agentId) await this.closeTeam(job.id, ended.teamId);
   }
 
-  /** The Team Leader's closing turn; a failed turn falls back to the Assignments' own results, so no outcome goes unreported. */
-  private async closeRequest(job: DispatchJob, team: DispatchTeamView, assignments: readonly DispatchAssignment[]): Promise<string> {
+  /**
+   * A cross-team Team Leader's closing, once all of its team's Assignments in the attempt have ended (agent-dispatch::US-003/AC-02):
+   * posted under its identity, and kept as its report, which the Coordinator relays to the lead (agent-dispatch::REQ-013/AC-03).
+   * If its closing turn fails, each Assignment's own result takes its place.
+   */
+  private async closeTeam(requestId: string, teamId: string): Promise<void> {
+    let job = this.job(requestId)!;
+    const own = this.assignments(requestId).filter((assignment) => assignment.teamId === teamId);
+    const key = `${requestId}:${teamId}:${job.attempt}`;
+    if (this.closingTeams.has(key) || job.reports?.[teamId]?.attempt === job.attempt || !own.some(({ attempt }) => attempt === job.attempt) ||
+        own.some(({ status }) => UNFINISHED.includes(status))) return;
+    const view = this.options.team(teamId, job.definitionsVersion!);
+    if (!view) return;
+    this.closingTeams.add(key);
     try {
-      return await this.options.leader.close(this.leaderInput(job, team),
+      let text: string;
+      try {
+        text = await this.options.leader.close(this.leaderInput(job, view, this.crossRelay(job, teamId)),
+          own.map(({ title, executor, status, result }) => ({ title, executor, status, result: result ?? "" })));
+      } catch { text = resultLines(own).join("\n"); }
+      await this.rememberDivision(job, view, own, text);
+      if (this.closing) return;
+      job = this.job(requestId)!;
+      if (job.cancelRequested) return;
+      const post = { id: `${requestId}:closing:${job.attempt}:${teamId}`, notice: { ...this.teamNotice(job, teamId,
+        `${text}\n结果经 ${this.coordinator().name} 交回 ${this.agentName(job.agentId)} 汇总。`), requestId } };
+      this.transaction(() => { (job.reports ??= {})[teamId] = { attempt: job.attempt, text }; this.save(job); this.queueNotice(post.id, post.notice); });
+      await this.deliverNotice(post.id, post.notice);
+    } finally { this.closingTeams.delete(key); }
+  }
+
+  /**
+   * The lead Team Leader's closing turn, over its own Assignments and the reports the Coordinator relays from other teams
+   * (agent-dispatch::REQ-013/AC-03). A failed turn falls back to its Assignments' own results and each relayed report, so no
+   * outcome goes unreported and no other team's Executor result reaches the lead's post.
+   */
+  private async closeRequest(job: DispatchJob, team: DispatchTeamView, assignments: readonly DispatchAssignment[]): Promise<string> {
+    const relay = this.leadRelay(job);
+    try {
+      return await this.options.leader.close(this.leaderInput(job, team, relay),
         assignments.map(({ title, executor, status, result }) => ({ title, executor, status, result: result ?? "" })));
     } catch {
-      return assignments.map((assignment) => `${assignment.executor}「${assignment.title}」${assignment.status === "completed" ? "已完成"
-        : assignment.status === "cancelled" ? "已停止" : "未能完成"}。${assignment.result ?? ""}`).join("\n");
+      return [...resultLines(assignments), ...(relay?.parts ?? []).flatMap(({ title, team: name, report }) =>
+        name ? [`${title}（${name}，经 ${this.coordinator().name} 转交）：${report ?? "暂无汇报"}`] : [])].join("\n");
     }
   }
 
@@ -535,15 +735,29 @@ export class AgentDispatch {
     return { message: job.event.text, ...latest, summary: job.summary };
   }
 
-  private leaderInput(job: DispatchJob, team: DispatchTeamView): LeaderTurnInput {
-    return { requestId: job.id, leader: team.leader, profiles: team.profiles, brief: this.brief(job),
+  /** What the Coordinator relays to the lead: the parts it asked for, each with its team and that team's report, and the needs reported. */
+  private leadRelay(job: DispatchJob): LeaderRelay | undefined {
+    const parts = (job.parts ?? []).map(({ title, teamId }) => ({ title, team: teamId === null ? null : this.teamName(job, teamId),
+      ...(teamId !== null && job.reports?.[teamId] ? { report: job.reports[teamId].text } : {}) }));
+    const needs = (job.needs ?? []).map(({ teamId, title, brief }) => ({ team: this.teamName(job, teamId), title, brief }));
+    return parts.length || needs.length ? { parts, ...(needs.length ? { needs } : {}) } : undefined;
+  }
+  /** What the Coordinator relays to a cross-team Team Leader: whose request it serves and the parts placed with its team. */
+  private crossRelay(job: DispatchJob, teamId: string, parts = job.parts ?? []): LeaderRelay {
+    return { requestedBy: this.agentName(job.agentId), parts: parts.filter((part) => part.teamId === teamId).map(({ title, brief, summary }) => ({ title, brief, summary })) };
+  }
+  private teamName(job: DispatchJob, teamId: string): string { return this.options.team(teamId, job.definitionsVersion!)?.leader.teamName ?? teamId; }
+
+  private leaderInput(job: DispatchJob, team: DispatchTeamView, relay?: LeaderRelay): LeaderTurnInput {
+    return { requestId: job.id, leader: team.leader, profiles: team.profiles, brief: this.brief(job), ...(relay ? { relay } : {}),
       // The Team Leader's own memory in this conversation; never the group memory or an Executor's (agent-dispatch::REQ-012/AC-02).
       memory: this.options.memory.recall(team.memoryScope, job.event, job.executionEvent?.text ?? job.event.text),
       directory: this.options.roster(job.event).map(({ name, responsibility }) => ({ name, responsibility })),
       session: { accountId: job.event.accountId, target: job.event.target, bindingHash: job.bindingHash, revision: this.options.revision(),
         definitionsVersion: job.definitionsVersion! },
-      fixtureMessageId: job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId };
+      fixtureMessageId: this.fixtureMessageId(job) };
   }
+  private fixtureMessageId(job: DispatchJob): string { return job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId; }
 
   /** The requester's cancellation of the whole request: every unfinished Assignment stops; completed effects are reported, not undone. */
   private cancel(job: DispatchJob): void {
@@ -576,7 +790,7 @@ export class AgentDispatch {
     job.reportId = id;
     // A finished attempt is captured into the group memory once its report is accepted. A cancelled or waiting request is not:
     // withdrawn work must leave no memory-derived reminder, and a waiting one is captured with its closing.
-    const finished = job.status === "completed" || job.status === "partially_failed" || job.status === "failed";
+    const finished = job.status === "completed" || job.status === "partially_failed" || job.status === "partially_unassigned" || job.status === "failed";
     const attemptEvent = { ...(job.executionEvent ?? job.event) };
     delete attemptEvent.discussion;
     // A confirmation or a proposal's supplement extends the request's message; a later supplement replaces the attempt's
@@ -608,6 +822,17 @@ export class AgentDispatch {
   private notice(job: DispatchJob, text: string): Notice {
     return { event: job.event, bindingHash: job.bindingHash, agentId: job.agentId, senderAccountId: job.senderAccountId, text };
   }
+  /** A post under the Team Leader of `teamId`: the lead's own identity, or a cross-team Team Leader's (agent-dispatch::REQ-013/AC-04). */
+  private teamNotice(job: DispatchJob, teamId: string, text: string): Notice {
+    if (teamId === job.agentId) return this.notice(job, text);
+    return { event: job.event, bindingHash: job.bindingHash, agentId: teamId, senderAccountId: this.options.agents.find(({ id }) => id === teamId)?.senderAccountId ?? "", text };
+  }
+  private coordinatorNotice(job: DispatchJob, text: string): Notice {
+    const coordinator = this.coordinator();
+    return { event: job.event, bindingHash: job.bindingHash, agentId: coordinator.id, senderAccountId: coordinator.senderAccountId, text };
+  }
+  private coordinator(): DispatchAgent { return this.options.agents.find(({ id }) => id === COORDINATOR_ID)!; }
+  private agentName(id: string): string { return this.options.agents.find((agent) => agent.id === id)?.name ?? id; }
   private markPresented(notice: Notice, acceptedAt: number): void {
     if (!notice.presentation) return;
     try { this.options.presented({ ...notice.presentation, acceptedAt }); }
