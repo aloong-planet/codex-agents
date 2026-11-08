@@ -17,6 +17,12 @@ type FixtureModelToolCall = {
   arguments: Record<string, unknown>;
 };
 
+/** Node-side state reads carry the browser's console cookie, as the page's own requests do. */
+async function stateHeaders(page: Page): Promise<Record<string, string>> {
+  const cookies = await page.context().cookies(page.url());
+  return { cookie: cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ") };
+}
+
 async function checkOtelDiagnostics({ page }: { page: Page }, testInfo: TestInfo) {
   await page.goto("/");
   const before: FixtureWorkflowState = await page.evaluate(async () => (await fetch("/api/state")).json());
@@ -100,10 +106,11 @@ async function sendFixtureWorkflowInbound(
   let observedTools: ObservedToolTrace[] = [];
   let failure: string | undefined;
   const stateUrl = new URL("/api/state", page.url());
+  const headers = await stateHeaders(page);
   const progress = new InteractionProgress(process.env.WEIXIN_OTEL_DIRECTORY!);
   try {
     await withinInteractionBudget(async (signal) => {
-      before = await (await fetch(stateUrl, { signal })).json() as FixtureWorkflowState;
+      before = await (await fetch(stateUrl, { headers, signal })).json() as FixtureWorkflowState;
       completed = before;
       const knownEntries = new Set(before.codex.transcript.map((entry) => entry.id));
       const response = await fetch(new URL("/api/fixture/workflow/inbound", page.url()), {
@@ -113,7 +120,7 @@ async function sendFixtureWorkflowInbound(
       if (!response.ok) throw new Error(`fixture workflow inbound failed: HTTP ${response.status}`);
       await response.json();
       for (;;) {
-        completed = await (await fetch(stateUrl, { signal })).json() as FixtureWorkflowState;
+        completed = await (await fetch(stateUrl, { headers, signal })).json() as FixtureWorkflowState;
         const entries = completed.codex.transcript.filter((entry) => !knownEntries.has(entry.id));
         const userIndex = entries.findIndex((entry) => entry.role === "user" && entry.text === text);
         if (userIndex >= 0 && entries.slice(userIndex + 1).some((entry) =>
@@ -126,7 +133,7 @@ async function sendFixtureWorkflowInbound(
     throw error;
   } finally {
     // Evidence has its own short cleanup budget; it must not make a failed turn pass.
-    try { completed = await (await fetch(stateUrl, { signal: AbortSignal.timeout(2_000) })).json() as FixtureWorkflowState; }
+    try { completed = await (await fetch(stateUrl, { headers, signal: AbortSignal.timeout(2_000) })).json() as FixtureWorkflowState; }
     catch { /* The case fixture also captures process logs when the service is unavailable. */ }
     const knownEntries = new Set(before.codex.transcript.map((entry) => entry.id));
     const previousRuns = new Map(before.workflows.runs.map((run) => [run.runRef, JSON.stringify(run)]));
@@ -1801,7 +1808,7 @@ test("scheduled_one_time_fixture_entry runs the production timer and sends one c
   expect(created.observedTools.filter((item) => item.toolId === "schedules.create")).toEqual([
     expect.objectContaining({ toolId: "schedules.create", resultSuccess: true, ownerAfter: "model" }),
   ]);
-  const outbox = async () => (await (await fetch(new URL("/api/state", page.url()))).json() as { fixtureTextOutbox: Array<{ message: string; simulated: boolean }> }).fixtureTextOutbox;
+  const outbox = async () => (await (await fetch(new URL("/api/state", page.url()), { headers: await stateHeaders(page) })).json() as { fixtureTextOutbox: Array<{ message: string; simulated: boolean }> }).fixtureTextOutbox;
   await expect.poll(outbox, { timeout: 15000 }).toEqual([{ message: "你该喝水了", simulated: true, acceptedAt: expect.any(Number) }]);
   const inspected = await sendFixtureWorkflowInbound(page, "查看喝水提醒的执行记录", [{ namespace: "schedules", tool: "inspect", arguments: { reference: "喝水提醒" } }]);
   expect(inspected.observedTools.some((item) => item.toolId === "schedules.inspect" && item.resultSuccess && !item.errorCode)).toBe(true);

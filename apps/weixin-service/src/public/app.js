@@ -596,12 +596,20 @@ const contextExperimentLabels = {
   unavailable: "账户或目标不可用，实验已停止",
 };
 
+// A revoked authorization answers 401; reloading replaces this page with the login card and its notice.
+function reloadWhenUnauthorized(response) {
+  if (response.status !== 401) return false;
+  document.location.reload();
+  return true;
+}
+
 async function api(path, body) {
   const response = await fetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
+  if (reloadWhenUnauthorized(response)) return new Promise(() => {});
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "请求失败");
   return data;
@@ -1374,6 +1382,7 @@ async function runMemoryAction(pendingMessage, successMessage, action) {
 
 async function refresh() {
   const response = await fetch("/api/state", { cache: "no-store" });
+  if (reloadWhenUnauthorized(response)) return;
   render(await response.json());
 }
 

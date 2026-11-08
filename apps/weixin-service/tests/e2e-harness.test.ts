@@ -54,13 +54,13 @@ it("isolates state and kills a case with an unfinished HTTP request without stop
       method: "POST", headers: { "content-type": "application/json", origin: first.url }, body: JSON.stringify({ text: "isolation-marker" }),
     });
     expect(response.ok).toBe(true);
-    expect(JSON.stringify(await (await fetch(`${first.url}/api/state`)).json())).toContain("isolation-marker");
+    expect(JSON.stringify(await (await fetch(`${first.url}/api/state`, { headers: { cookie: first.cookie } })).json())).toContain("isolation-marker");
     second = await startFixtureServer("fixture", "fixture");
     expect(second.directory).not.toBe(first.directory);
     expect(second.url).not.toBe(first.url);
     expect(second.traceFile).not.toBe(first.traceFile);
     expect(second.otelDirectory).not.toBe(first.otelDirectory);
-    const secondState = await (await fetch(`${second.url}/api/state`)).json();
+    const secondState = await (await fetch(`${second.url}/api/state`, { headers: { cookie: second.cookie } })).json();
     expect(JSON.stringify(secondState)).not.toContain("isolation-marker");
     expect(secondState.fixtureOutbox).toEqual([]);
     socket = net.createConnection({ host: "127.0.0.1", port: Number(new URL(first.url).port) });
@@ -69,8 +69,8 @@ it("isolates state and kills a case with an unfinished HTTP request without stop
     socket.write(`POST /api/fixture/workflow/inbound HTTP/1.1\r\nHost: ${new URL(first.url).host}\r\nOrigin: ${first.url}\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{`);
     process.kill(first.pid, "SIGSTOP"); // This case cannot respond to graceful termination.
     await first.close();
-    await expect(fetch(`${first.url}/api/state`, { signal: AbortSignal.timeout(1_000) })).rejects.toThrow();
-    expect((await fetch(`${second.url}/api/state`)).ok).toBe(true);
+    await expect(fetch(`${first.url}/api/state`, { headers: { cookie: first.cookie }, signal: AbortSignal.timeout(1_000) })).rejects.toThrow();
+    expect((await fetch(`${second.url}/api/state`, { headers: { cookie: second.cookie } })).ok).toBe(true);
   } finally {
     socket?.destroy();
     try { process.kill(first.pid, "SIGCONT"); } catch (error) {

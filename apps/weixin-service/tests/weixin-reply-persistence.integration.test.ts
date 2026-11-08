@@ -11,6 +11,8 @@ import { DemoService, type WeixinChannel } from "../src/demo-service.js";
 import { DurableInboundStore } from "../src/durable-inbound-store.js";
 import { FixturePort } from "../src/fixture-port.js";
 import { createDemoServer } from "../src/http-server.js";
+import { ConsoleAccess } from "../src/console-access.js";
+import { exchangeLoginLink } from "../e2e/console-session.js";
 import { WeixinCodexService, type CodexAgent } from "../src/weixin-codex-service.js";
 
 // HTTP fixture ingress uses the production inbox/service/store path. Only model
@@ -52,7 +54,8 @@ describe("reply persistence through fixture HTTP ingress", () => {
     const store = new CodexServiceStore(stateFile);
     const codex = new WeixinCodexService(channel, agent, store, directory);
     const demo = new DemoService(port, async () => "data:image/svg+xml,fixture", codex);
-    const server = createDemoServer(demo, { fixtureMode: true });
+    const access = new ConsoleAccess({ directory: path.join(directory, "console") });
+    const server = createDemoServer(demo, { fixtureMode: true, access });
     try {
       await port.start();
       await codex.start();
@@ -63,12 +66,13 @@ describe("reply persistence through fixture HTTP ingress", () => {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("missing fixture server address");
       const origin = `http://127.0.0.1:${address.port}`;
+      const cookie = await exchangeLoginLink(access.issueLoginLink(address.port).url);
       const response = await fetch(`${origin}/api/fixture/inbound`, {
         method: "POST", headers: { "content-type": "application/json", origin },
         body: JSON.stringify({ text: "只回复：收到" }),
       });
       expect(response.status).toBe(200);
-      const state = await (await fetch(`${origin}/api/state`)).json();
+      const state = await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json();
       expect(inboundKey).toMatch(/^[a-f0-9]{64}$/);
       expect(inbox.peek(inboundKey)).toMatchObject({ state: "completed", attempts: 1 });
       expect(inbox.queuedTargets("fixture-bot")).toEqual([]);

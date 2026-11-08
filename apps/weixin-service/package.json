@@ -33,7 +33,8 @@
     "launch-agent:status": "tsx scripts/launch-agent.ts status",
     "launch-agent:print": "tsx scripts/launch-agent.ts print",
     "context-token-experiment": "tsx scripts/context-token-experiment.ts",
-    "feishu:pair": "tsx src/feishu-pairing-cli.ts"
+    "feishu:pair": "tsx src/feishu-pairing-cli.ts",
+    "console": "tsx src/console-cli.ts"
   },
   "dependencies": {
     "@huggingface/transformers": "3.8.1",
