@@ -5,7 +5,7 @@ import { expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { TeamRegistry } from "../src/team-registry.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
-import { config, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
+import { config, decision, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures, and the
 // onboarding platform is the fake fixture mode uses (team-onboarding.test.ts covers its answers). The first two cases read and save
@@ -62,7 +62,6 @@ it("follows a console-saved registry version instead of the local configuration"
 
 const DAISY_APP = "cli_dddddddddddddddd";
 const SECRET_SENTINEL = "daisy-secret-SENTINEL-7f3a";
-const decision = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
 /** A new team as the console saves it: Daisy's design team on its existing application, checked into oc_alpha. */
 const daisy = (overrides: Record<string, unknown> = {}) => ({ teamName: "设计团队", responsibility: "视觉方案", groups: ["oc_alpha"],
   leader: { name: "Daisy", appId: DAISY_APP, instructions: "只做视觉方案" },
@@ -313,9 +312,13 @@ it("applies a saved responsibility and instructions to new requests only, while 
     const coordinator = turns.filter((input) => input.includes("只协调和分派群聊任务"));
     // Every Coordinator turn after the save (classifying the retry, then the new request) lists the saved responsibility.
     expect(coordinator.map((input) => input.includes("生活新职责 N1"))).toEqual([false, true, true]);
-    // The leader's instructions reach only that Team Leader, in turns of requests admitted after the save.
+    // The leader's instructions reach only that Team Leader, and only in turns of requests admitted after the save: the retried
+    // request keeps its admitted instructions in every Team Leader turn, its closing after the save included (agent-dispatch::REQ-017/AC-01).
     expect(coordinator.some((input) => input.includes("负责人新规则 N1"))).toBe(false);
-    expect(turns.filter((input) => input.includes("负责人新规则 N1")).length).toBeGreaterThan(0);
+    // Bill's Team Leader turns of each request, in order: whether each carries the saved instructions.
+    const leaderTurns = (brief: string) => turns.filter((input) => input.includes("生活团队的负责人") && input.includes(brief)).map((input) => input.includes("负责人新规则 N1"));
+    expect(leaderTurns("请帮我规划周末一日行程")).toEqual([false, false, false]);
+    expect(leaderTurns("再帮我规划周日行程")).toEqual([true, true]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 45000);
 

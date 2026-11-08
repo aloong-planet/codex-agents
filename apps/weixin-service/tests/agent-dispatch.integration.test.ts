@@ -13,7 +13,7 @@ import { TeamRegistry } from "../src/team-registry.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
-import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
@@ -127,7 +127,6 @@ it("names the Coordinator from the registry in its default reassignment explanat
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-const decision = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
 const executorReply = (message: string, subject: string) => JSON.stringify({ message, results: [{ subject, status: "completed" }] });
 
 it("routes an explicit request to its team, whose Team Leader starts, delegates and closes it", async () => {

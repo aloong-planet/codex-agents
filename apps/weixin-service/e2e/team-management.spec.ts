@@ -148,6 +148,7 @@ test.describe("with Feishu dispatch", () => {
     await expect(editor(page).locator(".atm-joins li")).toHaveText([/银河护卫队.*已完成/, /产品讨论组.*已完成/]);
     await expect(editor(page).getByRole("button", { name: "重新检查" })).toHaveCount(0);
     await expect(editor(page)).toContainText("Sam 不执行具体事务，没有执行者能力档。");
+    await expect(editor(page).locator("[data-group]")).toHaveCount(2);
     for (const box of await editor(page).locator("[data-group]").all()) {
       await expect(box).toBeChecked();
       await expect(box).toBeDisabled();

@@ -1,9 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform, TeamOnboarding, type PlatformRequest } from "../src/team-onboarding.js";
+import { fetchRequest, FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform, TeamOnboarding, type PlatformRequest } from "../src/team-onboarding.js";
 import { TeamRegistry, type TeamEdit } from "../src/team-registry.js";
 
 // Onboarding of an existing application (team-management::US-002/AC-02, REQ-003) against the fixture platform, the fake of the
@@ -12,7 +14,8 @@ import { TeamRegistry, type TeamEdit } from "../src/team-registry.js";
 // enabled, bot activate_status 2 for an enabled bot, 232017 for a group where only owners and admins add members, and
 // pending_approval_id_list for a join awaiting approval.
 // Coverage gap: no real tenant is called, so whether these codes and permissions behave as documented is live acceptance
-// (team-management spec, Pending). The HTTP client's mapping of the documented response bodies is covered below.
+// (team-management spec, Pending). The HTTP client's mapping of the documented response bodies is covered below, and its transport
+// (bearer token, JSON body, reply parsing) against a local HTTP server.
 const SAM = { appId: "cli_0123456789abcdef", appSecret: "sam-secret" };
 const DAISY_APP = "cli_5555555555555555";
 const daisy: TeamEdit = { teamName: "设计团队", responsibility: "视觉方案", leader: { name: "Daisy", appId: DAISY_APP, instructions: "" },
@@ -81,6 +84,8 @@ describe("checking an existing application's credentials (step 4)", () => {
       registry.saveTeam({ ...daisy, id: teamId }, { basedOn: registry.current()!.version, secret: "daisy-wrong-secret" });
       await new TeamOnboarding(registry, platform, SAM).run(teamId);
       expect(statuses(registry)).toEqual({ credentials: ["action", "bad_credentials"], joins: { oc_alpha: ["done", undefined], oc_beta: ["done", undefined] } });
+      // A secret-only change keeps the team accepting work where it did; only a replaced App ID starts onboarding again.
+      expect(registry.current()!.definitions.teams.find(({ id }) => id === teamId)!.bindings).toEqual([{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }]);
     } finally { registry.close(); }
   });
 });
@@ -196,18 +201,42 @@ describe("the Feishu HTTP platform", () => {
     expect(requests.filter(({ url }) => url === TOKEN).map(({ body }) => (body as { app_id: string }).app_id)).toEqual([SAM.appId, DAISY_APP, SAM.appId]);
   });
 
+  const CHATS = "https://open.feishu.cn/open-apis/im/v1/chats/";
   it.each([
-    ["a group where only owners and admins add members (232017)", { status: 400, body: { code: 232017, msg: "No permission" } }, "owner_only"],
-    ["a join awaiting approval", { body: { code: 0, msg: "success", data: { invalid_id_list: [], not_existed_id_list: [], pending_approval_id_list: [DAISY_APP] } } }, "pending_approval"],
-    ["another refusal (232025, bot not activated)", { status: 400, body: { code: 232025, msg: "Bot ability is not activated" } }, "refused"],
-    ["no connection", { fail: true }, "unreachable"],
-  ] as const)("reads %s when adding a bot", async (_case, answer, expected) => {
-    const { platform: http } = platform({ [TOKEN]: token("t-sam"), ["https://open.feishu.cn/open-apis/im/v1/chats/"]: answer as Answer });
+    ["a group where only owners and admins add members (232017)", { [TOKEN]: token("t-sam"), [CHATS]: { status: 400, body: { code: 232017, msg: "No permission" } } }, "owner_only"],
+    ["a join awaiting approval", { [TOKEN]: token("t-sam"), [CHATS]: { body: { code: 0, msg: "success", data: { invalid_id_list: [], not_existed_id_list: [], pending_approval_id_list: [DAISY_APP] } } } }, "pending_approval"],
+    ["another refusal (232025, bot not activated)", { [TOKEN]: token("t-sam"), [CHATS]: { status: 400, body: { code: 232025, msg: "Bot ability is not activated" } } }, "refused"],
+    ["no connection", { [TOKEN]: token("t-sam"), [CHATS]: { fail: true } }, "unreachable"],
+    // A gateway's HTML error page for the Coordinator's token is no answer from the platform, not a refusal (review item R1).
+    ["a Coordinator token answer that is not JSON", { [TOKEN]: { status: 502 } }, "unreachable"],
+  ] as const)("reads %s when adding a bot", async (_case, answers, expected) => {
+    const { platform: http } = platform(answers as Record<string, Answer>);
     expect(await http.addBot("oc_alpha", DAISY_APP, SAM)).toBe(expected);
   });
+});
 
-  it("reads a Coordinator token answer that is not JSON as no answer when adding a bot", async () => {
-    const { platform: http } = platform({ [TOKEN]: { status: 502 } });
-    expect(await http.addBot("oc_alpha", DAISY_APP, SAM)).toBe("unreachable");
+// The transport every real platform call goes through: what it sends, and how it reads a reply that is or is not JSON.
+describe("the platform's HTTP transport", () => {
+  it("sends a bearer token and a JSON body, and reads a JSON reply or none", async () => {
+    const received: Array<{ method: string | undefined; url: string | undefined; authorization: string | undefined; type: string | undefined; body: string }> = [];
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => { body += String(chunk); });
+      req.on("end", () => {
+        received.push({ method: req.method, url: req.url, authorization: req.headers.authorization, type: req.headers["content-type"], body });
+        if (req.url === "/gateway") { res.writeHead(502, { "content-type": "text/html" }); res.end("<html>Bad Gateway</html>"); return; }
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ code: 0, data: { name: "银河护卫队" } }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      expect(await fetchRequest({ method: "POST", url: `${origin}/members`, token: "t-sam", body: { id_list: [DAISY_APP] } }))
+        .toEqual({ status: 200, body: { code: 0, data: { name: "银河护卫队" } } });
+      expect(await fetchRequest({ method: "GET", url: `${origin}/gateway` })).toEqual({ status: 502, body: undefined });
+      expect(received).toEqual([
+        { method: "POST", url: "/members", authorization: "Bearer t-sam", type: "application/json; charset=utf-8", body: JSON.stringify({ id_list: [DAISY_APP] }) },
+        { method: "GET", url: "/gateway", authorization: undefined, type: undefined, body: "" }]);
+    } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
   });
 });

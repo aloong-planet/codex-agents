@@ -186,7 +186,8 @@ export class FeishuHttpOnboardingPlatform implements OnboardingPlatform {
   }
 }
 
-const fetchRequest: PlatformRequest = async ({ method, url, token, body }) => {
+/** The platform's HTTP transport: a bearer token when given, a JSON body, and the reply parsed as JSON or left undefined. */
+export const fetchRequest: PlatformRequest = async ({ method, url, token, body }) => {
   const response = await fetch(url, { method, signal: AbortSignal.timeout(15_000),
     headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json; charset=utf-8" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });

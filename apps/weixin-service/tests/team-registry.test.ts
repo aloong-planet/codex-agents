@@ -353,9 +353,15 @@ describe("onboarding and acceptance", () => {
     try {
       registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
       const { version } = registry.saveTeam({ ...daisy, leader: { ...daisy.leader, appId: "" } }, { basedOn: 1 });
-      registry.saveTeam({ ...daisy, teamName: "内容团队", leader: { ...daisy.leader, name: "Eve", appId: "cli_5555555555555555" } }, { basedOn: version.version });
+      const eve = registry.saveTeam({ ...daisy, teamName: "内容团队", leader: { ...daisy.leader, name: "Eve", appId: "cli_5555555555555555" } }, { basedOn: version.version });
       expect(registry.roster(SAM).agents.map(({ id }) => id)).toEqual(["sam", "alice", "bill", "jack"]);
-      expect(JSON.stringify(registry.current())).not.toContain("daisy-secret");
+      // Given its secret, the team joins the roster; the secret stays beside the versions, never inside one (team-management::CON-001).
+      const edit = editOf(registry.current()!.definitions, eve.teamId);
+      registry.saveTeam(edit, { basedOn: registry.current()!.version, secret: "eve-secret-SENTINEL" });
+      expect(registry.roster(SAM).agents.map(({ id, appSecret }) => [id, appSecret]).at(-1)).toEqual([eve.teamId, "eve-secret-SENTINEL"]);
+      const versions = Array.from({ length: registry.current()!.version }, (_, index) => registry.version(index + 1));
+      expect(versions.length).toBeGreaterThan(2);
+      for (const stored of versions) expect(JSON.stringify(stored)).not.toContain("eve-secret-SENTINEL");
     } finally { registry.close(); }
   });
 });
