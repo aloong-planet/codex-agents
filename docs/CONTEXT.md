@@ -12,6 +12,8 @@ This context describes personal Weixin/Feishu conversations, authorized Feishu g
 - Team Leader
 - Executor
 - Assignment
+- Lead Team Leader
+- Cross-team Assignment
 - Brief
 - Team Directory
 - Agent Profile
@@ -106,6 +108,14 @@ _Avoid_: Team Member (implies a fixed roster), sub-agent, 子 Agent, 成员
 **Assignment**:
 One part of a Dispatch Request that a Team Leader gives to exactly one Executor. It is distinct from the Dispatch Request itself and from a Scheduled Task.
 _Avoid_: subtask, 任务 (ambiguous)
+
+**Lead Team Leader**:
+The Team Leader of the Agent Team the Coordinator routed a Dispatch Request to, the only one that may ask the Coordinator for another team's help and that posts the request's closing. It is distinct from a cross-team Team Leader, which handles only the parts the Coordinator placed with its team.
+_Avoid_: owning team (Owner names reply ownership), main leader
+
+**Cross-team Assignment**:
+An Assignment of a Dispatch Request whose part the Coordinator placed with an Agent Team other than the lead Team Leader's, divided by that team's Team Leader. It stays part of the original request rather than forming a new Dispatch Request.
+_Avoid_: sub-request, cross-team request (only the lead Team Leader's ask to the Coordinator)
 
 **Brief**:
 The content an assigning agent hands to the agent it assigns, which together with that agent's own memory is its only view of outside context. It is distinct from group memory and from shared discussion.
