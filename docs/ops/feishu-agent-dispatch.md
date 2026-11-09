@@ -42,6 +42,8 @@ The four required role IDs have built-in names and responsibilities. Additional 
 
 At startup the service imports `feishu.dispatch` into its team registry (`team-registry.sqlite` in the state directory), and dispatch reads the roster only from there. Until the agent console saves its first change, each start imports the file again and records a new registry version when it differs, so editing this fragment and restarting still changes the roster. After the console's first save, this fragment no longer changes the roster. The registry stores Alice, Bill and Jack's App Secrets beside its versions with owner-only file permissions, never inside a version; Sam's secret stays in `feishu.appSecret`.
 
+Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team added there uses an existing Feishu application: its App ID and App Secret are entered on the page, and the secret is stored in the registry, never shown. The service then checks the credentials and the bot. Sam adds the bot to each bound group, and the team's application confirms it is in the group. Sam's application must therefore be allowed to add bots to the dispatch groups and to read their group information. Which permission scopes this needs is not yet verified on a real tenant. A group where only the owner and admins add members needs that setting changed in Feishu, or the bot added by hand, before 「重新检查」. Sam announces each team that starts or stops taking work in a group; a failed or uncertain announcement is never resent.
+
 ## Public ingress and cutover
 
 1. Prepare the reviewed release and locked dependencies using the repository-pinned Node 26.7.0 runtime. Complete automatic checks before changing production.

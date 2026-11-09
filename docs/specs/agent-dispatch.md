@@ -3,14 +3,14 @@
 > Status: implemented locally:
 > - A Team Leader divides each group request into one to ten Assignments, one Executor each, all starting at once, with partial failure, retry, cancellation and supplements across them (tickets 05 and 07 of agent-teams).
 > - Each agent sees only its own scope and, for Team Leaders, the group's Team Directory (ticket 06).
+> - Teams are edited from the console's team management page and apply without a restart (ticket 11).
 > - Cross-team work goes through the Coordinator (ticket 08).
 >
-> The console is specified here and not yet implemented.
+> The console's other views are specified here and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
 > Pending: the console shows a group's memory read-only, with no delete action.
 > Pending: a Team Leader can mark dependencies between Assignments; dependents start after their prerequisites complete.
-> Pending: an Executor is named `执行者 <n>（<profile name>）` in the Team Leader's start message, an interim form. The confirmed form, `<profile noun> <n>` (such as 文案执行者 51), needs an Executor-noun field on Executor profiles, which the team-management page adds.
 
 ## Problem Statement
 
@@ -238,6 +238,7 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Start, cross-team, closing or result notification is rejected or uncertain; requester asks for another report | Delivery retry separate from execution under agent-dispatch::REQ-008/AC-03 |
 | Remove member/group or replace a Team Leader's application credentials with queued work | Revalidate authority; no sender or destination fallback under agent-dispatch::REQ-008/AC-04 |
 | A Team Leader's bot is not in the group when it must post | Report the delivery failure without another identity under agent-dispatch::REQ-008/AC-04 |
+| Owner saves a team with a replaced App ID while its work is queued or running | The team onboards again with the new application. Work admitted under the old App ID fails its delivery, with no other identity under agent-dispatch::REQ-008/AC-04; the old application is closed (Implementation Decisions: live roster) |
 | Team is bound to the group, or removed, while requests run | Announcement under agent-dispatch::REQ-015/AC-03; removed team gets no new Assignments, running ones continue under agent-dispatch::REQ-015/AC-01 |
 | Member asks for, or genuinely mentions, a team bound to the group whose onboarding there is incomplete | No Assignment for that team and no post by its bot; the Coordinator clarifies or routes to an accepting team under agent-dispatch::REQ-015/AC-01 |
 | Requester cancels a request after its start message | Nothing of it enters the group memory, so no memory-derived reminder follows under agent-dispatch::REQ-012/AC-01 |
@@ -271,7 +272,15 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 - the Coordinator, the teams and their Team Leader applications, and each team's group bindings and state (onboarding, accepting, draining);
 - each agent's Agent Profile.
 
-It starts from the existing local configuration with the same four roles and is later edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).
+It starts from the existing local configuration with the same four roles and is then edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).
+
+**Live roster.** A saved team applies without a restart. Every reader of the roster takes the current definitions at each use:
+- routing and the accepting teams of a group;
+- mention resolution and the choice of sender;
+- the Team Directory;
+- the Coordinator's responsibilities list and instructions.
+
+When a team's application is new, or its secret changed, it gets its own sending application and media routes at once. A team's media goes through whichever application currently holds its App ID. An App ID no team uses any more is closed, so work admitted under it fails delivery with no other identity, and a replaced App ID starts the team's onboarding again ([team-management](team-management.md) Implementation Decisions).
 
 In each group, routing, mention priority, new Assignments and the Team Directory use only the teams whose binding to that group is accepting under the current definitions; a team may be bound to some dispatch groups only, and in any binding state. A request planned after its team stopped accepting work in the group gets no new Assignment there and fails with the team-unavailable report. Whether a retry may rerun an existing Assignment of such a team is decided with removal and draining (team-management::US-004).
 
@@ -322,6 +331,7 @@ It places each part with one of those teams or with none, and writes a summary f
   - Only the lead's parts are placed. A cross-team Team Leader's are kept as needs, which the Coordinator relays to the lead's closing (agent-dispatch::REQ-013/AC-01).
   - Each team that takes parts in an attempt gets one plan turn for all of them. Its Brief from the Coordinator is the request's Brief, who asked, and each part with the Coordinator's summary.
   - The lead's plan, the cross-team turn and every such plan end before anything is stored. A cross-team plan still invalid or over the ceiling after its correction turn therefore fails the whole request with the plan-failure report, and no Executor is created.
+- An Executor is named after its profile's executor noun and a number, `<noun> <n>` (such as 文案执行者 51); a profile without a noun names its Executors 执行者 <n>.
 - Once the attempt's Assignments have their Executors, the Team Leader posts one start message. With one Assignment it reads 「我安排<Executor>（<profile name>）处理：<Assignment title>。完成后会在本群汇报。」; with several, 「我安排：」 is followed by one line 「<Executor>（<profile name>）处理：<title>」 per Assignment and a last line 「完成后会在本群汇报。」, as every group post with several items gives one item per line. A retry or supplement attempt lists only the Assignments that start in it. Executors start only after that message is accepted; a start message not confirmed as sent fails the request as before.
 - **Cross-team posts.** With parts placed in an attempt, the attempt's posts come in this order:
   1. The lead's start message. It adds one line 「<part>需要其他团队支持，已请 <Coordinator> 协调。」 per part, before its last line, and so takes the several-item form.

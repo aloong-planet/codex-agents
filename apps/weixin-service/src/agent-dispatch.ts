@@ -6,7 +6,7 @@ import type { CrossTeamDecision, DispatchAgent, DispatchAssignment, DispatchClas
   DispatchPart, DispatchPendingResult } from "./agent-dispatch-types.js";
 import { parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
-import { COORDINATOR_ID } from "./team-registry.js";
+import { COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
@@ -18,7 +18,8 @@ type Notice = { event: InboundContent; agentId: string; senderAccountId: string;
   requestId?: string; memory?: { attempt: number; event: InboundContent; text: string } };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
-export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: LeaderTurnInput["profiles"]; memoryScope: AgentMemoryScope }>;
+/** A team as a request's definitions version has it. A profile's noun names its Executors (`<noun> <n>`); without one they are 执行者. */
+export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: ReadonlyArray<Readonly<{ id: string; name: string; noun?: string }>>; memoryScope: AgentMemoryScope }>;
 /** One turn captured into an agent's memory; `event` names the conversation and is the source of the user entry. */
 export type DispatchMemoryTurn = Readonly<{ event: InboundContent; senderAccountId: string; userId: string; userText: string; assistantId: string; assistantText: string }>;
 type AssignmentStatus = DispatchAssignment["status"];
@@ -61,7 +62,8 @@ function untakenLine(parts: readonly DispatchPart[]): string {
 const shown = (assignments: readonly DispatchAssignment[]) => assignments.map((assignment, index) =>
   ({ position: index + 1, executor: assignment.executor, profileName: assignment.profileName, title: assignment.title, status: assignment.status }));
 /** An Executor's name, from its durable sequence. */
-function executorName(sequence: number): string { return `执行者 ${sequence}`; }
+/** An Executor's name in the group: its profile's noun, or 执行者 for a profile without one, and its number. */
+function executorName(profile: Readonly<{ noun?: string }>, sequence: number): string { return `${profile.noun || DEFAULT_EXECUTOR_NOUN} ${sequence}`; }
 const executorLabel = (assignment: DispatchAssignment) => `${assignment.executor}（${assignment.profileName}）`;
 /**
  * A Team Leader's start message: which Executor handles each Assignment that starts (agent-dispatch::US-003/AC-01), and for the
@@ -106,7 +108,11 @@ export class AgentDispatch {
   private readonly closingTeams = new Set<string>();
 
   constructor(databasePath: string, private readonly options: {
-    agents: readonly DispatchAgent[];
+    /**
+     * The Coordinator and every Team Leader with a sending application, as the current definitions have them. Read on each
+     * use, so a team saved or onboarded while the service runs is routed to, mentioned and posts without a restart.
+     */
+    agents(): readonly DispatchAgent[];
     classifier: DispatchClassifier;
     leader: TeamLeader;
     executor: DispatchExecutor;
@@ -252,7 +258,7 @@ export class AgentDispatch {
       this.database.prepare("UPDATE dispatch_input SET state = 'classifying' WHERE id = ?").run(event.key);
       // Only teams accepting work in this group can be routed to or named; a mention of another team confers no priority.
       const accepting = new Set(this.options.roster(event).map(({ id }) => id));
-      const agents = this.options.agents.filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
+      const agents = this.options.agents().filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
       const mentioned = event.mentionedAgentIds?.filter((id) => agents.some((agent) => agent.id === id));
       if ((mentioned?.length ?? 0) > 1) {
         await this.coordinate(event, bindingHash, "你点名了多个 Agent。这项事务希望由谁独立负责？");
@@ -269,7 +275,7 @@ export class AgentDispatch {
           if (superseded) { superseded.status = "cancelled"; this.save(superseded); }
         }
         if (pending?.handled) {
-          const agent = this.options.agents.find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
+          const agent = this.options.agents().find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = pending.runRef ? this.requestOfRun(pending.runRef, event) : undefined;
           const waiting = original && this.assignments(original.id).find((assignment) => assignment.status === "waiting" &&
@@ -301,7 +307,7 @@ export class AgentDispatch {
           const agent = agents.find((candidate) => candidate.id === decision.agentId)!;
           const named = agents.find(({ id }) => id === mentioned?.[0]);
           if (decision.kind === "dispatch" && named && named.id !== COORDINATOR_ID && named.id !== agent.id) {
-            const coordinator = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
+            const coordinator = this.options.agents().find(({ id }) => id === COORDINATOR_ID)!;
             const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 ${coordinator.name} 重新分派，由他独立处理。`;
             // The request's ID is its message key, so these posts belong to the request saved below.
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation, requestId: event.key });
@@ -514,7 +520,7 @@ export class AgentDispatch {
     const offered = this.offeredTeams(job);
     let decisions: CrossTeamDecision[] = help.map((_part, index) => ({ part: index + 1, agentId: null, summary: "" }));
     if (offered.length) {
-      const lead = this.options.agents.find(({ id }) => id === job.agentId)!, brief = this.brief(job);
+      const lead = this.options.agents().find(({ id }) => id === job.agentId)!, brief = this.brief(job);
       const input = { requestId: job.id, coordinator: this.coordinator().name, message: brief.latest ? `${brief.message}\n最新要求：${brief.latest}` : brief.message,
         summary: job.summary, lead: { id: lead.id, name: lead.name, responsibility: lead.responsibility }, parts: help.map((part, index) => ({ part: index + 1, ...part })),
         teams: offered.map(({ id, name, responsibility }) => ({ id, name, responsibility })), fixtureMessageId: this.fixtureMessageId(job) };
@@ -559,7 +565,7 @@ export class AgentDispatch {
    */
   private offeredTeams(job: DispatchJob): DispatchAgent[] {
     const roster = new Set(this.options.roster(job.event).map(({ id }) => id));
-    return this.options.agents.filter(({ id }) => id !== COORDINATOR_ID && id !== job.agentId && roster.has(id) && this.options.team(id, job.definitionsVersion!) !== undefined);
+    return this.options.agents().filter(({ id }) => id !== COORDINATOR_ID && id !== job.agentId && roster.has(id) && this.options.team(id, job.definitionsVersion!) !== undefined);
   }
 
   /**
@@ -579,7 +585,7 @@ export class AgentDispatch {
         const profile = views.get(planned.teamId)!.profiles.find(({ id }) => id === planned.profileId)!;
         const id = `${job.id}:assignment:${job.attempt}:${index + 1}`;
         const sequence = Number(this.database.prepare("INSERT INTO dispatch_assignment (id, request_id, payload) VALUES (?, ?, '{}')").run(id, job.id).lastInsertRowid);
-        this.saveAssignment({ id, requestId: job.id, teamId: planned.teamId, profileId: profile.id, profileName: profile.name, executor: executorName(sequence), sequence,
+        this.saveAssignment({ id, requestId: job.id, teamId: planned.teamId, profileId: profile.id, profileName: profile.name, executor: executorName(profile, sequence), sequence,
           title: planned.title, brief: planned.brief, status: "queued", attempt: job.attempt, input });
       }
       const current = this.job(job.id)!;
@@ -591,7 +597,7 @@ export class AgentDispatch {
       // A cross-team Team Leader's application is frozen when its team first takes a part.
       for (const { teamId } of division.added) {
         if (teamId === job.agentId || current.senders?.[teamId]) continue;
-        const sender = this.options.agents.find(({ id }) => id === teamId)?.senderAccountId;
+        const sender = this.options.agents().find(({ id }) => id === teamId)?.senderAccountId;
         if (sender) (current.senders ??= {})[teamId] = sender;
       }
       current.dividedAttempt = job.attempt;
@@ -763,7 +769,8 @@ export class AgentDispatch {
   private teamName(job: DispatchJob, teamId: string): string { return this.options.team(teamId, job.definitionsVersion!)?.leader.teamName ?? teamId; }
 
   private leaderInput(job: DispatchJob, team: DispatchTeamView, relay?: LeaderRelay): LeaderTurnInput {
-    return { requestId: job.id, leader: team.leader, profiles: team.profiles, brief: this.brief(job), ...(relay ? { relay } : {}),
+    // The Team Leader chooses profiles by ID and name; the noun only names the Executors in the group.
+    return { requestId: job.id, leader: team.leader, profiles: team.profiles.map(({ id, name }) => ({ id, name })), brief: this.brief(job), ...(relay ? { relay } : {}),
       // The Team Leader's own memory in this conversation; never the group memory or an Executor's (agent-dispatch::REQ-012/AC-02).
       memory: this.options.memory.recall(team.memoryScope, job.event, job.executionEvent?.text ?? job.event.text),
       directory: this.options.roster(job.event).map(({ name, responsibility }) => ({ name, responsibility })),
@@ -829,7 +836,7 @@ export class AgentDispatch {
 
   /** A Coordinator post; `requestId` names the request it belongs to, if any. */
   private async coordinate(event: InboundContent, bindingHash: string, text: string, requestId?: string) {
-    const sam = this.options.agents.find(({ id }) => id === COORDINATOR_ID)!;
+    const sam = this.options.agents().find(({ id }) => id === COORDINATOR_ID)!;
     return this.deliverNotice(`${event.key}:coordination`, { event, bindingHash, agentId: sam.id, senderAccountId: sam.senderAccountId, text,
       ...(requestId ? { requestId } : {}) });
   }
@@ -845,8 +852,8 @@ export class AgentDispatch {
     const coordinator = this.coordinator();
     return { event: job.event, bindingHash: job.bindingHash, agentId: coordinator.id, senderAccountId: coordinator.senderAccountId, text };
   }
-  private coordinator(): DispatchAgent { return this.options.agents.find(({ id }) => id === COORDINATOR_ID)!; }
-  private agentName(id: string): string { return this.options.agents.find((agent) => agent.id === id)?.name ?? id; }
+  private coordinator(): DispatchAgent { return this.options.agents().find(({ id }) => id === COORDINATOR_ID)!; }
+  private agentName(id: string): string { return this.options.agents().find((agent) => agent.id === id)?.name ?? id; }
   private markPresented(notice: Notice, acceptedAt: number): void {
     if (!notice.presentation) return;
     try { this.options.presented({ ...notice.presentation, acceptedAt }); }
@@ -884,7 +891,7 @@ export class AgentDispatch {
     if (row.state !== "queued") return row.result ? JSON.parse(row.result) as SendTextResult : { ok: false, reason: "unknown", acceptedSegments: 0 };
     notice = JSON.parse(row.payload) as Notice;
     const eligible = () => this.eligible(notice.event, notice.bindingHash) &&
-      this.options.agents.some((agent) => agent.id === notice.agentId && agent.senderAccountId === notice.senderAccountId);
+      this.options.agents().some((agent) => agent.id === notice.agentId && agent.senderAccountId === notice.senderAccountId);
     if (!eligible() || this.closing) {
       this.database.prepare("UPDATE dispatch_notice SET state = 'cancelled' WHERE id = ?").run(id);
       return { ok: false, reason: "unavailable", acceptedSegments: 0 };

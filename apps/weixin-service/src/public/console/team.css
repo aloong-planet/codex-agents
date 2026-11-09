@@ -1,0 +1,65 @@
+/* 团队管理 (team-management spec): the page's own rules, from the owner-confirmed team management prototype. */
+.atm-heading-actions{display:flex;gap:8px;align-items:center;flex:none}
+.atm-view{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:12px}
+.atm-panel{min-height:0;border:1px solid var(--acv-line);border-radius:14px;background:var(--acv-paper);display:flex;flex-direction:column;overflow:hidden}
+.atm-panel-head{flex:none;padding:12px 14px;border-bottom:1px solid var(--acv-line);display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:12px;font-weight:650}
+.atm-panel-head small{font-size:10px;font-weight:400;color:var(--acv-muted)}
+.atm-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+/* Team colors for names; a team without its own color uses the ink color. */
+.atm-tone{--atm-tone:var(--acv-ink)}
+.atm-tone-sam{--atm-tone:var(--acv-sam)}
+.atm-tone-alice{--atm-tone:var(--acv-alice)}
+.atm-tone-bill{--atm-tone:var(--acv-bill)}
+.atm-tone-jack{--atm-tone:var(--acv-jack)}
+/* Team list beside the editor */
+.atm-a{flex:1;min-height:0;display:grid;grid-template-columns:270px minmax(0,1fr);gap:12px}
+.atm-list-tools{flex:none;display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-bottom:1px solid var(--acv-line)}
+.atm-list-item{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--acv-line);background:var(--acv-paper);padding:11px 14px;color:var(--acv-ink)}
+.atm-list-item:hover{background:var(--acv-soft)}
+.atm-list-item[aria-pressed="true"],.atm-list-item[aria-pressed="true"]:hover{background:var(--acv-selected);box-shadow:inset 3px 0 var(--acv-brand)}
+.atm-list-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.atm-list-top strong{font-size:13px;color:var(--atm-tone)}
+.atm-list-meta{display:block;font-size:10px;color:var(--acv-muted);margin-top:4px;line-height:1.6}
+.atm-editor-wrap{padding:16px 18px 20px}
+/* Editor */
+.atm-editor-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 14px}
+.atm-editor-title h2{font-size:18px;margin:0;color:var(--atm-tone)}
+.atm-editor-title small{display:block;font-size:11px;color:var(--acv-muted);font-weight:400;margin-top:2px}
+.atm-mode{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;font-size:11px;color:var(--acv-muted)}
+.atm-onboard{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.atm-onboard li{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:8px;align-items:center;font-size:11px;padding:7px 9px;border:1px solid var(--acv-line);border-radius:7px}
+.atm-onboard li[data-state="blocked"]{border-color:var(--acv-error)}
+.atm-onboard-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:var(--acv-soft);color:var(--acv-muted);font-size:10px;font-weight:650}
+.atm-onboard small{display:block;font-size:10px;color:var(--acv-muted);margin-top:2px;line-height:1.6}
+/* Only a step's own reason turns red; the group-joining step gives its reasons per group, so its description stays muted. */
+.atm-onboard>li[data-state="blocked"]:not(:has(.atm-joins))>div>small{color:var(--acv-error)}
+/* Group joining has one row per bound group, each with its own status. */
+.atm-joins{grid-column:2/-1;list-style:none;margin:2px 0 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.atm-joins li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;align-items:center;padding:5px 8px;border:0;border-radius:6px;background:var(--acv-raise)}
+.atm-joins li[data-state="blocked"] small{color:var(--acv-error)}
+.atm-secret-input{display:flex;gap:6px;align-items:center}
+.atm-secret-input .acv2-input{flex:1;min-width:0}
+.atm-noun-hint{display:block;font-size:10px;color:var(--acv-muted);margin-top:3px;font-weight:400}
+.atm-tool-group{display:grid;grid-template-columns:64px minmax(0,1fr);gap:4px 10px;align-items:start;margin-top:4px}
+.atm-tool-h{font-size:10px;color:var(--acv-muted);padding-top:3px}
+.atm-unauth{margin-left:4px;font-size:10px;color:var(--acv-warning)}
+.atm-effective{margin:8px 0 0;font-size:11px;color:var(--acv-ink);line-height:1.7}
+.atm-effective small{display:block;font-size:10px;color:var(--acv-muted)}
+.atm-announce{flex-basis:100%;margin:0 0 2px 22px;font-size:10px;color:var(--acv-muted);line-height:1.6}
+.atm-announce[data-state="failed"]{color:var(--acv-error)}
+.atm-profile{border:1px solid var(--acv-line);border-radius:8px;padding:12px;margin-top:10px}
+.atm-profile-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.atm-profile-head strong{font-size:12px}
+.atm-profile-head .acv2-button{min-height:24px;padding:2px 7px;font-size:10px}
+.atm-field-gap{margin-top:10px}
+.atm-roster-preview{margin-top:10px;font-size:10px;color:var(--acv-muted);line-height:1.8}
+.atm-group-list{display:flex;flex-direction:column;gap:6px}
+.atm-group-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.acf-savebar[data-state="error"]{align-items:flex-start;flex-wrap:wrap}
+.acf-savebar[data-state="error"] .acf-row-actions{margin-top:0}
+.atm-save-err{flex:1;min-width:220px;color:var(--acv-error);font-size:11px;line-height:1.7}
+.atm-save-err ul{margin:2px 0 0;padding-left:18px}
+/* Without Feishu dispatch: where dispatch is enabled, with the configuration file's path on its own line. */
+.acv2-empty .atm-empty-body{max-width:460px;margin:0 auto;text-align:left}
+.atm-empty-path{display:block;margin:6px 0;padding:6px 8px;border-radius:5px;background:var(--acv-soft);font:10px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--acv-ink);overflow-wrap:anywhere}
+@media(max-width:899px){.atm-a{grid-template-columns:1fr;grid-template-rows:200px minmax(0,1fr)}}

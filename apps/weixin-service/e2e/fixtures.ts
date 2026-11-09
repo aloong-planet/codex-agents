@@ -3,6 +3,8 @@ import { startFixtureServer } from "./fixture-server.js";
 
 type Fixtures = {
   fileScanLimit: number | undefined;
+  /** The service's channel configuration file, and fixture switches for its start; none by default. */
+  fixtureStart: { channelConfiguration?: unknown; env?: Record<string, string> };
   modelMode: string;
   routerMode: string;
   fixtureServer: Awaited<ReturnType<typeof startFixtureServer>>;
@@ -10,10 +12,11 @@ type Fixtures = {
 
 export const test = base.extend<Fixtures>({
   fileScanLimit: [undefined, { option: true }],
+  fixtureStart: [{}, { option: true }],
   modelMode: [process.env.WORKFLOW_SIMULATOR_MODEL ?? "fixture", { option: true }],
   routerMode: [process.env.WORKFLOW_SIMULATOR_PENDING_ROUTER ?? "fixture", { option: true }],
-  fixtureServer: [async ({ modelMode, routerMode, fileScanLimit }, use, info) => {
-    const server = await startFixtureServer(modelMode, routerMode, fileScanLimit);
+  fixtureServer: [async ({ modelMode, routerMode, fileScanLimit, fixtureStart }, use, info) => {
+    const server = await startFixtureServer(modelMode, routerMode, fileScanLimit, fixtureStart);
     const settings = {
       WORKFLOW_SIMULATOR_MODEL: modelMode, WORKFLOW_SIMULATOR_PENDING_ROUTER: routerMode,
       WORKFLOW_FIXTURE_TRACE_FILE: server.traceFile, WEIXIN_OTEL_DIRECTORY: server.otelDirectory,

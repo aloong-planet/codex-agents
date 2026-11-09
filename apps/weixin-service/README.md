@@ -55,6 +55,15 @@ tail -n 20 "$HOME/Library/Application Support/weixin-ilink-direct-demo/console-a
 
 The console page `/console/mcp` (MCP 管理) registers local MCP programs and Streamable HTTP addresses, by form or by importing an `mcpServers` document. The service starts every enabled program and connects every enabled address when it starts, holds the connections and stops them when it stops; agents receive no MCP tools yet. An address with OAuth gets client_credentials tokens, DPoP-bound when chosen, from the configured issuer only; tokens and DPoP keys stay in memory. Header values are sent only to the address's own origin, never to the issuer, and a redirect to another origin is refused. The configuration, disabled tools and pinned tool definitions are kept in `mcp-catalog.json`, environment values, header values and OAuth client secrets in `mcp-secrets.json`, both `0600` in the state directory; a sandboxed program's rules are written to `mcp-sandbox/<name>.json` there, and it gets its own npm cache under `~/Library/Caches/codex-weixin/mcp/<name>` (`0700`), removed when the server is deleted. Every saved change and import is appended to `console-audit.jsonl` with names of secrets, never their values.
 
+## Team management
+
+With Feishu dispatch configured, the console page `/console/teams` (团队管理) edits the Agent Teams. It covers each team's existing Feishu application (App ID, and an App Secret that can only be written), its responsibility, the Team Leader's instructions, its Executor profiles with their executor noun and host tools, and its dispatch groups. Saves apply without a restart.
+- **Onboarding.** The service checks a saved application's credentials and bot, and Sam adds the bot to each bound group. The page shows each step's outcome per group, with 「重新检查」.
+- **Announcements.** Sam announces in the group when a team starts or stops taking work there; a failed announcement is not resent.
+- **State files.** Teams, versions and onboarding outcomes are kept in `team-registry.sqlite`, with App Secrets beside the versions and never inside one; announcements are kept in `team-announcements.sqlite`. Both are `0600` in the state directory.
+- **Audit.** Every save is appended to `console-audit.jsonl` with the browser that made it, never with a secret.
+- **Without dispatch.** The page names the channel configuration file to add `dispatch` to. See [dispatch setup](../../docs/ops/feishu-agent-dispatch.md).
+
 ## Penny private bookkeeping
 
 Penny is an optional separate Feishu private bot configured through `PENNY_CONFIG_PATH`. It records clear text, previews payment images and calculates separate personal/business CNY books; statement-file import is unavailable. Its history is separate from the general assistant memory described below. See [Penny setup and owner acceptance](../../docs/ops/penny-private-bookkeeping.md) for its app-scoped binding, private credentials, callback route and test sequence. Do not use the general pairing command below to replace the existing Feishu binding with Penny.

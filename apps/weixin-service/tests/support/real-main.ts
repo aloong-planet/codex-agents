@@ -23,7 +23,8 @@ export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: strin
   pennyFixtureTextOutbox?: { chatId: string; message: string }[];
   workflows?: { runs: { runRef: string; workflowId: string; status: string; steps: unknown[]; effects: unknown[] }[] };
   workflowModulePermissions?: { modules: { moduleId: string; revision: number; scopes: { scopeId: string }[] }[] };
-  fixtureTextOutbox?: { message: string }[] };
+  fixtureTextOutbox?: { message: string }[];
+  fixtureOnboardingCalls?: Array<Record<string, string>> };
 export const config = (channel: "weixin" | "feishu") => ({ channel,
   owner: { memoryAccountId: "fixture-bot", bindings: [
     { channel: "weixin", accountId: "fixture-bot", target: "fixture-user@im.wechat", senderId: "fixture-user@im.wechat" },
@@ -81,9 +82,24 @@ export async function start(directory: string, extraEnv: Record<string, string> 
       child.kill("SIGKILL"); await exited;
       expect(child.signalCode).toBe("SIGKILL");
     },
-    async post(route: string, body: unknown) {
+    /** POSTs as the authorized owner, expects 200 and returns the JSON body. */
+    async post<T = unknown>(route: string, body: unknown): Promise<T> {
       const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json", cookie: await authorized() }, body: JSON.stringify(body) });
-      expect(response.status, await response.clone().text()).toBe(200);
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      return (text ? JSON.parse(text) : undefined) as T;
+    },
+    /** POSTs as the authorized owner and returns the status and JSON body, whatever the status. */
+    async send<T = unknown>(route: string, body: unknown): Promise<{ status: number; body: T }> {
+      const response = await fetch(`${url}${route}`, { method: "POST", headers: { origin: url, "content-type": "application/json", cookie: await authorized() }, body: JSON.stringify(body) });
+      return { status: response.status, body: await response.json() as T };
+    },
+    /** GETs a JSON route as the authorized owner. */
+    async get<T = unknown>(route: string): Promise<T> {
+      const response = await fetch(`${url}${route}`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(5000) });
+      const text = await response.text();
+      expect(response.status, text).toBe(200);
+      return JSON.parse(text) as T;
     } };
 }
 
@@ -99,6 +115,8 @@ export function dispatchConfig(directory: string, dual = false) {
 }
 
 /** A Feishu group text event from the owner in `oc_alpha`, with the fixture's canned Coordinator decision and optional extra fixture inputs. */
+/** The fixture Coordinator's decision to dispatch a request to `agentId`. */
+export const decision = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
 export const groupMessage = (messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {}) => ({
   event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
     message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",

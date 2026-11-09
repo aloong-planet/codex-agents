@@ -71,7 +71,8 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   private readonly database: DatabaseSync;
   private closing = false;
   constructor(databasePath: string, private readonly options: {
-    agents: readonly DispatchAgent[];
+    /** The Coordinator and every Team Leader with a sending application, as the current definitions have them. */
+    agents(): readonly DispatchAgent[];
     runtimes: RuntimePool<DispatchRuntime>;
     /** `agentId` is the Team Leader of the Assignment's team, whose application sends what the Executor produces. */
     createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost, agentId: string): DispatchRuntime;
@@ -98,7 +99,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
   }
   async run(job: DispatchJob, assignment: DispatchAssignment, signal: AbortSignal): Promise<DispatchExecutionResult> {
     // The Assignment's own team, which is the lead's or, for a cross-team Assignment, another team's (agent-dispatch::REQ-013/AC-02).
-    const role = this.options.agents.find(({ id }) => id === assignment.teamId);
+    const role = this.options.agents().find(({ id }) => id === assignment.teamId);
     if (!role || role.id === COORDINATOR_ID || role.senderAccountId !== assignmentSender(job, assignment)) throw new Error("dispatch_role_invalid");
     const revision = this.options.contextRevision(job);
     const eligible = () => !this.closing && !signal.aborted && this.options.authorized(job) && this.options.contextRevision(job) === revision;

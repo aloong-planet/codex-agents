@@ -19,6 +19,8 @@ body{margin:0}
 .acv2-heading p{font-size:12px;color:var(--acv-muted);margin:2px 0 0}
 .acv2-button{border:1px solid var(--acv-line);border-radius:6px;background:var(--acv-paper);color:var(--acv-ink);padding:6px 10px;white-space:nowrap;min-height:32px}
 .acv2-button:hover{background:var(--acv-soft)}
+/* A link to another console page looks like the buttons beside it. */
+a.acv2-button{display:inline-flex;align-items:center;text-decoration:none;color:var(--acv-ink)}
 .acv2-button.acv2-primary{border-color:var(--acv-brand);background:var(--acv-brand);color:var(--acv-paper)}
 .acv2-button.acv2-primary:hover{background:var(--acv-brand-2)}
 .acv2-workspace{flex:1;min-height:0;display:flex;gap:12px;position:relative}
@@ -63,6 +65,12 @@ body{margin:0}
 .acf-grant{margin-top:10px;padding:10px;border:1px solid var(--acv-warning);border-radius:7px;font-size:11px;line-height:1.7;color:var(--acv-ink);background:var(--acv-paper)}
 .acf-grant strong{color:var(--acv-warning)}
 .acf-grant code{display:block;margin:6px 0;padding:6px 8px;border-radius:5px;background:var(--acv-soft);font:10px/1.6 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
+.acf-textarea{width:100%;min-height:62px;resize:vertical;border:1px solid var(--acv-line);border-radius:6px;padding:7px 8px;background:var(--acv-paper);color:var(--acv-ink);font:inherit;font-size:11px;line-height:1.6}
+.acf-textarea:focus-visible{outline:2px solid var(--acv-brand);outline-offset:-2px}
+.acf-sub{font-size:11px;font-weight:650;margin:12px 0 6px;color:var(--acv-ink)}
+.acf-sub small{font-weight:400;color:var(--acv-muted);margin-left:6px}
+.acf-secret{display:flex;align-items:center;gap:8px;height:32px;border:1px dashed var(--acv-line);border-radius:6px;padding:0 6px 0 8px;font-size:11px;color:var(--acv-muted)}
+.acf-secret .acv2-button{margin-left:auto;min-height:24px;padding:2px 7px;font-size:10px}
 .acf-row-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .acf-row-actions .acv2-button{min-height:28px;padding:3px 9px;font-size:11px}
 .acf-danger{border-color:var(--acv-error)}
@@ -101,7 +109,7 @@ body{margin:0}
 .acv-conn i{width:8px;height:8px;border-radius:50%;background:var(--acv-brand);box-shadow:0 0 0 3px var(--acv-brand-soft)}
 .acv-side-nav{display:flex;flex-direction:column;gap:1px;padding:4px 8px 8px;border-bottom:1px solid var(--acv-line)}
 .acv-side-h{padding:6px 10px 4px;font-size:11.5px;font-weight:600;letter-spacing:.06em;color:var(--acv-muted)}
-.acv-nav-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:0;border-radius:9px;background:none;color:var(--acv-ink-2);font-size:13.5px;text-align:left;cursor:pointer}
+.acv-nav-item{display:flex;align-items:center;gap:10px;width:100%;padding:8px 10px;border:0;border-radius:9px;background:none;color:var(--acv-ink-2);font-size:13.5px;text-align:left;cursor:pointer;text-decoration:none}
 .acv-nav-item:hover{background:var(--acv-hover);color:var(--acv-ink)}
 .acv-nav-item[aria-current="page"],.acv-nav-item[aria-current="page"]:hover{background:var(--acv-selected);color:var(--acv-brand);font-weight:600;cursor:default}
 .acv-nav-item:focus-visible{outline:2px solid var(--acv-brand);outline-offset:-2px}

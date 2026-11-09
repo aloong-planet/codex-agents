@@ -13,7 +13,7 @@ import { TeamRegistry } from "../src/team-registry.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
-import { dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
@@ -135,7 +135,6 @@ it("names the Coordinator from the registry in its default reassignment explanat
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-const decision = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
 const executorReply = (message: string, subject: string) => JSON.stringify({ message, results: [{ subject, status: "completed" }] });
 
 it("routes an explicit request to its team, whose Team Leader starts, delegates and closes it", async () => {
@@ -273,6 +272,36 @@ it("fails a request whose start message was uncertain at a crash, without sendin
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// agent-dispatch::REQ-008/AC-04 with a Team Leader application replaced from the console while its work runs (ticket 11, D5).
+it("posts nothing through another identity for work started under a Team Leader application that was replaced", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-replaced-application-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    // The replacement application cannot join the group yet, so Bill stays onboarding with it.
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_alpha: { add: "owner_only" } } }) });
+    await running.post("/api/fixture/inbound", groupMessage("om_replaced", "帮我规划周末一日行程", decision("bill", "规划周末一日行程"),
+      { modelHold: true, modelReply: executorReply("周末一日行程已规划好。", "规划周末一日行程") }));
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1 && state.agentDispatch?.jobs[0]?.status === "running");
+    type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
+      profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string }> };
+    const view = await running.get<{ version: number; teams: TeamView[] }>("/api/teams");
+    const bill = view.teams.find(({ id }) => id === "bill")!;
+    await running.post("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility,
+      leader: { ...bill.leader, appId: "cli_eeeeeeeeeeeeeeee" }, executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) =>
+        ({ id, name, noun, instructions, hostTools })), groups: ["oc_alpha"], secret: "bill-replacement" } });
+    await running.post("/api/fixture/inbound", { modelControl: { messageId: "om_replaced", action: "release" } });
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status !== "running" && (state.agentDispatch?.notices?.length ?? 0) === 2);
+    const settled = result;
+    console.log(JSON.stringify({ kind: "dispatch_replaced_application", command: "帮我规划周末一日行程", jobs: settled.agentDispatch, outboxes: settled.agentFixtureOutboxes, coordinator: settled.fixtureTextOutbox }));
+    expect((await running.get<{ teams: TeamView[] }>("/api/teams")).teams.find(({ id }) => id === "bill")!.bindings).toEqual([expect.objectContaining({ chatId: "oc_alpha", state: "onboarding" })]);
+    expect([settled.agentFixtureOutboxes?.bill?.text ?? [], settled.fixtureTextOutbox ?? []]).toEqual([[], []]);
+    // The business outcome stands; its closing has no sender left, so the notice records the failed delivery instead of using another identity.
+    expect([result.agentDispatch?.jobs[0]?.status, settled.agentDispatch?.notices?.map(({ id, state }) => [id.split(":").slice(1).join(":"), state])])
+      .toEqual(["completed", [["receipt:0", "accepted"], ["closing:0", "cancelled"]]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 it("builds the Coordinator's and the Team Leader's runtimes from their resolved profiles, without tools", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-coordination-runtime-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
@@ -328,7 +357,8 @@ it("routes and assigns only to teams accepting work in the group, and gives each
         : team.id === "jack" ? { ...team, bindings: [{ chatId: "oc_alpha", state: "accepting" as const }, { chatId: "oc_beta", state: "onboarding" as const }] } : team) },
       { basedOn: seeded.version });
     } finally { registry.close(); }
-    running = await start(directory);
+    // The platform cannot add Jack's bot to oc_beta, so its onboarding there stays incomplete when startup resumes it.
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_beta: { add: "owner_only" } } }) });
     await running.post("/api/fixture/inbound", inBeta(groupMessage("om_beta_jack", "帮我修复代码", decision("jack", "修复代码"))));
     const refused = await running.until((state) => state.fixtureTextOutbox?.length === 1);
     expect(refused.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
@@ -652,7 +682,7 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
     // Session rows as the executor before compaction wrote them: the production class without homes, over a fake App Server conversation.
     const scopes: string[] = [];
     const recorder = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
-      agents: [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_aaaaaaaaaaaaaaaa" }],
+      agents: () => [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_aaaaaaaaaaaaaaaa" }],
       runtimes: new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 1000, close: ({ agent }) => agent.close() }),
       createRuntime: (_job, scope) => { scopes.push(scope); return { agent: conversation(scopes.length === 1 ? "thread-ended" : "thread-recorded"), cwd: join(directory, scope) }; },
       tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
