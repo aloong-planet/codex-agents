@@ -36,6 +36,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 //   curators with recorders, so only code review and a live run cover that tool host.
 // - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
 //   the fixture injects both.
+// - Main records an Executor's memory capture with its Assignment's frozen sender. Fixture mode's curators record only the account
+//   and the turns, so no case observes that sender. Retest condition: a fixture curator that records each turn's source sender.
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
@@ -845,8 +847,6 @@ it("reports interrupted Assignments after a crash and closes the request", async
 // Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-04, REQ-010/AC-01). The engine's rules are covered at
 // the AgentDispatch boundary; this case shows main's wiring: the injected cross-team decision and per-team plans reach the production
 // turns, and the other team's Executor runs, sends and remembers under its own team.
-// Gap: the source sender main records with an Executor's memory capture is not observable through fixture mode, whose curators
-// record only the account and the turns; code review covers it.
 it("places a part with another team through main, whose Executor sends its file under its own Team Leader", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-cross-team-")), business = mkdtempSync(join(tmpdir(), "dispatch-cross-team-files-"));
   let running: Running | undefined;

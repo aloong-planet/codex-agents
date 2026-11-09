@@ -361,7 +361,8 @@ It places each part with one of those teams or with none, and writes a summary f
 
 - the parts the lead asked other teams to take, each with the team that took it or none, and how often the Coordinator was asked;
 - each cross-team Team Leader's latest report;
-- the needs that cross-team Team Leaders reported.
+- the needs that cross-team Team Leaders reported;
+- each cross-team Team Leader's application, frozen when its team first takes a part, as the lead's is at admission. A cross-team Assignment, post or delivery under a replaced application fails instead of going out under another identity (agent-dispatch::REQ-008/AC-04).
 
 The existing transition rules carry over to Assignments:
 

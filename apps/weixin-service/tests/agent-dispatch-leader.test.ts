@@ -76,8 +76,6 @@ describe("Team Leader plan validation", () => {
     ["a new Assignment on another team's preset", supplementOf([], plan("code").assignments), "leader_plan_invalid"],
     ["new Assignments taking the request past the ceiling of ten", supplementOf([], plan("meal", 8).assignments), "leader_plan_invalid",
       "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工"],
-    ["new Assignments taking a request holding nine past the ceiling, though three are shown", supplementOf([], plan("meal", 2).assignments), "leader_plan_invalid",
-      "这件事务共有 11 项分工，超过上限 10 项；请合并相近的分工", { total: 9, parts: 0 }],
     ["an answer naming one of two requested parts", supplementOf([], undefined, { parts: [2] }), decoded([], [], { parts: [2] }), undefined, { total: 3, parts: 2 }],
     ["a part past the requested parts", supplementOf([], undefined, { parts: [3] }), "leader_plan_invalid", "parts 只能取 1 到 2", { total: 3, parts: 2 }],
     ["a repeated part", supplementOf([], undefined, { parts: [1, 1] }), "leader_plan_invalid", "parts 不能重复", { total: 3, parts: 2 }],

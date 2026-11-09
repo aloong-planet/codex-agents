@@ -774,14 +774,17 @@ it.each([
 
 it.each([
   ["a team takes the part now", [{ part: 1, agentId: "bill", summary: "SAM_SUMMARY" }], "completed",
-    [`cli_sam: ${ANNOUNCED}`, `cli_bill: ${BILL_START}`, `cli_bill: ${BILL_CLOSED}`, "cli_alice: ALICE_CLOSING"]],
+    [`cli_sam: ${ANNOUNCED}`, `cli_bill: ${BILL_START}`, "cli_bill: 先写脚本", `cli_bill: ${BILL_CLOSED}`, "cli_alice: ALICE_CLOSING"]],
   ["still no team takes it", [{ part: 1, agentId: null, summary: "" }], "partially_unassigned",
     ["cli_alice: ALICE_CLOSING\n自动上架脚本仍没有团队承接，本次未处理；有团队可以承接后，可以明确要求重试。"]],
 ] as const)("asks the Coordinator again on a retry when %s, and redoes no completed Assignment", async (_case, second, outcome, retried) => {
   const decisions = [[{ part: 1, agentId: null, summary: "" }], second];
   const runs: string[] = [];
   const deliveries: Array<{ sender: string; message: string; id: string }> = [];
-  const dispatch = dispatchWith(directory(), teamLeaders(crossTurns()), { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; },
+  // The plan of a part placed on the retry carries a decision, posted under Bill.
+  const turns = crossTurns();
+  turns.bill!.plans = [{ ...billPlan, decisions: ["先写脚本"] }];
+  const dispatch = dispatchWith(directory(), teamLeaders(turns), { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; },
     close: () => {} }, deliveries, { assign: async () => structuredClone(decisions.shift()!) as never });
   await dispatch.start();
   dispatch.admit(event("one", "alice"));
@@ -970,10 +973,12 @@ const done: DispatchExecutor = { run: async () => ({ status: "completed", messag
 
 it.each([
   ["with two teams", [{ part: 1, agentId: "bill", summary: "S1" }, { part: 2, agentId: "jack", summary: "S2" }],
-    "应 Alice 请求：\n自动上架脚本交给 Bill 队\n商品拍照交给 Jack 队\n完成后经 Sam 交回 Alice 汇总。", [{ ...HELP, summary: "S1" }], 1],
+    "应 Alice 请求：\n自动上架脚本交给 Bill 队\n商品拍照交给 Jack 队\n完成后经 Sam 交回 Alice 汇总。", [{ ...HELP, summary: "S1" }], 1,
+    [`cli_bill: ${BILL_START}`, "cli_jack: 我安排执行者 5（能力档 1）处理：拍摄商品。完成后经 Sam 交回 Alice 汇总。"]],
   ["with one team, which plans once for both", [{ part: 1, agentId: "bill", summary: "S1" }, { part: 2, agentId: "bill", summary: "S2" }],
-    "应 Alice 请求：\n自动上架脚本交给 Bill 队\n商品拍照交给 Bill 队\n完成后经 Sam 交回 Alice 汇总。", [{ ...HELP, summary: "S1" }, { ...PHOTO, summary: "S2" }], 0],
-] as const)("places two parts %s, naming each in the lead's start and the Coordinator's announcement", async (_case, decisions, announced, billParts, jackPlans) => {
+    "应 Alice 请求：\n自动上架脚本交给 Bill 队\n商品拍照交给 Bill 队\n完成后经 Sam 交回 Alice 汇总。", [{ ...HELP, summary: "S1" }, { ...PHOTO, summary: "S2" }], 0,
+    [`cli_bill: ${BILL_START}`]],
+] as const)("places two parts %s, naming each in the lead's start and the Coordinator's announcement", async (_case, decisions, announced, billParts, jackPlans, starts) => {
   const turns = crossTurns();
   turns.alice!.plans = [{ ...leadPlan, help: [HELP, PHOTO] }];
   turns.jack = { plans: [{ assignments: [{ profileId: "executor-1", title: "拍摄商品", brief: "白底" }], decisions: [], help: [] }], closing: { message: "JACK_CLOSING" } };
@@ -985,6 +990,8 @@ it.each([
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
   expect(posts(deliveries).slice(0, 2)).toEqual(["cli_alice: 我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格\n" +
     "自动上架脚本需要其他团队支持，已请 Sam 协调。\n商品拍照需要其他团队支持，已请 Sam 协调。\n完成后会在本群汇报。", `cli_sam: ${announced}`]);
+  // Each cross-team Team Leader's start names only its own team's Assignments (agent-dispatch::US-003/AC-01).
+  expect(posts(deliveries).slice(2, 2 + starts.length)).toEqual(starts);
   // Each team plans once, for its own parts only (agent-dispatch::REQ-013/AC-03).
   expect(leaderTurns(leader, "plan", "bill").map(({ relay }) => relay)).toEqual([{ requestedBy: "Alice", parts: billParts }]);
   expect(leaderTurns(leader, "plan", "jack")).toHaveLength(jackPlans);
@@ -1014,8 +1021,8 @@ it("counts every team's Assignments against the ceiling when the lead's suppleme
 it("places a part the lead's supplement asks for, and runs what the other team's relayed answer adds, returning its need to the lead", async () => {
   const turns = crossTurns();
   turns.alice!.supplement = { affected: [], assignments: [], decisions: [], parts: [1], help: [PHOTO] };
-  turns.bill!.plans = [structuredClone(billPlan), { assignments: [{ profileId: "executor-1", title: "拍摄商品", brief: "白底" }], decisions: [], help: [] }];
-  turns.bill!.supplement = { affected: [], assignments: [{ profileId: "executor-2", title: "补充脚本说明", brief: "写清运行方式" }], decisions: [], parts: [],
+  turns.bill!.plans = [structuredClone(billPlan), { assignments: [{ profileId: "executor-1", title: "拍摄商品", brief: "白底" }], decisions: ["再拍照"], help: [] }];
+  turns.bill!.supplement = { affected: [], assignments: [{ profileId: "executor-2", title: "补充脚本说明", brief: "写清运行方式" }], decisions: ["先补说明"], parts: [],
     help: [{ title: "申请接口权限", brief: "上架接口需要授权" }] };
   const leader = teamLeaders(turns);
   const gate = deferred();
@@ -1033,6 +1040,8 @@ it("places a part the lead's supplement asks for, and runs what the other team's
   await vi.waitFor(() => expect(runs).toHaveLength(6), { timeout: 2000, interval: 10 });
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
   expect(runs.slice(4).sort()).toEqual(["拍摄商品", "补充脚本说明"].sort());
+  // Bill's decisions from his relayed answer and from his plan for the new part are both posted, under Bill (agent-dispatch::US-003/AC-03).
+  expect(posts(deliveries).filter((post) => ["cli_bill: 先补说明", "cli_bill: 再拍照"].includes(post))).toEqual(["cli_bill: 先补说明", "cli_bill: 再拍照"]);
   expect(posts(deliveries).filter((post) => post.startsWith("cli_sam: "))).toEqual([`cli_sam: ${ANNOUNCED}`, "cli_sam: 应 Alice 请求，商品拍照交给 Bill 队；完成后经 Sam 交回 Alice 汇总。"]);
   expect(leaderTurns(leader, "close", "alice").at(-1)?.relay).toEqual({ parts: [{ title: HELP.title, team: "Bill 团队", report: "BILL_CLOSING" },
     { title: PHOTO.title, team: "Bill 团队", report: "BILL_CLOSING" }], needs: [{ team: "Bill 团队", title: "申请接口权限", brief: "上架接口需要授权" }] });
@@ -1056,9 +1065,13 @@ it("captures a cross-team request with every post into the group memory, and eac
   dispatch.admit(event("one", "alice"));
   await vi.waitFor(() => expect(groupCaptures(captures)).toHaveLength(1), { timeout: 2000, interval: 10 });
   expect(groupCaptures(captures)[0]?.assistantText).toBe([LEAD_START, ANNOUNCED, BILL_START, BILL_CLOSED, "ALICE_CLOSING"].join("\n"));
-  expect(captures.filter(({ scope }) => scope.kind === "leader").map(({ scope, assistantText }) => ({ scope, assistantText }))).toEqual([
-    { scope: { kind: "leader", teamId: "bill" }, assistantText: "分工：执行者 3（能力档 1）编写脚本；执行者 4（能力档 2）核对接口\n收尾：BILL_CLOSING" },
-    { scope: { kind: "leader", teamId: "alice" }, assistantText: "分工：执行者 1（能力档 1）整理文案；执行者 2（能力档 2）核对价格\n收尾：ALICE_CLOSING" }]);
+  // A cross-team Team Leader remembers the Brief it got from the Coordinator: who asked and the part it took (agent-dispatch::REQ-012/AC-02).
+  expect(captures.filter(({ scope }) => scope.kind === "leader").map(({ scope, senderAccountId, userText, assistantText }) => ({ scope, senderAccountId, userText, assistantText })))
+    .toEqual([
+    { scope: { kind: "leader", teamId: "bill" }, senderAccountId: "cli_bill", userText: "请求：alice\n协调摘要：alice 的请求\n应 Alice 请求承接：自动上架脚本（SAM_SUMMARY）",
+      assistantText: "分工：执行者 3（能力档 1）编写脚本；执行者 4（能力档 2）核对接口\n收尾：BILL_CLOSING" },
+    { scope: { kind: "leader", teamId: "alice" }, senderAccountId: "cli_alice", userText: "请求：alice\n协调摘要：alice 的请求",
+      assistantText: "分工：执行者 1（能力档 1）整理文案；执行者 2（能力档 2）核对价格\n收尾：ALICE_CLOSING" }]);
 });
 
 it("keeps a cross-team team's frozen application when a later division adds to its work, so a replaced application sends nothing", async () => {

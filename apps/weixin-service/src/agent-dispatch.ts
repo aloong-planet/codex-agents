@@ -701,7 +701,7 @@ export class AgentDispatch {
         text = await this.options.leader.close(this.leaderInput(job, view, this.crossRelay(job, teamId)),
           own.map(({ title, executor, status, result }) => ({ title, executor, status, result: result ?? "" })));
       } catch { text = resultLines(own).join("\n"); }
-      await this.rememberDivision(job, view, own, text);
+      await this.rememberDivision(job, view, own, text, this.crossRelay(job, teamId));
       if (this.closing) return;
       job = this.job(requestId)!;
       if (job.cancelRequested) return;
@@ -729,12 +729,15 @@ export class AgentDispatch {
   }
 
   /** The Team Leader's own record of an attempt: the Brief it received, its division and its closing (agent-dispatch::REQ-012/AC-02). */
-  private async rememberDivision(job: DispatchJob, team: DispatchTeamView, assignments: readonly DispatchAssignment[], closing: string): Promise<void> {
+  private async rememberDivision(job: DispatchJob, team: DispatchTeamView, assignments: readonly DispatchAssignment[], closing: string, relay?: LeaderRelay): Promise<void> {
     const brief = this.brief(job);
+    // A cross-team Team Leader's Brief from the Coordinator also names who asked and the parts it took (agent-dispatch::REQ-012/AC-02).
+    const parts = relay?.requestedBy ? `\n应 ${relay.requestedBy} 请求承接：${relay.parts.map(({ title, summary }) => `${title}（${summary}）`).join("；")}` : "";
     try {
-      await this.options.memory.capture(team.memoryScope, { event: job.executionEvent ?? job.event, senderAccountId: job.senderAccountId,
+      await this.options.memory.capture(team.memoryScope, { event: job.executionEvent ?? job.event,
+        senderAccountId: team.leader.id === job.agentId ? job.senderAccountId : job.senders?.[team.leader.id] ?? job.senderAccountId,
         userId: `${job.id}:leader:user:${job.attempt}`,
-        userText: `请求：${brief.message}${brief.latest ? `\n最新要求：${brief.latest}` : ""}\n协调摘要：${brief.summary}`,
+        userText: `请求：${brief.message}${brief.latest ? `\n最新要求：${brief.latest}` : ""}\n协调摘要：${brief.summary}${parts}`,
         assistantId: `${job.id}:leader:assistant:${job.attempt}`,
         assistantText: `分工：${assignments.map((assignment) => `${executorLabel(assignment)}${assignment.title}`).join("；")}\n收尾：${closing}` });
     } catch { this.failure("dispatch_leader_memory_failed"); }
