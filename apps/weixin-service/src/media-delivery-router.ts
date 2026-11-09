@@ -4,7 +4,7 @@ type MediaRoute = { destination: MediaDeliveryDestination; delivery: MediaDelive
 
 /** Resolves both submission and recovery from the persisted run destination. */
 export class MediaDeliveryRouter implements MediaDeliveryPort {
-  private readonly routes: readonly MediaRoute[];
+  private readonly routes: MediaRoute[];
 
   constructor(routes: readonly MediaRoute[]) {
     if (routes.length === 0 || new Set(routes.map(({ destination }) => JSON.stringify([destination.accountId, destination.target, destination.senderAccountId]))).size !== routes.length) {
@@ -24,6 +24,13 @@ export class MediaDeliveryRouter implements MediaDeliveryPort {
   async reconcile(operationId: string, destination?: MediaDeliveryDestination): Promise<MediaDeliveryReconciliation> {
     const delivery = destination && this.resolve(destination);
     return delivery ? delivery.reconcile(operationId, destination) : { status: "unknown", errorCode: "media_destination_unavailable" };
+  }
+
+  /** Adds the route of a sending identity that appeared while the service runs, such as a team saved from the console. */
+  add(route: MediaRoute): void {
+    const key = (destination: MediaDeliveryDestination) => JSON.stringify([destination.accountId, destination.target, destination.senderAccountId]);
+    if (this.routes.some(({ destination }) => key(destination) === key(route.destination))) throw new Error("media_routes_invalid");
+    this.routes.push({ destination: { ...route.destination }, delivery: route.delivery });
   }
 
   private resolve(destination: MediaDeliveryDestination): MediaDeliveryPort | undefined {

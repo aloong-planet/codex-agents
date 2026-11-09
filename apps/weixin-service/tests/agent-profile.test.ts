@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { memoryAccountId, ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
+import { effectiveHostTools, memoryAccountId, ProfileToolHost, resolveAgentProfile } from "../src/agent-profile.js";
 import type { TeamDefinitions } from "../src/team-registry.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { WorkflowToolHost, type TrustedWorkflowTurn, type WorkflowToolRequest } from "../src/workflow-tool-host.js";
@@ -90,3 +90,50 @@ describe("profile tool host", () => {
     expect(new ProfileToolHost(host, catalog, PRODUCTION_TOOL_IDS.filter((id) => id !== "files.edit")).contractHash()).not.toBe(host.contractHash());
   });
 });
+
+// team-management::US-003/AC-02: the effective tools are the checked tools intersected with module permissions. The expected
+// tables come from the gates themselves, enumerated in docs/.workings/agent-teams/ticket-11-logs/tool-permission-gates.log:
+// find, grep, read and send_files need read; write needs write; edit needs read and write on one scope; media.send and the
+// schedule tools have no module gate.
+describe("effective host tools", () => {
+  const READ = ["files.find", "files.grep", "files.read", "weixin.send_files"];
+  const UNGATED = ["media.send", "schedules.create", "schedules.delete", "schedules.disable", "schedules.edit", "schedules.enable", "schedules.inspect",
+    "schedules.list", "schedules.read_text", "schedules.retry_news", "schedules.run_now"];
+  it.each([
+    ["no saved scope", [], UNGATED, [...READ, "files.write", "files.edit"]],
+    ["a read-only scope", [{ read: true, write: false }], [...READ, ...UNGATED], ["files.write", "files.edit"]],
+    ["a write-only scope", [{ read: false, write: true }], ["files.write", ...UNGATED], [...READ, "files.edit"]],
+    ["a read-only scope and a write-only scope", [{ read: true, write: false }, { read: false, write: true }], [...READ, "files.write", ...UNGATED], ["files.edit"]],
+    ["a read-and-write scope", [{ read: true, write: true }], PRODUCTION_TOOL_IDS, []],
+  ] as const)("with %s offers exactly the granted checked tools", (_case, scopes, offeredTools, ungranted) => {
+    const result = effectiveHostTools(PRODUCTION_TOOL_IDS, scopes);
+    expect([[...result.offered].sort(), [...result.ungranted].sort()]).toEqual([[...offeredTools].sort(), [...ungranted].sort()]);
+  });
+
+  it("offers nothing that is not checked, and treats a tool with no known gate as not granted", () => {
+    expect(effectiveHostTools(["files.read", "unknown.tool"], [{ read: true, write: true }])).toEqual({ offered: ["files.read"], ungranted: ["unknown.tool"] });
+  });
+});
+
+// agent-dispatch::REQ-017/AC-02: a host tool removed from a profile's allowlist is refused at the next call, also in a request
+// admitted before the removal, and the refused call is audited.
+describe("revocation at the profile tool boundary", () => {
+  it("refuses a call once its tool leaves the profile's current allowlist, and every call once the profile is gone", async () => {
+    const { catalog, host, reached } = sharedHost();
+    let current: readonly string[] | undefined = ["files.find", "files.read"];
+    const refused: string[] = [];
+    const tools = new ProfileToolHost(host, catalog, ["files.find", "files.read"], { current: () => current, refused: (tool) => refused.push(tool) });
+    const binding = host.bind("revocation-thread", trusted);
+    const call = (tool: string, args: unknown) => tools.execute(tool, args, { threadId: "revocation-thread", turnId: "turn", namespace: "files" });
+    const code = (result: Awaited<ReturnType<typeof call>>) => result.success === false ? JSON.parse(result.contentItems[0]!.text).error.code : "reached";
+    try {
+      expect(code(await call("find", { kind: "file", limit: 1 }))).toBe("reached");
+      current = ["files.find"];
+      expect(code(await call("read", { fileRef: "file-ref" }))).toBe("agent_profile_tool_refused");
+      current = undefined;
+      expect(code(await call("find", { kind: "file", limit: 1 }))).toBe("agent_profile_tool_refused");
+      expect([reached, refused]).toEqual([["files.find"], ["files.read", "files.find"]]);
+    } finally { await binding.release(); }
+  });
+});
+

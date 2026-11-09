@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { ConsoleRequestContext } from "./console-access.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
+import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team-management.js";
 
 /**
  * The console's pages and APIs, mounted by both local servers (the settings demo server and the Feishu status
@@ -15,15 +16,21 @@ import { McpConfigError } from "./mcp-catalog-rules.js";
  * - `/api/mcp/...`: the catalog API, including `/api/mcp/import/check` and `/api/mcp/import` for an `mcpServers`
  *   document. No response carries a secret value (mcp-catalog::REQ-001); every change is audited with the authorized
  *   browser (agent-console::REQ-004).
+ * - `/console/teams` and its assets: the 团队管理 page (team-management spec).
+ * - `/api/teams/...`: team management. Without Feishu dispatch the view says so, with where dispatch would be enabled, and saves are refused.
+ *   No response carries an App Secret (team-management::CON-001); every change is audited.
  */
 const CONSOLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "console");
 const MAX_BODY_BYTES = 64 * 1024;
 const ASSETS: Record<string, { file: string; type: string }> = {
   "/console/mcp": { file: "mcp.html", type: "text/html; charset=utf-8" },
+  "/console/teams": { file: "team.html", type: "text/html; charset=utf-8" },
   "/console/console.css": { file: "console.css", type: "text/css; charset=utf-8" },
   "/console/console-shell.js": { file: "console-shell.js", type: "text/javascript; charset=utf-8" },
   "/console/mcp.css": { file: "mcp.css", type: "text/css; charset=utf-8" },
   "/console/mcp.js": { file: "mcp.js", type: "text/javascript; charset=utf-8" },
+  "/console/team.css": { file: "team.css", type: "text/css; charset=utf-8" },
+  "/console/team.js": { file: "team.js", type: "text/javascript; charset=utf-8" },
 };
 
 export type ConsoleRoutes = {
@@ -76,8 +83,48 @@ function object(value: unknown, what: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-export function createConsoleRoutes(options: { catalog: McpCatalog }): ConsoleRoutes {
-  const { catalog } = options;
+/** Registry refusals the owner can act on, by code. */
+const TEAM_REFUSALS: Record<string, [number, string]> = {
+  team_registry_version_stale: [409, "这个团队已在其他页面保存过新版本；为避免覆盖，本次保存没有生效。"],
+  team_registry_coordinator_fixed: [400, "Sam 只能修改职责与提示词"],
+  team_registry_team_unknown: [404, "团队不存在"],
+  team_registry_group_unknown: [400, "所属群不在派单群里"],
+};
+
+/** Where dispatch would be enabled, for the team page's empty state: the channel configuration file the service loaded, and whether Feishu is paired. */
+export type DispatchSetup = Readonly<{ configurationPath: string; feishu: boolean }>;
+
+export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchSetup?: DispatchSetup }): ConsoleRoutes {
+  const { catalog, teams, dispatchSetup } = options;
+
+  async function teamsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
+    const actor = context.browser ? { browser: context.browser } : {};
+    if (pathname === "/api/teams" && req.method === "GET") {
+      json(res, 200, teams ? await teams.view() : { configured: false, ...dispatchSetup });
+      return;
+    }
+    if (req.method !== "POST") throw new RequestError(404, "未找到");
+    const input = await body(req);
+    if (!teams) throw new RequestError(409, "尚未配置派单群");
+    try {
+      if (pathname === "/api/teams/save") {
+        const teamId = teams.saveTeam(input.team, { basedOn: input.basedOn, actor });
+        json(res, 200, { teamId, view: await teams.view() });
+      } else if (pathname === "/api/teams/coordinator") {
+        teams.saveCoordinator(input.coordinator, { basedOn: input.basedOn, actor });
+        json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/recheck") {
+        await teams.recheck(input.teamId, actor);
+        json(res, 200, { view: await teams.view() });
+      } else throw new RequestError(404, "未找到");
+    } catch (error) {
+      if (error instanceof TeamDefinitionError) { json(res, 400, { error: "无法保存", reasons: error.reasons }); return; }
+      if (error instanceof TeamInputError) throw new RequestError(400, error.message);
+      const refusal = error instanceof Error ? TEAM_REFUSALS[error.message] : undefined;
+      if (refusal) { json(res, refusal[0], { error: refusal[1], ...(refusal[0] === 409 ? { stale: true } : {}) }); return; }
+      throw error;
+    }
+  }
 
   async function mcpApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
     const actor = context.browser ? { browser: context.browser } : {};
@@ -148,14 +195,15 @@ export function createConsoleRoutes(options: { catalog: McpCatalog }): ConsoleRo
         res.end(req.method === "HEAD" ? undefined : fs.readFileSync(path.join(CONSOLE_DIR, asset.file)));
         return true;
       }
-      if (url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
+      const team = url.pathname === "/api/teams" || url.pathname.startsWith("/api/teams/");
+      if (!team && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
       try {
-        await mcpApi(req, res, url.pathname, context);
+        await (team ? teamsApi : mcpApi)(req, res, url.pathname, context);
       } catch (error) {
         if (error instanceof RequestError) json(res, error.status, { error: error.message });
         else if (error instanceof McpConfigError) json(res, 400, { error: error.message });
         else {
-          process.stderr.write(`console_mcp_request_failed: ${error instanceof Error ? error.name : "error"}\n`);
+          process.stderr.write(`${team ? "console_team_request_failed" : "console_mcp_request_failed"}: ${error instanceof Error ? error.name : "error"}\n`);
           json(res, 500, { error: "请求失败" });
         }
       }

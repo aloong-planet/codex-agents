@@ -1,13 +1,17 @@
 # Team management
 
-> Status: specified. The team registry is implemented and seeded from the local configuration; the console pages are not implemented.
+> Status: the team registry and the team management page are implemented locally for existing applications. Teams are edited, bound to groups, onboarded and announced from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: teams, Team Leader applications and responsibilities are still edited in the restart-applied local configuration, which must contain the four default roles and which the registry imports at each start. Every dispatch group still shares the same roster.
+> Pending: the page onboards only existing applications.
+> - It shows 接入方式 as 「已有应用，手动填写」, with two steps, the credential check and group joining, and offers 「重新检查」.
+> - Not built yet: QR creation and the test message (team-management::US-002/AC-01, and the QR steps of US-002/AC-03 and AC-04); MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the links to the team overview and to skill management (US-001/AC-04).
+> - Unchecking a group stops the team taking work there and announces its departure; the team then stays draining in that group.
+> Pending: without Feishu dispatch, the page says where dispatch is enabled. With Feishu paired, it names the channel configuration file the service loaded and says to add `dispatch` under `feishu` and restart. Without Feishu, it says to stop the service and run `pnpm feishu:pair` first. Choosing dispatch groups in the console replaces this text.
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
 
 ## Problem Statement
 
-Adding, changing or removing an Agent Team means editing local files and restarting the service, and every dispatch group gets the same four roles. The owner wants to build a group's roster from the console, onboard a new Team Leader's Feishu identity without the developer console, and give each team its own instructions, tools, MCP servers and skills. The Coordinator and the other Team Leaders must follow those changes without interrupting work in progress.
+Adding, changing or removing an Agent Team meant editing local files and restarting the service, and every dispatch group got the same four roles. The owner wants to build a group's roster from the console, onboard a new Team Leader's Feishu identity without the developer console, and give each team its own instructions, tools, MCP servers and skills. The Coordinator and the other Team Leaders must follow those changes without interrupting work in progress.
 
 ## Solution
 
@@ -71,7 +75,12 @@ As the owner, I want to take a team out of a group, or delete it, without cancel
 
 ### team-management::REQ-002 Valid team definitions (direct acceptance)
 
-A save is refused when a team lacks a leader name or team name, has no Executor profile, has two profiles with the same name, or uses a Feishu application that the Coordinator or another team already uses; the save bar then shows 「无法保存」 with the reasons. A save based on an outdated version of the team is also refused; the save action becomes 「重新载入」, and the owner reloads before editing again.
+A save is refused, and the save bar shows 「无法保存」 with the reasons, when a team:
+- lacks a leader name or a team name;
+- has no Executor profile, a profile without a name, or two profiles with the same name;
+- has an App ID that is not `cli_` followed by 16 hexadecimal characters;
+- uses a Feishu application that the Coordinator or another team already uses;
+- uses Penny's application (「该飞书应用已用于 Penny，不能用于团队」, [ADR-0025](../adr/0025-isolate-private-financial-authority.md)). A save based on an outdated version of the team is also refused; the save action becomes 「重新载入」, and the owner reloads before editing again.
 
 ### team-management::REQ-003 When a team accepts work in a group (direct acceptance)
 
@@ -115,6 +124,15 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 | Owner tries to delete or unbind Sam | No such action under team-management::REQ-001/AC-01 |
 | Service restarts during a drain or onboarding | Drain and onboarding states resume from the stored registry; no step reruns without its recorded outcome |
 | Response or log could reveal an App Secret | Never returned or logged under team-management::CON-001 |
+| Owner enters Penny's application for a team | Save refused under team-management::REQ-002 |
+| Owner unchecks a group where the team is still onboarding | The binding is dropped at the save, with no announcement (Implementation Decisions: console saves) |
+| Owner replaces a team's secret | The credential check runs again; joined groups keep their outcomes (Implementation Decisions: onboarding) |
+| Owner replaces an accepting team's secret with one that fails the check, or any Team Leader's application stops being able to post | The team keeps accepting work there: a check outcome never changes routing by itself. The owner sees step 1 需处理 「凭证校验没有通过」. The team's requests fail at their receipt, and the failure report goes through the same application, so the requester sees nothing in the group: no other identity may post ([agent-dispatch::REQ-008/AC-04](agent-dispatch.md)) |
+| Owner moves a team to another application, and later back | Each change starts onboarding again in the team's groups; the save succeeds and the team posts with the application it has |
+| A save's onboarding run and 「重新检查」 overlap | They run one after the other; no step is done twice (Implementation Decisions: onboarding) |
+| The platform's reply cannot be read, such as a gateway's error page | The step needs action as unreachable, never as wrong credentials or a refused join |
+| A group's name cannot be read | The page shows the chat ID; the name is asked for again after 10 minutes, or at once on 「重新检查」 or a save of a team in that group |
+| Feishu dispatch is not configured | The 团队管理 entry stays; the page shows only where dispatch is enabled, with no list, editor or 新增团队 |
 
 ## Implementation Decisions
 
@@ -132,7 +150,46 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 
 The Team Directory and the Coordinator's roster are derived from bindings in the accepting state. Announcements are durable outbound messages with their own delivery state.
 
-**Onboarding.** QR creation uses the pinned Feishu SDK's application registration in create-only mode. Configuration, publishing, credential checks, bot information, group joining and the test message use platform APIs. Each step records its outcome so that a restart resumes without repeating completed steps.
+**Console saves.** The console saves one team at a time. A save carries the team's editable fields, its checked groups and the definitions version the page was based on. It is refused as stale only when that team's own editable fields changed since then, so another team's save or an onboarding step never refuses it. The registry derives binding states from the checked groups:
+- a kept group keeps its state;
+- a newly checked group starts onboarding;
+- an unchecked accepting group drains, and the Coordinator announces the departure;
+- an unchecked onboarding group is dropped;
+- a replaced App ID starts onboarding again in every group the team is not draining from.
+
+A new team's ID is generated at its first save. Sam's save changes only its responsibility and instructions. An App Secret is written beside the versions and never returned.
+
+**Onboarding.** QR creation uses the pinned Feishu SDK's application registration in create-only mode. Configuration, publishing, credential checks, bot information, group joining and the test message use platform APIs. Each step records its outcome so that a restart resumes without repeating completed steps. For an existing application:
+- **Credential check.** It gets a tenant token with the App ID and secret, then reads the bot information. An enabled bot (activate_status 2) completes the step. An application not yet published or enabled (20069), or a bot not yet enabled, awaits review. A refused secret, or no stored secret, needs action. A reply that cannot be read counts as unreachable and needs action.
+- **Group joining**, per group. The Coordinator adds the bot by its App ID, then the team's own application confirms it is in the group. A group where only the owner and admins add members (232017), a join awaiting approval, or a bot not in the group afterwards needs action with that reason.
+- **Outcomes** are stored per application, and per group for joining. A done step never runs again, except the credential check after a new secret.
+- **When checks run:** after a save that changes the credentials or adds a group, on 「重新检查」, and at startup for teams still onboarding. Runs take place one at a time.
+- **Acceptance.** A binding starts accepting once both its steps are done. A later failed check never moves an accepting binding out of accepting.
+
+**Announcements.** The Coordinator posts once per binding change, under its own application:
+- joining: 「<负责人>（<团队名>）已加入本群，负责：<职责>」;
+- leaving: 「<负责人>（<团队名>）已离开本群，不再接新的事务；进行中的事务会做完。」.
+
+Each announcement keeps its delivery state: accepted, failed or unknown. A send cut off by a restart is unknown, and nothing is resent automatically.
+
+**Executor profiles and effective tools.** A profile's 执行者称呼 names its Executors `<noun> <n>`; the default is 执行者. The page shows the effective tools: the checked tools that module permissions grant. Each host tool's gate decides this:
+- `files.find`, `files.grep`, `files.read` and `weixin.send_files` need read on a saved scope;
+- `files.write` needs write;
+- `files.edit` needs read and write on one scope;
+- `media.send` and the schedule tools need none.
+
+A checked tool whose gate is not granted carries 「未授权」. Removing a tool applies at the next call of a running request ([agent-dispatch::REQ-017/AC-02](agent-dispatch.md)), and every refused call is audited.
+
+**Group names** come from the Coordinator's application, with the chat ID as the fallback. A lookup that gives no name is not repeated for 10 minutes, unless a team in that group is saved or rechecked. Concurrent page views share one lookup.
+
+**Audit.** These events are recorded with the authorized browser or the service, never with a secret:
+- `team_changed`, naming the fields;
+- `team_secret_written`;
+- `team_binding_changed`, with the before and after states;
+- `team_profile_saved` and `team_profile_removed`;
+- `team_onboarding_checked`, with each step's outcome;
+- `team_binding_accepting`;
+- `host_tool_refused`.
 
 **Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task.
 

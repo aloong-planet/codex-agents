@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>团队管理</title>
+<link rel="stylesheet" href="/console/console.css">
+<link rel="stylesheet" href="/console/team.css">
+</head>
+<body>
+<div class="acv2-app">
+<header class="acv2-header"><div class="acv2-brand">Agent 工作台 <small>工作空间 / 团队管理</small></div><div class="acv2-local"><span class="acv2-dot"></span>本机工作空间</div></header>
+<main class="acv2-main">
+<div class="acv2-heading"><div class="acv-tip-row"><h1>团队管理</h1><span data-console-tip="定义团队并绑定到群。
+· 保存后新事务使用新配置，进行中的事务保持开始时的配置。
+· 收回能力（取消勾选工具）立即生效，进行中的执行者下一次调用就会被拒绝。"></span></div><div class="atm-heading-actions"><a class="acv2-button" href="/console/mcp">MCP 管理</a><button class="acv2-button acv2-primary" type="button" id="atm-new" hidden>新增团队</button></div></div>
+<div class="acv2-workspace"><div class="atm-view" id="atm-view"></div></div>
+</main></div>
+<script src="/console/console-shell.js"></script>
+<script src="/console/team.js"></script>
+</body>
+</html>

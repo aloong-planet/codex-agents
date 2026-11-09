@@ -48,4 +48,16 @@ describe("source-bound media routing", () => {
     expect(left.sendImage).not.toHaveBeenCalled(); expect(right.sendImage).not.toHaveBeenCalled();
   });
 
+
+  // A team saved while the service runs sends media with its own application (ticket 11, decision D5).
+  it("routes a sending identity added after construction, and refuses a second route for the same destination", async () => {
+    const left = port(), added = port();
+    const router = new MediaDeliveryRouter([{ destination: feishu, delivery: left }]);
+    const team = { ...feishu, senderAccountId: "cli_daisy" };
+    await expect(router.sendFile({ ...team, filePath: "/snapshot/a", operationId: "before" })).resolves.toEqual({ ok: false, reason: "unavailable", acceptedSegments: 0 });
+    router.add({ destination: team, delivery: added });
+    await router.sendFile({ ...team, filePath: "/snapshot/a", operationId: "after" });
+    expect([added.sendFile.mock.calls.map(([input]) => input.operationId), left.sendFile.mock.calls.length]).toEqual([["after"], 0]);
+    expect(() => router.add({ destination: team, delivery: left })).toThrow(/^media_routes_invalid$/);
+  });
 });
