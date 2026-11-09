@@ -111,3 +111,23 @@ it("places parts through a tool-free constrained Coordinator turn and releases i
   for (const fragment of ["你是 Sam", "协调规则", "自动上架脚本", "只交付代码，不运行", '"id":"jack"']) expect(external.runTurn.mock.calls[0]![1]).toContain(fragment);
   expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
 });
+
+it.each([
+  { name: "an oversized valid answer", response: { owner: "model_owned", finalText: JSON.stringify(placed([1, "jack", "脚本"], [2, null, ""])) + " ".repeat(16_001) },
+    error: "dispatch_cross_team_invalid" },
+  { name: "malformed JSON", response: { owner: "model_owned", finalText: "{broken" }, error: SyntaxError },
+  { name: "a workflow-owned result", response: { owner: "workflow_owned", receipt: { outcome: "accepted", reply: "not a decision" } }, error: "dispatch_cross_team_invalid" },
+] satisfies Array<{ name: string; response: AppServerTurnResult; error: string | typeof SyntaxError }>)("refuses $name in the Coordinator's cross-team turn and releases its thread", async ({ response, error }) => {
+  const external = runtime(response);
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
+  await expect(classifier.assign(crossTeam)).rejects.toThrow(error);
+  expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
+});
+
+it("keeps a model failure of the Coordinator's cross-team turn and releases its thread", async () => {
+  const external = runtime({ owner: "model_owned", finalText: "{}" });
+  external.runTurn.mockRejectedValue(new Error("model_unavailable"));
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
+  await expect(classifier.assign(crossTeam)).rejects.toThrow("model_unavailable");
+  expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
+});

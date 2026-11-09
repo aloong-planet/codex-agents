@@ -882,3 +882,33 @@ it("places a part with another team through main, whose Executor sends its file 
     expect(curated.fixtureMemoryCurations!.find(({ accountId }) => accountId === jackProfile)!.turns).toEqual([expect.objectContaining({ user: "编写上架脚本\n保存为 listing.txt 并发到本群" })]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
+
+// agent-dispatch::REQ-010/AC-01 and REQ-008/AC-01 through main: a retried cross-team Assignment whose workflow run already exists
+// reports that run under its own team instead of running again, which reaches main's check of the run's sending application.
+it("reports a retried cross-team Assignment's existing workflow run instead of running it again", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-cross-team-retry-")), business = mkdtempSync(join(tmpdir(), "dispatch-cross-team-retry-files-"));
+  let running: Running | undefined;
+  const texts = (state: Awaited<ReturnType<Running["state"]>>, team: string) => state.agentFixtureOutboxes?.[team]?.text.map(({ message }) => message) ?? [];
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    // Jack's application refuses the file, so the send run fails after it exists, and so does Jack's Assignment.
+    await running.post("/api/fixture/feishu/inbound", { applicationControl: { agentId: "jack", mediaOutcomes: ["rejected"] } });
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_cross_retry", "商品 D 要上架：写详情，再弄个脚本以后自动上架", decision("alice", "商品 D 上架"), {
+      leaderPlan: { assignments: [{ profileId: "executor-1", title: "撰写商品详情", brief: "九成新" }], decisions: [], help: [{ title: "自动上架脚本", brief: "只交付代码，不运行" }] },
+      crossTeamDecision: { assignments: [{ part: 1, agentId: "jack", summary: "编写自动上架脚本" }] },
+      teamTurns: { jack: { leaderPlan: { assignments: [{ profileId: "executor-1", title: "编写上架脚本", brief: "保存为 listing.txt 并发到本群" }], decisions: [], help: [] } } },
+      executorTurns: { 撰写商品详情: { modelReply: executorReply("详情已写好。", "详情") }, 编写上架脚本: { modelToolCalls: writeAndSend("listing.txt") } } }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "partially_failed" && texts(state, "jack").length === 2);
+    const requestId = failed.agentDispatch!.jobs[0]!.id, turns = failed.fixtureModelRequests!.length;
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_cross_retry_again", "重试", control(requestId, "retry")));
+    const retried = await running.until((state) => texts(state, "jack").length === 4 && state.agentDispatch?.jobs[0]?.assignments.some(({ attempt }) => attempt === 1) === true &&
+      ["partially_failed", "completed"].includes(state.agentDispatch.jobs[0]!.status));
+    console.log(JSON.stringify({ kind: "dispatch_cross_team_retry", commands: ["商品 D 要上架：写详情，再弄个脚本以后自动上架", "重试"], jobs: retried.agentDispatch, outboxes: retried.agentFixtureOutboxes }));
+    expect(retried.fixtureModelRequests).toHaveLength(turns);
+    expect(texts(retried, "jack")[2]).toBe("我安排执行者 2（能力档 1）处理：编写上架脚本。完成后经 Sam 交回 Alice 汇总。");
+    // The closing reports the run's own result, under Jack's identity; a failed identity check would name a changed authority instead.
+    expect(texts(retried, "jack")[3]).not.toContain("权限或可用上下文发生变化");
+    expect(texts(retried, "jack")[3]).toBe(texts(failed, "jack")[1]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);

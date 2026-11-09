@@ -54,6 +54,7 @@ describe("Team Leader plan validation", () => {
     ["eleven Assignments, over the ceiling", plan("trip", 11)],
     ["four help items", { ...plan("trip"), help: ["一", "二", "三", "四"].map((title) => ({ title, brief: "说明" })) }],
     ["a help item with an empty title", { ...plan("trip"), help: [{ title: "  ", brief: "说明" }] }],
+    ["a help item with an empty brief", { ...plan("trip"), help: [{ title: "拍照", brief: "  " }] }],
   ])("refuses %s", (_case, value) => {
     expect(() => parseLeaderPlan(value, bill)).toThrow(expect.objectContaining({ code: "leader_plan_invalid" }));
   });
