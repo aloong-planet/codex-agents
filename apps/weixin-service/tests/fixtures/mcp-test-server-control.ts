@@ -1,5 +1,6 @@
 // Controls for the real stdio MCP test server (mcp-test-server.mjs), and the secret sentinels, shared by the catalog's
 // unit, HTTP and browser tests. Each case gets its own tools file, start marker and fail flag in a temporary directory.
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,26 @@ export function writeTools(file: string, tools: unknown[]): void {
 export function starts(files: TestServerFiles): Array<{ pid: number; argv: string[]; cwd: string; secretToken: string | null }> {
   if (!fs.existsSync(files.marker)) return [];
   return fs.readFileSync(files.marker, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+/**
+ * The processes still running whose command line names `directory`, such as the test servers of a case that keeps
+ * their files there. Unlike `starts`, this also sees a server that was spawned but has not yet written its marker.
+ */
+export function runningPrograms(directory: string): number[] {
+  return execFileSync("ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line.includes(directory))
+    .map((line) => Number.parseInt(line.trim(), 10));
+}
+
+/** Kills what `runningPrograms` finds, so that a case that fails on a leak leaves nothing behind; returns the pids. */
+export function stopRunningPrograms(directory: string): number[] {
+  const pids = runningPrograms(directory);
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+  }
+  return pids;
 }
 
 export function isAlive(pid: number): boolean {
