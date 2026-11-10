@@ -6,6 +6,8 @@ This page tests whether the owner can do the following:
 
 - understand a collapsible hierarchy in which leaders divide each request into assignments, and each assignment is performed by one task-created executor;
 - follow what each leader and Sam report to the group, including cross-team assignments;
+- read the group posts of cross-team work: the lead leader's start line for a part it asked Sam to place, Sam's assignment, the cross-team leader's start and closing, and the lead leader's closing that summarizes the reports Sam relayed;
+- tell a request in which no team took a requested part (部分未落实) from one that failed, and follow its retry;
 - create a private request through a leader;
 - continue an owned group request without exposing the private conversation to the group.
 
@@ -46,7 +48,7 @@ The heading's 团队管理 button opens `prototype-team-management.html`. The wo
 
 ### Request records
 
-Each record row is one request. The business-state filter offers 执行中, 待确认, 已完成, 部分失败 and 已取消. Its two-row summary shows:
+Each record row is one request. The business-state filter offers 执行中, 待确认, 已完成, 部分失败, 部分未落实 and 已取消. Its two-row summary shows:
 
 - the title and the disclosure action;
 - the lead leader with the assignment count, the business state, report delivery and the time.
@@ -54,13 +56,33 @@ Each record row is one request. The business-state filter offers 执行中, 待�
 An expanded record shows these parts, in order:
 
 1. The result.
-2. A path line: the route from Sam to the lead leader, each cross-team assignment from Sam on the lead leader's request, and the identities that report.
+2. A path line: the route from Sam to the lead leader, each cross-team assignment from Sam on the lead leader's request, each part no team took (「未承接：<part> · 没有团队承接」), and the identities that report.
 3. The assignment list. Each entry shows the executor, the responsible leader, the capability profile, a cross-team marker, the status and the result.
 4. A collapsible group-report timeline, using the same expandable timeline pattern as `prototype-overview.html`. It lists who posted what, and whether the platform accepted it. A post keeps its line breaks: a post with several items, such as a start message naming several Executors, a closing covering several Assignments or a cancel report, shows each item on its own line, as the group receives it. The cancelled group sample R-2394 shows the cancel report. In a start message, an Assignment that waits for others names them after its title, as 「（等 2 完成后开始）」; it gets no start post of its own when it starts later (sample R-2392).
 
-   Delivery: ticket 07 of agent-teams delivers the one-item-per-line posts. Ticket 31 delivers dependencies between Assignments: the 「（等 … 完成后开始）」 annotation and the 未开始（前项失败） state of sample R-2392.
+   Delivery: ticket 07 of agent-teams delivered the one-item-per-line posts, and ticket 31 the dependencies between Assignments: the 「（等 … 完成后开始）」 annotation and the 未开始（前项失败） state of sample R-2392. The service numbers prerequisites by their position among the team's own Assignments, which in this single-team sample is their position in the request. Ticket 08 delivers the cross-team posts below.
    - Leaders post the start message naming who does which assignment, team-internal decisions, progress, and the closing message.
    - Sam posts cross-team assignments.
+   - **Cross-team posts.** Every cross-team part is planned before any start message goes out, and the posts follow in this order:
+     - **The lead leader's start message.** It gives one line 「<part>需要其他团队支持，已请 Sam 协调。」 for each part that Sam placed with another team, before 「完成后会在本群汇报。」. The message then has several items, so it uses the one-item-per-line form.
+     - **Sam's assignment.** For one part it reads 「应 <lead> 请求，<part>交给 <leader> 队；完成后经 Sam 交回 <lead> 汇总。」. When parts go to two teams, one post gives each part on its own line after 「应 <lead> 请求：」 and ends with 「完成后经 Sam 交回 <lead> 汇总。」.
+     - **The cross-team leader's start message.** It uses the leaders' start format on that leader's bot, with 「完成后经 Sam 交回 <lead> 汇总。」 as its last line.
+     - **The cross-team leader's closing.** It is posted as soon as all of that team's assignments in the request have ended. It is that leader's own closing, one line per assignment with any failure named, followed by 「结果经 Sam 交回 <lead> 汇总。」. When that leader's closing turn fails, the post gives each assignment's own result line, in the form the lead's fallback closing uses, followed by the same last line.
+     - **The cross-team leader's other posts.** Its failure, pending-choice and interruption posts keep the leaders' wording on its own bot.
+     - **The lead leader's closing.** It summarizes its own assignments and each part's report, which Sam relays, never the other team's executor results.
+     - **No team found.** When Sam finds no team for a part, the lead's start omits that part's line and Sam posts nothing. The lead's closing ends with the line 「<part>没有团队承接，本次未处理；有团队可以承接后，可以明确要求重试。」; after a retry in which still no team takes it, the line reads 「<part>仍没有团队承接，…」.
+     - **部分未落实.** A request is 部分未落实 when every assignment that was not cancelled completed and at least one requested part had no team. A failed or interrupted assignment, or one that did not start because a prerequisite failed (未开始（前项失败）), keeps 部分失败 or 失败, and the closing still names the parts not taken. A request is never wholly 未落实, because a lead's plan always holds at least one assignment of its own. The badge is an outlined warning badge, apart from the filled 待确认 and the red 部分失败.
+     - **Retry.** An explicit retry reruns the failed and interrupted assignments and asks Sam again for every part no team took. When a team takes one now, Sam posts its assignment and that team posts its start and closing; the lead posts no new start, because none of its own assignments reruns. Completed assignments are not redone.
+   - The cross-team samples:
+     - R-2405 (running): one part, with a cross-team start naming two assignments;
+     - R-2395 (completed): parts for two teams, both cross-team closings and the lead closing;
+     - R-2393 (部分失败): a cross-team failure post, and a cross-team closing that names the failure;
+     - R-2390 (running): a pending choice on the cross-team bot;
+     - R-2389 (部分失败): an interruption post on the cross-team bot, and a fallback closing after a failed closing turn;
+     - R-2386 (部分未落实): no team found;
+     - R-2387 (部分失败): a failure and a part no team took, both named in the closing;
+     - R-2385 (completed): no team at first; after a retry Jack's team takes the part;
+     - R-2383 (部分未落实): no team at first, and still none after a retry.
    - Private requests have no group-report timeline.
    Assignment states are 执行中, 待确认, 已完成, 失败, 已中断, 已取消 and 未开始（前项失败）, the last for an Assignment whose prerequisite failed; it never started, so no Executor ended. A failed Assignment shows its cause; an interrupted one says it was reported rather than replayed. The sample request R-2391 has one completed, one failed and one interrupted Assignment: it is 部分失败, its closing report names both problems, and its result says a retry redoes only those two.
 5. The original message.
@@ -119,13 +141,13 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
 - **Complete current assignment.** This control is enabled when a running assignment is selected, either through its executor, an expanded request record, or a chat's associated request. It simulates one executor result:
   - the executor leaves the tree;
   - its result stays in the request's records;
-  - a cross-team assignment adds the other leader's closing report;
-  - the last assignment completes the request and adds the lead leader's closing report.
+  - completing the last of a cross-team leader's assignments adds that leader's closing for its part;
+  - the last assignment completes the request and adds the lead leader's closing report, which names each cross-team part's relayed result.
 
   In the product, actual execution results drive these transitions.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
-- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the ten sample requests. These include two partially failed group requests (R-2391, and R-2392 with an Assignment that did not start), one cancelled group request (R-2394), and two private requests: one running and one partially failed.
+- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the eighteen sample requests. These include five partially failed group requests (R-2391; R-2392, with an Assignment that did not start; the cross-team R-2393 and R-2389; and R-2387, which also has a part no team took), two partially unfulfilled ones (R-2386 and R-2383), one cancelled group request (R-2394), the cross-team samples listed under the request records, and two private requests: one running and one partially failed.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.
   - Sam's leader selection demonstrates the coordination handoff.
@@ -155,3 +177,10 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
 ## Invalidated conclusions
 
 - The over-limit confirmation no longer holds, in the private conversation or in the group: a request waits for no confirmation of its Assignments or teams. A plan over ten Assignments is merged by its Team Leader in one correction turn and otherwise fails (agent-dispatch::REQ-011/AC-02). Copies of this page that show a 「超出分工上限」 card or Sam's over-limit question are superseded.
+- The cross-team posts of sample R-2405 in earlier copies of this page are superseded. They had:
+  - the lead's line 「自动上架脚本需要技术支持，已请 Sam 协调。」;
+  - Sam's 「…脚本完成后经 Sam 交回 Alice 汇总。」;
+  - Jack's one-sentence start 「脚本执行者 53 编写上架脚本草稿，只交付代码，不运行。」;
+  - the one-sentence cross-team closing 「<title>已完成，结果经 Sam 交回 <lead> 汇总。」, which the completion demo added.
+
+  The cross-team posts under the request records, with R-2405 and the other cross-team samples, now define them.
