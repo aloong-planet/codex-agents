@@ -210,6 +210,8 @@ test.describe("with Feishu dispatch", () => {
 
 // The dispatch-group form (agent-console::US-009). The file write and its refusals are covered by
 // tests/dispatch-group-settings.test.ts and the restart by tests/team-management.integration.test.ts; these journeys check the page.
+// Coverage gap: the page's request states are driven for proposed and running only. Holding a request queued or waiting needs a
+// queue behind it or an Executor's pending choice, which no team-management fixture gives; the module test covers all four states.
 const channelFile = (server: Server) => path.join(server.directory, "channel.json");
 const readChannel = (server: Server) => JSON.parse(readFileSync(channelFile(server), "utf8")) as { feishu: { dispatch?: { groupChatIds: string[] } } };
 const dcGroup = (scope: Page | Locator, name: string) => scope.locator(".atm-dc-group", { hasText: name }).getByRole("checkbox");
@@ -273,13 +275,20 @@ test.describe("with Feishu dispatch, choosing its groups", () => {
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".atm-dc-compare")).toHaveText("运行中的服务银河护卫队、产品讨论组已保存，重启后不启用派单");
     expect(readChannel(fixtureServer).feishu.dispatch).toBeUndefined();
-    // A proposal in 银河护卫队 then waits for its author, so that group cannot stay unchecked.
-    await post(fixtureServer, "/api/fixture/inbound", { event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-      message: { message_id: "om_dc_proposal", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
-        content: JSON.stringify({ text: "周末可能想去附近玩玩" }), mentions: [] } },
-      dispatchDecision: { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" } });
+    // Then a proposal waits for its author in 银河护卫队, and a second request runs there, held at its start message, so that group
+    // cannot stay unchecked. The running request's summary carries markup, which the page must show as text.
+    const groupMessage = (messageId: string, text: string, dispatchDecision: unknown) => post(fixtureServer, "/api/fixture/inbound", {
+      event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+          content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision });
+    await groupMessage("om_dc_proposal", "周末可能想去附近玩玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
+    await post(fixtureServer, "/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await groupMessage("om_dc_running", "帮我核对预算和行程", { kind: "dispatch", agentId: "bill", requestId: null, summary: "核对 <b>预算</b> & 行程", message: "" });
+    await expect.poll(async () => (await (await fetch(`${fixtureServer.url}/api/state`, { headers: { cookie: fixtureServer.cookie } })).json() as
+      { agentDispatch?: { jobs: Array<{ status: string }> } }).agentDispatch?.jobs.map(({ status }) => status), LONG).toEqual(["proposed", "running"]);
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
-    await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 1 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认");
+    await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 2 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认核对 <b>预算</b> & 行程处理中");
+    await expect(drawer.locator(".atm-dc-busy b")).toHaveCount(0);
     await testInfo.attach("dispatch-groups-unfinished", { body: await page.screenshot(), contentType: "image/png" });
     await dcGroup(drawer, "银河护卫队").check();
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
