@@ -1265,7 +1265,7 @@ const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigura
   unfinished: () => unfinishedRequestsByGroup(agentDispatch?.getState().jobs ?? [], (accountId, target) => feishuConfiguration!.owner.deliveryTarget(accountId, target)),
   names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}), audit: consoleAudit });
 // The team overview's read projection over the running service's dispatch records; Penny contributes only its state (agent-console::REQ-003).
-const consoleOverview = new ConsoleOverview({
+const consoleOverview = new ConsoleOverview({ storageRoot: consoleStateDirectory,
   ...(agentDispatch && teamManagement ? { records: () => agentDispatch.records(), teams: teamManagement } : {}),
   groups: () => feishuConfiguration?.dispatch?.groupChatIds ?? [],
   names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}),

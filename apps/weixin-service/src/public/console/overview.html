@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>团队总览</title>
+<link rel="stylesheet" href="/console/console.css">
+<link rel="stylesheet" href="/console/overview.css">
+</head>
+<body>
+<div class="acv2-app">
+<header class="acv2-header"><div class="acv2-brand">Agent 工作台 <small>工作空间 / 关系与记录</small></div><div class="acv2-local"><span class="acv2-dot"></span>本机工作空间</div></header>
+<main class="acv2-main">
+<div class="acv2-heading"><div class="acv-tip-row"><h1>团队总览</h1><span data-console-tip="负责人把事务拆成分工，临时执行者各完成一项；结束后历史可查。
+· 树上只显示进行中和待确认的执行者，同一事务的执行者放在一个虚线框里。
+· 点名字、卡片或框标题查看关联记录。"></span></div><div class="ats-heading-actions"><a class="acv2-button" href="/console/teams">团队管理</a><button class="acv2-button acv2-primary" type="button" id="ats-all">全部记录</button></div></div>
+<div class="ats-entry-bar" id="ats-entry-bar"></div>
+<div class="acv2-workspace" id="ats-workspace"><div class="ats-view" id="ats-view"></div>
+<aside class="acv2-drawer" id="ats-drawer" aria-label="团队与执行记录" hidden>
+<div class="acv2-drawer-head"><div><div class="acv2-eyebrow" id="ats-drawer-kind"></div><h2 id="ats-drawer-title"></h2></div><div class="acv2-drawer-actions"><button class="acv2-button" id="ats-back" type="button" hidden>返回</button><button class="acv3-icon-close" id="ats-close" type="button" aria-label="关闭抽屉"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></div></div>
+<div class="acv3-tabs" id="ats-record-tabs" role="tablist" aria-label="节点详情"><button class="acv3-tab" id="ats-tab-records" type="button" role="tab" aria-selected="true" aria-controls="ats-panel-records" tabindex="0">关联记录</button><button class="acv3-tab" id="ats-tab-storage" type="button" role="tab" aria-selected="false" aria-controls="ats-panel-storage" tabindex="-1">关系与存储</button></div>
+<div class="acv2-drawer-scroll" id="ats-drawer-scroll"><section id="ats-panel-records" class="acv3-record-panel" role="tabpanel" aria-labelledby="ats-tab-records"><div class="acv2-records-head"><h3 id="ats-scope-label">关联记录</h3><span class="acv2-count" id="ats-count"></span></div><div class="acv2-filters" id="ats-filters"><input class="acv2-input acv2-search" id="ats-search" type="search" aria-label="搜索处理记录" placeholder="搜索消息、事务或结果"><select class="acv2-input" id="ats-status" aria-label="筛选处理状态"><option value="all">全部处理状态</option><option value="proposed">待发起人确认</option><option value="queued">排队中</option><option value="running">执行中</option><option value="waiting">待确认</option><option value="completed">已完成</option><option value="partially_failed">部分失败</option><option value="failed">失败</option><option value="partially_unassigned">部分未落实</option><option value="cancelled">已取消</option></select><select class="acv2-input" id="ats-delivery" aria-label="筛选发送状态"><option value="all">全部发送状态</option><option value="accepted">平台已接收</option><option value="none">尚无结果汇报</option><option value="sending">正在发送</option><option value="unknown">发送结果未知</option><option value="rejected">发送失败</option><option value="cancelled">未发送</option></select></div><div id="ats-records"></div></section><section id="ats-panel-storage" class="acv3-record-panel" role="tabpanel" aria-labelledby="ats-tab-storage" hidden></section></div>
+<div class="acv2-drawer-foot">事务结果与发送状态分别记录；平台接收不代表用户已阅读。</div>
+</aside><div class="acv2-mask" id="ats-mask"></div></div>
+</main></div>
+<script src="/console/console-shell.js"></script>
+<script src="/console/overview.js"></script>
+</body>
+</html>

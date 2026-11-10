@@ -65,7 +65,7 @@ function dispatchOn(path: string, executor: DispatchExecutor, options: { plans?:
 }
 function overview(dispatch: AgentDispatch | undefined, penny: () => Readonly<{ configured: boolean; ready: boolean }> = () => ({ configured: false, ready: false })) {
   return new ConsoleOverview({ ...(dispatch ? { records: () => dispatch.records(), teams: { current: () => ({ definitions }), version: () => ({ definitions }) } } : {}),
-    groups: () => ["oc_alpha", "oc_beta"], names: async () => ({ oc_alpha: "银河护卫队" }),
+    storageRoot: "/state", groups: () => ["oc_alpha", "oc_beta"], names: async () => ({ oc_alpha: "银河护卫队" }),
     chatIdOf: (_accountId, target) => target.startsWith("feishu.group.") ? target.slice("feishu.group.".length) : undefined, owner: (senderId) => senderId === "ou_owner", penny });
 }
 /** An Executor that answers by Assignment title: `completed` unless `outcomes` names the title; `hold` never answers until aborted. */
@@ -156,5 +156,5 @@ it("carries only Penny's configured and ready states, whatever else its source h
   const leaky = () => ({ configured: true, ready: true, amount: 128.5, transactions: 7, note: "午饭 32 元" });
   const view = await overview(undefined, leaky).view();
   expect(view).toEqual({ dispatch: false, groups: [{ chatId: "oc_alpha", name: "银河护卫队" }, { chatId: "oc_beta", name: "oc_beta" }], agents: {}, coordinator: null,
-    teams: [], requests: [], penny: { configured: true, ready: true } });
+    teams: [], requests: [], penny: { configured: true, ready: true }, storageRoot: "/state" });
 });

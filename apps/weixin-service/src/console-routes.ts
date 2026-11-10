@@ -26,6 +26,7 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team
  * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
  * - `/api/overview`: its read projection; `/api/overview/memory?group=<chat ID>` a dispatch group's memory, read-only. No route
  *   changes or deletes memory (agent-console::US-005/AC-04).
+ * - `/api/console/sidebar`: the sidebar's browser count and Penny's state on every page.
  * - `/api/console/browsers`: the 本机登录 drawer's list, and `/api/console/browsers/revoke` its revocation, audited with the browser
  *   that asked (agent-console::US-001/AC-03).
  */
@@ -118,6 +119,11 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
 
   async function browsersApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
     if (!access) throw new RequestError(404, "未找到");
+    // The sidebar's counts on every page: the 本机登录 entry's browsers and Penny's state (agent-console::US-001/AC-03, REQ-003).
+    if (pathname === "/api/console/sidebar" && req.method === "GET") {
+      json(res, 200, { browsers: access.listBrowsers().length, penny: overview?.penny() ?? { configured: false, ready: false } });
+      return;
+    }
     if (pathname === "/api/console/browsers" && req.method === "GET") {
       json(res, 200, { browsers: access.listBrowsers().map((browser) => ({ ...browser, current: browser.id === context.browser?.id })) });
       return;
@@ -247,7 +253,7 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
       }
       const team = url.pathname === "/api/teams" || url.pathname.startsWith("/api/teams/");
       const board = url.pathname === "/api/overview" || url.pathname.startsWith("/api/overview/");
-      const browsers = url.pathname === "/api/console/browsers" || url.pathname.startsWith("/api/console/browsers/");
+      const browsers = url.pathname === "/api/console/sidebar" || url.pathname === "/api/console/browsers" || url.pathname.startsWith("/api/console/browsers/");
       if (!team && !board && !browsers && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
       try {
         if (board) await overviewApi(req, res, url);

@@ -42,9 +42,12 @@ export type OverviewView = {
   requests: OverviewRequest[];
   /** Penny's state only; nothing of its ledger reaches the console (agent-console::REQ-003). */
   penny: { configured: boolean; ready: boolean };
+  /** The service's state directory, under which the relationships and storage tab names each store (agent-console::US-005/AC-02). */
+  storageRoot: string;
 };
 
 export type ConsoleOverviewOptions = Readonly<{
+  storageRoot: string;
   /** Every stored dispatch request; absent without Feishu dispatch. */
   records?(): readonly DispatchRecord[];
   /** The live definitions, and a stored version for the names of teams that only older requests used. */
@@ -88,8 +91,7 @@ export class ConsoleOverview {
   async view(): Promise<OverviewView> {
     const groups = [...this.options.groups()];
     const names = await this.options.names(groups);
-    const penny = this.options.penny();
-    const base = { groups: groups.map((chatId) => ({ chatId, name: names[chatId] || chatId })), penny: { configured: penny.configured === true, ready: penny.ready === true } };
+    const base = { groups: groups.map((chatId) => ({ chatId, name: names[chatId] || chatId })), penny: this.penny(), storageRoot: this.options.storageRoot };
     const teams = this.options.teams;
     if (!teams || !this.options.records) return { dispatch: false, ...base, agents: {}, coordinator: null, teams: [], requests: [] };
     const { definitions } = teams.current();
@@ -114,6 +116,12 @@ export class ConsoleOverview {
           counts: Object.fromEntries(bound.map((chatId) => [chatId, counts(requests.filter((request) => request.chatId === chatId), team.id)])) };
       }),
       requests };
+  }
+
+  /** Penny's state, and nothing else its source holds (agent-console::REQ-003). */
+  penny(): OverviewView["penny"] {
+    const penny = this.options.penny();
+    return { configured: penny.configured === true, ready: penny.ready === true };
   }
 
   /** A dispatch group's memory; undefined for a chat that is not a dispatch group, so no other memory is ever reachable. */
