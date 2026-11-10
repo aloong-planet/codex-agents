@@ -48,6 +48,16 @@ describe("Team Leader plan validation", () => {
     else expect(parseLeaderPlan(plan("trip", count), bill, existing).assignments).toHaveLength(count);
   });
 
+  // A plan's positions number its own Assignments, whatever other teams already planned, so a cross-team Team Leader's plan
+  // depends only on its own (agent-dispatch::REQ-011/AC-05, REQ-013/AC-02). Numbered over the request, [3] would be valid here.
+  it.each([
+    ["accepts a dependency on an earlier Assignment of its own plan", [[], [1]], undefined],
+    ["refuses a dependency counted past its own plan", [[], [3]], "第 2 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 1）"],
+  ])("on six planned by other teams, %s", (_case, dependsOn, reason) => {
+    if (reason) expect(() => parseLeaderPlan(depending(dependsOn), bill, 6)).toThrow(expect.objectContaining({ code: "leader_plan_invalid", reason }));
+    else expect(parseLeaderPlan(depending(dependsOn), bill, 6).assignments.map(({ dependsOn: after }) => after)).toEqual(dependsOn);
+  });
+
   it.each([
     ["a missing brief", { assignments: [{ profileId: "trip", title: "规划行程", dependsOn: [] }], decisions: [] }],
     ["an extra property", { assignments: [{ profileId: "trip", title: "规划行程", brief: "南京", dependsOn: [], tools: ["files.write"] }], decisions: [] }],
@@ -100,9 +110,12 @@ describe("Team Leader plan validation", () => {
       "第 4 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 3）"],
     ["a new Assignment depending on a later new one", supplementOf([], newDepending([[5], []])), "leader_plan_invalid",
       "第 4 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 3）"],
-  ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string, view?: { total: number; parts: number }) => {
-    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, 3, view)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
-    else expect(parseLeaderSupplement(value, bill, 3, view)).toEqual(expected);
+    // Shown one Assignment of a request holding two: the new one is at position 2 of what the turn was shown.
+    ["a new Assignment depending on itself, counted among the Assignments the turn was shown", supplementOf([], newDepending([[2]])), "leader_plan_invalid",
+      "第 2 项分工的 dependsOn 只能取排在它之前的分工位置（1 到 1）", { total: 2, parts: 1 }, 1],
+  ])("decodes or refuses a supplement answer: %s", (_case, value, expected, reason?: string, view?: { total: number; parts: number }, shown = 3) => {
+    if (typeof expected === "string") expect(() => parseLeaderSupplement(value, bill, shown, view)).toThrow(expect.objectContaining({ code: expected, ...(reason ? { reason } : {}) }));
+    else expect(parseLeaderSupplement(value, bill, shown, view)).toEqual(expected);
   });
 
   it.each([

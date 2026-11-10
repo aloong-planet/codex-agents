@@ -475,6 +475,8 @@ it.each([
   [["failed", "blocked"], false, "failed"],
   [["completed", "cancelled"], true, "partially_unassigned"],
   [["completed", "failed"], true, "partially_failed"],
+  // Not started counts as not completed, so it outranks a part no team took as a failure does.
+  [["completed", "cancelled", "blocked"], true, "partially_failed"],
   [["failed"], true, "failed"],
   [["cancelled"], true, "cancelled"],
 ] satisfies Array<[DispatchAssignment["status"][], boolean, string]>)("settles a request whose Assignments ended %j, with a part no team took: %s, as %s", (statuses, untaken, outcome) => {
@@ -1388,4 +1390,97 @@ it("reruns a dependent that never started when a supplement reruns its supersede
   expect(seen).toEqual([{ run: "整理文案:0:alice", prerequisites: [] }, { run: "整理文案:1:supplement:one", prerequisites: [] },
     { run: "核对价格:1:supplement:one", prerequisites: [{ position: 1, title: "整理文案", executor: "执行者 1", result: "整理文案完成1" }] }]);
   expect(messages(deliveries).slice(-2)).toEqual(["我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格（等 1 完成后开始）\n完成后会在本群汇报。", "已收尾。"]);
+});
+
+// Dependencies in cross-team work: every position a Team Leader writes or reads numbers its own team's Assignments, so a
+// dependency, the prerequisite results it passes on and the closing stay within one team (agent-dispatch::REQ-011/AC-05, REQ-013).
+const billDepending = () => ({ ...billPlan, assignments: [billPlan.assignments[0]!, { ...billPlan.assignments[1]!, dependsOn: [1] }] });
+const BILL_AWAITING = "我安排：\n执行者 3（能力档 1）处理：编写脚本\n执行者 4（能力档 2）处理：核对接口（等 1 完成后开始）\n完成后经 Sam 交回 Alice 汇总。";
+
+it("numbers a cross-team Team Leader's dependency among its own Assignments, in its start, its Executor's prerequisites and its closing", async () => {
+  const turns = crossTurns();
+  turns.bill!.plans = [billDepending()];
+  const leader = teamLeaders(turns);
+  const seen: Seen[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment, _signal, prerequisites) => {
+    seen.push({ run: assignment.title, prerequisites: structuredClone(prerequisites) });
+    return { status: "completed", message: `RESULT_${assignment.title}` };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { assign: toBill });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  // Bill's 编写脚本 is his first Assignment and the request's third.
+  expect(posts(deliveries).slice(0, 3)).toEqual([`cli_alice: ${LEAD_START}`, `cli_sam: ${ANNOUNCED}`, `cli_bill: ${BILL_AWAITING}`]);
+  expect(seen.find(({ run }) => run === "核对接口")?.prerequisites).toEqual([{ position: 1, title: "编写脚本", executor: "执行者 3", result: "RESULT_编写脚本" }]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ dependsOn }) => dependsOn)).toEqual([[], [], [], ["one:assignment:0:3"]]);
+  expect(leaderTurns(leader, "close", "bill")[0]?.assignments).toEqual([expect.objectContaining({ position: 1, title: "编写脚本", dependsOn: [] }),
+    expect.objectContaining({ position: 2, title: "核对接口", dependsOn: [1] })]);
+});
+
+it("leaves a cross-team dependent of a failed Assignment not started, names it with the retry order in its Team Leader's fallback closing, and a retry redoes both", async () => {
+  const turns = crossTurns();
+  turns.bill!.plans = [billDepending()];
+  // An empty closing message fails the production closing parser, so Bill's closing falls back to his Assignments' own results.
+  turns.bill!.closing = { message: "  " };
+  const billClosed = deferred();
+  const seen: Seen[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment, _signal, prerequisites) => {
+    seen.push({ run: `${assignment.title}:${assignment.attempt}`, prerequisites: structuredClone(prerequisites) });
+    // The lead's Executors end only after Bill's closing, so Bill's failure is posted while the request still runs.
+    if (assignment.teamId === "alice") await billClosed.promise;
+    if (assignment.title === "编写脚本" && assignment.attempt === 0) return { status: "failed", message: "接口文档无法访问" };
+    return { status: "completed", message: `${assignment.title}完成${assignment.attempt}` };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), teamLeaders(turns), executor, deliveries,
+    { assign: toBill, delivered: (message) => { if (message.endsWith("结果经 Sam 交回 Alice 汇总。")) billClosed.resolve(); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("partially_failed"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "completed", "failed", "blocked"]);
+  // Numbered among Bill's Assignments, not the request's (3 and 4).
+  const fallback = "执行者 3「编写脚本」未能完成。接口文档无法访问\n执行者 4「核对接口」未开始：它等待的第 1 项未能完成。\n需要时请明确要求重试，会先重做第 1 项，再开始第 2 项。";
+  expect(posts(deliveries).filter((post) => post.startsWith("cli_bill: "))).toEqual([`cli_bill: ${BILL_AWAITING}`,
+    "cli_bill: 执行者 3（能力档 1）的分工「编写脚本」未能完成：执行者报告无法完成。其余分工继续处理。", `cli_bill: ${fallback}\n结果经 Sam 交回 Alice 汇总。`]);
+  expect(seen.map(({ run }) => run).filter((run) => run === "核对接口:0")).toEqual([]);
+  const before = deliveries.length;
+
+  dispatch.admit(event("two", "retry:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  // The retry redoes Bill's failed Assignment first, then starts its dependent with the new result, under Bill.
+  expect(seen.filter(({ run }) => run.endsWith(":1"))).toEqual([{ run: "编写脚本:1", prerequisites: [] },
+    { run: "核对接口:1", prerequisites: [{ position: 1, title: "编写脚本", executor: "执行者 3", result: "编写脚本完成1" }] }]);
+  expect(posts(deliveries).slice(before)).toEqual([`cli_bill: ${BILL_AWAITING}`,
+    "cli_bill: 执行者 3「编写脚本」已完成。编写脚本完成1\n执行者 4「核对接口」已完成。核对接口完成1\n结果经 Sam 交回 Alice 汇总。", "cli_alice: ALICE_CLOSING"]);
+});
+
+it("numbers a new Assignment's dependency among the lead's own Assignments when the lead's supplement adds it to a cross-team request", async () => {
+  const turns = crossTurns();
+  // Alice's two Assignments, then the two her answer adds: the second new one waits for the first, at position 3 of hers.
+  turns.alice!.supplement = { affected: [], assignments: [{ profileId: "executor-1", title: "准备问答", brief: "准备买家问答", dependsOn: [] },
+    { profileId: "executor-2", title: "发布商品", brief: "发布到闲鱼", dependsOn: [3] }], decisions: [], parts: [], help: [] };
+  const gate = deferred();
+  const seen: Seen[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment, _signal, prerequisites) => {
+    seen.push({ run: `${assignment.title}:${assignment.attempt}`, prerequisites: structuredClone(prerequisites) });
+    if (assignment.attempt === 0) await gate.promise;
+    return { status: "completed", message: `${assignment.title}完成` };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), teamLeaders(turns), executor, deliveries, { assign: toBill });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(seen).toHaveLength(4), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect(seen).toHaveLength(6), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  // Numbered over the request, position 3 would be Bill's 编写脚本, and 准备问答 position 5.
+  expect(seen.slice(4)).toEqual([{ run: "准备问答:1", prerequisites: [] },
+    { run: "发布商品:1", prerequisites: [{ position: 3, title: "准备问答", executor: "执行者 5", result: "准备问答完成" }] }]);
+  expect(posts(deliveries)).toContain("cli_alice: 我安排：\n执行者 5（能力档 1）处理：准备问答\n执行者 6（能力档 2）处理：发布商品（等 3 完成后开始）\n完成后会在本群汇报。");
 });

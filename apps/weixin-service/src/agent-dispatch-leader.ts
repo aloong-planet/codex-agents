@@ -212,7 +212,7 @@ function helpRule(input: LeaderTurnInput): string {
   const lead = input.relay?.requestedBy;
   return lead
     ? `你在协助 ${lead} 的请求，relay.parts 是 Sam 交给你团队的部分，只规划这些部分。你不能再请其他团队协助；确实需要其他团队时写进 help，Sam 会转告 ${lead}，不会另行安排。不需要就输出空数组。`
-    : `本团队无法完成、需要其他团队协助的部分写进 help（最多 ${HELP_LIMIT} 项）：title 一句话说明这部分，brief 写清要求和已知事实。由 Sam 决定交给哪个团队，结果经 Sam 交回你汇总。本团队能完成的不要写进 help；不需要就输出空数组。`;
+    : `本团队无法完成、需要其他团队协助的部分写进 help（最多 ${HELP_LIMIT} 项）：title 一句话说明这部分，brief 写清要求和已知事实。由 Sam 决定交给哪个团队，结果经 Sam 交回你汇总。这些部分与本团队的分工同时进行，本团队的分工不能等待它们：dependsOn 只能取 assignments 中的分工。本团队能完成的不要写进 help；不需要就输出空数组。`;
 }
 
 type LeaderRuntime = Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread">;
