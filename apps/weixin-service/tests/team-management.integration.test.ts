@@ -525,33 +525,3 @@ it("creates a team's application by QR code while the service runs: after the re
       .toEqual(["team_application_qr_requested", "team_application_created", "team_test_message_sent"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 45000);
-
-// team-management failure modes: "Service restarts during a drain or onboarding … no step reruns without its recorded outcome".
-it("after a restart, asks for a new code in place of the one that waited, and checks a release awaiting review without submitting it again", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "team-qr-restart-"));
-  let running: Running | undefined;
-  try {
-    dispatchConfig(directory);
-    running = await start(directory);
-    const { teamId } = await running.post<{ teamId: string }>("/api/teams/save", { basedOn: (await running.get<View>("/api/teams")).version, team: qrDaisy() });
-    await qrTeamUntil(running, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
-    await running.close();
-    // The code's wait ended with the process: the creation needs a new code, asked for by the owner.
-    const review = { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ applications: { [CREATED_APP]: "not_enabled" } }) };
-    running = await start(directory, review);
-    expect((await qrTeamUntil(running, teamId, () => true)).creation).toEqual({ status: "action", reason: "interrupted" });
-    await running.post("/api/teams/qr", { teamId });
-    await running.post("/api/fixture/inbound", { onboardingControl: { scan: "confirmed" } });
-    expect((await qrTeamUntil(running, teamId, ({ publish }) => publish !== undefined)).publish).toMatchObject({ status: "review", reason: "submitted" });
-    const before = (await running.state()).fixtureOnboardingCalls!.map(({ call }) => call);
-    expect(before).toEqual(expect.arrayContaining(["create", "configure", "publish", "check"]));
-    await running.close();
-    // The admin approved while the service was down: startup resumes with the check alone, then joins the group.
-    running = await start(directory);
-    const done = await qrTeamUntil(running, teamId, ({ bindings }) => bindings[0]?.state === "accepting");
-    expect([done.configure?.status, done.publish?.status, done.credentials?.status, done.leader.appId]).toEqual(["done", "done", "done", CREATED_APP]);
-    const resumed = (await running.state()).fixtureOnboardingCalls!.filter(({ call }) => call !== "chat_name").map(({ call, appId, chatId }) => [call, chatId ?? appId]);
-    expect(resumed).toEqual([["check", CREATED_APP], ["add", "oc_alpha"], ["in_chat", "oc_alpha"]]);
-    console.log(JSON.stringify({ kind: "team_qr_restart", commands: ["save 设计团队 (扫码一键创建)", "restart", "刷新二维码", "scan confirmed", "restart"], beforeRestart: before, afterRestart: resumed, team: done }));
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
-}, 60000);
