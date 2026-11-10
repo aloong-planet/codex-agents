@@ -1,3 +1,4 @@
+import type { AccountMemorySnapshot, MemoryCategory, PlanStatus } from "./account-memory-store.js";
 import type { DispatchPost, DispatchRecord } from "./agent-dispatch.js";
 import type { DispatchAssignment, DispatchJob } from "./agent-dispatch-types.js";
 import type { TeamDefinitions } from "./team-registry.js";
@@ -56,6 +57,20 @@ export type ConsoleOverviewOptions = Readonly<{
   /** Whether a group message's sender is the owner. */
   owner(senderId: string): boolean;
   penny(): Readonly<{ configured: boolean; ready: boolean }>;
+  /** A dispatch group's memory account, the one its Coordinator recalls; it may throw when the account cannot be read. */
+  groupMemory?(chatId: string): Pick<AccountMemorySnapshot, "entries" | "events">;
+}>;
+
+/**
+ * A group's memory as the console shows it, read-only (agent-console::US-005/AC-04): every entry and every event, whatever its date.
+ * An event's `time` is a plan's time of day (`morning`, `afternoon`, `evening` or `HH:MM`), or null.
+ */
+export type GroupMemoryView = Readonly<{ readable: false }> | Readonly<{
+  readable: true;
+  entries: Array<{ category: MemoryCategory; value: string }>;
+  events: Array<{ date: string; kind: "planned" | "observed"; plan: PlanStatus | null; retracted: boolean; fulfillsPlan: boolean; time: string | null; summary: string }>;
+  /** The latest change to any entry or event, or null for an empty memory. */
+  updatedAt: number | null;
 }>;
 
 const KINDS: Record<string, PostKind> = { receipt: "receipt", "cross-team": "cross_team", decision: "decision", pending: "pending", failure: "failure",
@@ -99,6 +114,20 @@ export class ConsoleOverview {
           counts: Object.fromEntries(bound.map((chatId) => [chatId, counts(requests.filter((request) => request.chatId === chatId), team.id)])) };
       }),
       requests };
+  }
+
+  /** A dispatch group's memory; undefined for a chat that is not a dispatch group, so no other memory is ever reachable. */
+  memory(chatId: string): GroupMemoryView | undefined {
+    if (!this.options.groupMemory || !this.options.groups().includes(chatId)) return undefined;
+    let snapshot: Pick<AccountMemorySnapshot, "entries" | "events">;
+    try { snapshot = this.options.groupMemory(chatId); } catch { return { readable: false }; }
+    const times = [...snapshot.entries, ...snapshot.events].map(({ updatedAt }) => updatedAt);
+    return { readable: true, entries: snapshot.entries.map(({ category, value }) => ({ category, value })),
+      events: snapshot.events.map((event) => ({ date: event.localDate, kind: event.eventKind, plan: event.eventKind === "planned" ? event.planStatus ?? "pending" : null,
+        retracted: event.factStatus === "retracted", fulfillsPlan: Boolean(event.fulfillsPlanId),
+        time: event.eventKind !== "planned" ? null : event.timePrecision === "exact" ? event.localTime ?? null : event.timePrecision && event.timePrecision !== "date" ? event.timePrecision : null,
+        summary: event.summary })),
+      updatedAt: times.length ? Math.max(...times) : null };
   }
 }
 
