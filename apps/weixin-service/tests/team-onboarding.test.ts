@@ -158,12 +158,13 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
   const CREATED_APP = "cli_c0de000000000001";
   const BILL_APP = "cli_2222222222222222";
   const QR_DAISY: TeamEdit = { ...daisy, method: "qr", leader: { ...daisy.leader, appId: "" } };
-  function qrOnboarding<Platform extends FixtureOnboardingPlatform = FixtureOnboardingPlatform>(path?: string, platform = new FixtureOnboardingPlatform() as Platform) {
+  function qrOnboarding<Platform extends FixtureOnboardingPlatform = FixtureOnboardingPlatform>(path?: string, platform = new FixtureOnboardingPlatform() as Platform,
+    reserved: Record<string, string> = {}) {
     const opened = path === undefined ? registryWithDaisy(null, QR_DAISY) : undefined;
     const registry = opened?.registry ?? new TeamRegistry(path!);
     const ends: CreationEnd[] = [];
     let waiting: (() => void) | undefined;
-    const onboarding = new TeamOnboarding(registry, platform, SAM, () => 1_000, { creationEnded: (end) => { ends.push(end); waiting?.(); } });
+    const onboarding = new TeamOnboarding(registry, platform, SAM, () => 1_000, { creationEnded: (end) => { ends.push(end); waiting?.(); }, reserved: () => reserved });
     const daisyId = opened?.teamId ?? registry.current()!.definitions.teams.find(({ teamName }) => teamName === "设计团队")!.id;
     return { registry, path: opened?.path ?? path!, platform, onboarding, ends, teamId: daisyId,
       /** Ends the code that waits for its scan, and resolves once the creation has ended. */
@@ -271,6 +272,35 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
       // Whatever the ended wait still reports has been delivered by the next turn of the event loop.
       await new Promise((resolve) => setImmediate(resolve));
       expect([ends, onboarding.creationLink(teamId), registry.creation(teamId)]).toEqual([[], undefined, { status: "waiting", at: 1_000 }]);
+    } finally { registry.close(); }
+  });
+
+  // An application the scan created in Feishu but that no team uses is named, so that the owner can remove it there.
+  it("reports an application created just as the wait ended, without giving it to the team", async () => {
+    class LateScan extends FixtureOnboardingPlatform {
+      confirm: () => void = () => {};
+      override async createApplication() {
+        return { url: "https://accounts.feishu.cn/fixture/registration?late", expiresInSeconds: 600,
+          result: new Promise<{ appId: string; appSecret: string }>((resolve) => { this.confirm = () => resolve({ appId: "cli_abcdefabcdefabcd", appSecret: "late-secret" }); }) };
+      }
+    }
+    const { registry, platform, onboarding, ends, teamId } = qrOnboarding(undefined, new LateScan());
+    try {
+      await onboarding.requestCreation(teamId);
+      onboarding.endCreation(teamId);
+      platform.confirm();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect([ends, team(registry, teamId).leader.appId, registry.hasSecret("cli_abcdefabcdefabcd")]).toEqual([[{ teamId, failed: "abandoned", unused: "cli_abcdefabcdefabcd" }], "", false]);
+    } finally { registry.close(); }
+  });
+
+  it("does not give the team a created application that is reserved for another use, and reports it as unused", async () => {
+    const { registry, onboarding, ends, teamId, scan } = qrOnboarding(undefined, new FixtureOnboardingPlatform(), { [CREATED_APP]: "该飞书应用已用于 Penny，不能用于团队" });
+    try {
+      await onboarding.requestCreation(teamId);
+      await scan("confirmed");
+      expect([ends, registry.creation(teamId), team(registry, teamId).leader.appId, registry.hasSecret(CREATED_APP)])
+        .toEqual([[{ teamId, failed: "unusable", unused: CREATED_APP }], { status: "action", reason: "unusable", at: 1_000 }, "", false]);
     } finally { registry.close(); }
   });
 

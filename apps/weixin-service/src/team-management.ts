@@ -241,7 +241,8 @@ export class TeamManagement {
 
   /** A QR creation ended: the created application now posts for the team, and its remaining steps run; or nothing was created. */
   private creationEnded(end: CreationEnd): void {
-    if ("failed" in end) { this.audit({}, { event: "team_application_qr_failed", team: end.teamId, reason: end.failed }); return; }
+    // An application the scan created but no team uses is named, so that the owner can remove it in Feishu.
+    if ("failed" in end) { this.audit({}, { event: "team_application_qr_failed", team: end.teamId, reason: end.failed, ...(end.unused ? { appId: end.unused } : {}) }); return; }
     this.audit({}, { event: "team_application_created", team: end.teamId, appId: end.created, ...(end.replaced ? { replaced: end.replaced } : {}), version: this.current().version });
     this.refreshRoster();
     void this.runOnboarding(end.teamId, {}, false);

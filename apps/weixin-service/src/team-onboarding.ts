@@ -67,10 +67,11 @@ export interface OnboardingPlatform {
 type Started = ReadonlyArray<Readonly<{ teamId: string; chatId: string }>>;
 
 /**
- * How a team's QR creation ended: the scan created `created`, which the team now uses in place of `replaced`; or no
- * application was created, for `failed`.
+ * How a team's QR creation ended: the scan created `created`, which the team now uses in place of `replaced`; or the team got
+ * no application, for `failed`. `unused` then names an application the scan did create in Feishu but that no team uses: the
+ * owner confirmed just as the wait ended, or the application could not be attached. Its secret is not kept.
  */
-export type CreationEnd = Readonly<{ teamId: string } & ({ created: string; replaced?: string } | { failed: string })>;
+export type CreationEnd = Readonly<{ teamId: string } & ({ created: string; replaced?: string } | { failed: string; unused?: string })>;
 type OnboardingHooks = Readonly<{
   /** Called once a QR creation has ended, after the registry holds its outcome. */
   creationEnded?(end: CreationEnd): void;
@@ -133,7 +134,11 @@ export class TeamOnboarding {
     if (typeof answer === "string") { failed(answer); return; }
     creation.link = { url: answer.url, expiresAt: this.now() + answer.expiresInSeconds * 1000 };
     void answer.result.then((result) => {
-      if (!current()) return undefined;
+      // The wait was ended or replaced. A scan confirmed in that same moment still created an application: it is reported, not used.
+      if (!current()) {
+        if (typeof result !== "string") this.hooks.creationEnded?.({ teamId, failed: "abandoned", unused: result.appId });
+        return undefined;
+      }
       // Without a code the platform was never reached; once a code was shown, a lost connection is a scan that did not finish.
       if (typeof result === "string") { failed(result === "unreachable" ? "connection_lost" : result); return undefined; }
       this.creations.delete(teamId);
@@ -163,7 +168,7 @@ export class TeamOnboarding {
       const attached = this.registry.attachCreatedApplication(teamId, created, { at: this.now(), reserved: this.hooks.reserved?.() ?? {} });
       const state = this.registry.creation(teamId);
       this.hooks.creationEnded?.(attached ? { teamId, created: created.appId, ...(attached.replaced ? { replaced: attached.replaced } : {}) }
-        : { teamId, failed: state?.status === "action" ? state.reason : "abandoned" });
+        : { teamId, failed: state?.status === "action" ? state.reason : "abandoned", unused: created.appId });
     });
     this.queue = attaching.catch(() => undefined);
     return attaching;
