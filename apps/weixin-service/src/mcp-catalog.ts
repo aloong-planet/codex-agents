@@ -309,6 +309,8 @@ export class McpCatalog {
   private servers: StoredServer[] = [];
   private secrets: Secrets = { env: {}, headers: {}, clientSecrets: {} };
   private readonly connections = new Map<string, Connection>();
+  /** Every client started and not yet stopped, connected or not, with its stop once begun, so closing reaches each. */
+  private readonly clients = new Map<Client, Promise<void> | undefined>();
   private closed = false;
 
   constructor(options: McpCatalogOptions) {
@@ -330,9 +332,14 @@ export class McpCatalog {
     for (const server of this.servers) if (server.enabled) void this.connect(server.name).catch(() => {});
   }
 
+  /**
+   * Stops every program and connection the catalog started, and resolves once they have all stopped: one still
+   * connecting, and one a reconnection or a change replaced, are stopped too.
+   */
   async close(): Promise<void> {
     this.closed = true;
     await Promise.all([...this.connections.keys()].map((name) => this.disconnect(name)));
+    await Promise.all([...this.clients.keys()].map((client) => this.stop(client)));
   }
 
   /** What the confirmation card shows for a draft, and whether it needs confirming (mcp-catalog::US-001/AC-06, REQ-002). */
@@ -733,7 +740,17 @@ export class McpCatalog {
     delete connection.client;
     connection.state = state;
     if (state === "disabled") connection.tools = [];
-    await client?.close().catch(() => {});
+    await this.stop(client);
+  }
+
+  /** Closes a client, ending its program; a stop already begun is returned, so `close` also waits for those. */
+  private stop(client: Client | undefined): Promise<void> {
+    if (!client) return Promise.resolve();
+    const begun = this.clients.get(client);
+    if (begun) return begun;
+    const stopped = client.close().catch(() => {}).finally(() => { this.clients.delete(client); });
+    this.clients.set(client, stopped);
+    return stopped;
   }
 
   /** (Re)connects a server: starts the program, lists its tools and reviews them; a failure schedules a retry. */
@@ -745,7 +762,7 @@ export class McpCatalog {
     if (!retry) connection.failures = 0;
     const old = connection.client;
     delete connection.client;
-    void old?.close().catch(() => {});
+    void this.stop(old);
     if (!server.enabled || this.closed) {
       connection.state = "disabled";
       connection.tools = [];
@@ -760,11 +777,12 @@ export class McpCatalog {
         { name: "codex-weixin", version: "1.0.0" },
         { listChanged: { tools: { onChanged: (error, tools) => { if (!error && tools) this.applyTools(name, generation, tools as ToolDefinition[]); } } } },
       );
+      this.clients.set(client, undefined);
       try {
         await client.connect(this.transportFor(server, connection, generation), { timeout: CONNECT_TIMEOUT_MS });
         const tools = (await client.listTools(undefined, { timeout: CONNECT_TIMEOUT_MS })).tools as ToolDefinition[];
         if (connection.generation !== generation) {
-          void client.close().catch(() => {});
+          void this.stop(client);
           return;
         }
         connection.client = client;
@@ -777,6 +795,7 @@ export class McpCatalog {
         const info = client.getServerVersion();
         if (info) connection.server = { name: info.name, version: info.version }; else delete connection.server;
         client.onclose = () => {
+          this.clients.delete(client);
           if (connection.generation !== generation || this.closed) return;
           clearInterval(connection.refreshTimer);
           delete connection.client;
@@ -793,7 +812,7 @@ export class McpCatalog {
           connection.refreshTimer.unref();
         }
       } catch (error) {
-        void client.close().catch(() => {});
+        void this.stop(client);
         if (connection.generation !== generation) return;
         const tail = connection.output.trim().split(/\r?\n/).filter(Boolean).at(-1);
         const raw = errorText(error);

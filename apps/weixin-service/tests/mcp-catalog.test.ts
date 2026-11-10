@@ -31,7 +31,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { McpCallRefused, McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
 import { freePort, startAuthorizationServer, startHttpTestServer, startRecordingServer, type AuthorizationServer, type HttpTestServerOptions, type RedirectRule } from "./fixtures/mcp-http-test-server.js";
-import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, runningPrograms, starts, stopRunningPrograms, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 
 const LOCAL_NPX_PACKAGE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "mcp-local-npx-package");
 
@@ -171,6 +171,21 @@ describe("connections held by the host", () => {
     fs.rmSync(files.failFlag);
     await connected(catalog, "flaky");
     expect(starts(files).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("closing stops every program it started, including one being replaced and one still connecting", async () => {
+    const { work, open } = setup();
+    const catalog = open();
+    cleanup.push(() => void stopRunningPrograms(work));
+    register(catalog, input("replaced", testServerFiles(work, "replaced")));
+    await connected(catalog, "replaced");
+    // The connected program is replaced while the new one is still connecting; another one is still connecting.
+    catalog.reconnect("replaced");
+    register(catalog, input("starting", testServerFiles(work, "starting")));
+    expect(runningPrograms(work)).toHaveLength(3);
+
+    await catalog.close();
+    expect(runningPrograms(work)).toEqual([]);
   });
 });
 
