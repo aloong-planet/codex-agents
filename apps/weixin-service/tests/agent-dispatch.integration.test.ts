@@ -384,6 +384,27 @@ it("builds the Coordinator's and the Team Leader's runtimes from their resolved 
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// The real-model seam (agent-dispatch Testing Decisions). This case never reaches a model: the Codex executable is a command that
+// only fails and the Codex home holds a synthetic login, so it shows which path the Coordinator's turn takes, not what a model decides.
+it("takes the Coordinator's turn to its real runtime with the Codex home's login under the real-model seam, and records it, ignoring an injected decision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-codex-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    writeFileSync(join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-synthetic"}');
+    running = await start(directory, { WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome });
+    await running.post("/api/fixture/inbound", groupMessage("om_real_model_seam", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    // Either outcome ends the wait: the Coordinator's fallback post, or the request an injected decision would create.
+    const result = await running.until((state) => state.fixtureTextOutbox?.length === 1 || (state.agentDispatch?.jobs.length ?? 0) > 0);
+    console.log(JSON.stringify({ kind: "dispatch_real_model_seam", command: "帮我整理闲鱼商品描述", jobs: result.agentDispatch, coordinator: result.fixtureTextOutbox, turns: result.fixtureDispatchTurns }));
+    expect(result.agentDispatch?.jobs).toEqual([]);
+    expect(result.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
+    // The turn tried to start the Coordinator's own App Server, which this executable cannot derive a model catalog for.
+    expect(result.fixtureDispatchTurns).toEqual([expect.objectContaining({ role: "coordinator", turn: "classify", messageId: "om_real_model_seam", error: "isolated_runtime_catalog_unavailable" })]);
+    expect(readFileSync(join(directory, "group-model-runtimes", "dispatch-coordinator", "codex-home", "auth.json"), "utf8")).toBe('{"OPENAI_API_KEY":"sk-synthetic"}');
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(codexHome, { recursive: true, force: true }); }
+}, 30000);
+
 const RESPONSIBILITIES = { alice: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。", bill: "日常生活事务，包括吃穿住行的规划和安排。",
   jack: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。" };
 

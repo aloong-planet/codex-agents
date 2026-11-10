@@ -6,6 +6,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 import type { PublicCodexServiceState } from "../../src/conversation-service.js";
+import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { authorizeLocalService } from "../../e2e/console-session.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
@@ -16,6 +17,7 @@ export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: strin
     directory?: Array<{ name: string; responsibility: string }>; memory?: string;
     assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
   fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;
+  fixtureDispatchTurns?: DispatchTurnRecord[];
   fixtureMemoryCurations?: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }>;
   fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
