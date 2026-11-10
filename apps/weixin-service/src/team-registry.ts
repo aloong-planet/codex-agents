@@ -60,7 +60,21 @@ export type TeamEdit = Readonly<{
   leader: Readonly<{ name: string; appId: string; instructions: string }>;
   executorProfiles: readonly ExecutorProfileEdit[];
   groups: readonly string[];
+  /** How the team gets its application; absent means an existing one. In QR creation `leader.appId` is not read. */
+  method?: OnboardingMethod;
 }>;
+/**
+ * How a team gets its Feishu application: `qr`, the service creates one when the owner scans a QR code; or `existing`, the
+ * owner enters its App ID and secret. The choice is saved with the team (team-management::US-002).
+ */
+export type OnboardingMethod = "qr" | "existing";
+/**
+ * QR creation of a team's application (step 1): a code was asked for and waits for its scan; it ended without an application,
+ * for `reason`; or the scan created `appId`, which the team now uses.
+ */
+export type ApplicationCreationState = Readonly<({ status: "waiting" } | { status: "action"; reason: string } | { status: "done"; appId: string }) & { at: number }>;
+/** One group's test message (step 6): being sent, accepted by the platform, refused, or with a result that is not known. */
+export type TestMessageOutcome = Readonly<{ status: "sending" | "accepted" | "failed" | "unknown"; at: number }>;
 /** A console save refused under team-management::REQ-002, with the reasons the save bar lists. */
 export class TeamDefinitionError extends Error {
   constructor(readonly reasons: readonly string[]) { super("team_definition_invalid"); }
@@ -68,11 +82,12 @@ export class TeamDefinitionError extends Error {
 const APPLICATION_ID = /^cli_[a-f0-9]{16}$/;
 /**
  * The recorded outcome of an onboarding step: done; awaiting the application's review or enabling ("review"); or needing
- * the owner's action ("action"). Step 4 checks the credentials and the bot; step 5 joins the bot to one group.
+ * the owner's action ("action"). Steps 2 and 3 configure and release an application created by QR code; step 4 checks the
+ * credentials and the bot; step 5 joins the bot to one group.
  */
 export type OnboardingOutcome = Readonly<{ status: "done" | "review" | "action"; reason?: string; at: number }>;
-export type OnboardingStep = Readonly<{ step: "credentials" }> | Readonly<{ step: "join"; chatId: string }>;
-export type OnboardingRecord = Readonly<{ credentials?: OnboardingOutcome; joins: Readonly<Record<string, OnboardingOutcome>> }>;
+export type OnboardingStep = Readonly<{ step: "configure" | "publish" | "credentials" }> | Readonly<{ step: "join"; chatId: string }>;
+export type OnboardingRecord = Readonly<{ configure?: OnboardingOutcome; publish?: OnboardingOutcome; credentials?: OnboardingOutcome; joins: Readonly<Record<string, OnboardingOutcome>> }>;
 
 const SEEDED_TEAM_NAMES: Readonly<Record<string, string>> = { alice: "运营团队", bill: "生活团队", jack: "技术团队" };
 const EMPTY_PROFILE: AgentProfile = { instructions: "", hostTools: [] };
@@ -88,11 +103,16 @@ export class TeamRegistry {
   constructor(databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
+    // A QR code's wait and a test message being sent end with the process, so opening the store records them as outcomes
+    // the owner has to look at: the creation as interrupted, the send as unknown.
     this.database.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS definitions_version (version INTEGER PRIMARY KEY, based_on INTEGER, source TEXT NOT NULL, definitions TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS application_secret (app_id TEXT PRIMARY KEY, secret TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS onboarding_outcome (app_id TEXT NOT NULL, step TEXT NOT NULL, chat_id TEXT NOT NULL, status TEXT NOT NULL,
-        reason TEXT, at INTEGER NOT NULL, PRIMARY KEY (app_id, step, chat_id));`);
+        reason TEXT, at INTEGER NOT NULL, PRIMARY KEY (app_id, step, chat_id));
+      CREATE TABLE IF NOT EXISTS application_creation (team_id TEXT PRIMARY KEY, status TEXT NOT NULL, reason TEXT, app_id TEXT, at INTEGER NOT NULL);
+      UPDATE application_creation SET status = 'action', reason = 'interrupted' WHERE status = 'waiting';
+      UPDATE onboarding_outcome SET status = 'unknown' WHERE step = 'test' AND status = 'sending';`);
   }
 
   /**
@@ -147,10 +167,18 @@ export class TeamRegistry {
    * follow the checked groups: a newly checked group starts onboarding; an unchecked group drains when the team accepts work
    * there and is dropped otherwise; a changed application starts onboarding again in every group it does not drain.
    * `secret` is written beside the versions, never into one, and the application's credentials are then checked again
-   * (ticket 11, decision D7). Returns the saved version and the team's ID.
+   * (ticket 11, decision D7).
+   *
+   * In QR creation (`method: "qr"`) the application is the service's to set: the team keeps the one it has, whatever App ID
+   * or secret the save carries, and an application attached since `basedOn` does not make the save stale. The save that first
+   * chooses QR creation starts one creation; a save as an existing application ends it. Either counts as a console save even
+   * when nothing else changed. Returns the saved version, the team's ID and whether a creation was started or ended.
    */
-  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>> }>): Readonly<{ version: DefinitionsVersion; teamId: string }> {
+  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number }>):
+    Readonly<{ version: DefinitionsVersion; teamId: string; creation?: "started" | "ended" }> {
     let teamId = edit.id ?? "";
+    let creation: "started" | "ended" | undefined;
+    const qr = edit.method === "qr";
     this.transaction(() => {
       const latest = this.current(), base = this.version(options.basedOn);
       if (!latest || !base) throw new Error("team_registry_version_stale");
@@ -160,13 +188,14 @@ export class TeamRegistry {
         if (edit.id === COORDINATOR_ID) throw new Error("team_registry_coordinator_fixed");
         const before = base.definitions.teams.find(({ id }) => id === edit.id);
         if (!existing || !before) throw new Error("team_registry_team_unknown");
-        if (JSON.stringify(editable(before)) !== JSON.stringify(editable(existing))) throw new Error("team_registry_version_stale");
+        if (JSON.stringify(editable(before, !qr)) !== JSON.stringify(editable(existing, !qr))) throw new Error("team_registry_version_stale");
       }
       if (edit.groups.some((chatId) => !definitions.dispatchGroups.includes(chatId))) throw new Error("team_registry_group_unknown");
-      const reasons = teamReasons(edit, definitions, options.reserved ?? {});
+      const appId = qr ? existing?.leader.appId ?? "" : edit.leader.appId.trim();
+      const reasons = teamReasons({ ...edit, leader: { ...edit.leader, appId } }, definitions, options.reserved ?? {});
       if (reasons.length) throw new TeamDefinitionError(reasons);
       teamId = existing?.id ?? `team-${randomUUID().slice(0, 8)}`;
-      const appId = edit.leader.appId.trim(), replaced = existing !== undefined && existing.leader.appId !== appId;
+      const replaced = existing !== undefined && existing.leader.appId !== appId;
       const kept = new Map((existing?.bindings ?? []).map((binding) => [binding.chatId, binding.state]));
       const bindings: TeamBinding[] = [];
       for (const chatId of definitions.dispatchGroups) {
@@ -184,14 +213,70 @@ export class TeamRegistry {
           noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)] })),
         bindings };
       const teams = existing ? definitions.teams.map((candidate) => candidate.id === teamId ? team : candidate) : [...definitions.teams, team];
-      this.append({ ...definitions, teams }, latest.version, "console");
-      if (options.secret !== undefined && appId) {
+      if (qr) {
+        if (this.database.prepare("INSERT OR IGNORE INTO application_creation (team_id, status, at) VALUES (?, 'waiting', ?)").run(teamId, options.at ?? Date.now()).changes) creation = "started";
+      } else if (this.database.prepare("DELETE FROM application_creation WHERE team_id = ?").run(teamId).changes) creation = "ended";
+      // A change of method alone still gets its own console version: until the console has saved, each start imports the local roster again.
+      this.append({ ...definitions, teams }, latest.version, "console", creation !== undefined);
+      if (!qr && options.secret !== undefined && appId) {
         this.database.prepare("INSERT INTO application_secret (app_id, secret) VALUES (?, ?) ON CONFLICT(app_id) DO UPDATE SET secret = excluded.secret").run(appId, options.secret);
         this.database.prepare("DELETE FROM onboarding_outcome WHERE app_id = ? AND step = 'credentials'").run(appId);
       }
       this.forgetUnusedApplications();
     });
-    return { version: this.current()!, teamId };
+    return { version: this.current()!, teamId, ...(creation ? { creation } : {}) };
+  }
+
+  /** The state of a team's QR creation, or undefined when the team uses an existing application. */
+  creation(teamId: string): ApplicationCreationState | undefined {
+    const row = this.database.prepare("SELECT status, reason, app_id, at FROM application_creation WHERE team_id = ?").get(teamId);
+    if (!row) return undefined;
+    const at = Number(row.at);
+    if (row.status === "done") return { status: "done", appId: String(row.app_id), at };
+    return row.status === "waiting" ? { status: "waiting", at } : { status: "action", reason: String(row.reason), at };
+  }
+
+  /**
+   * Records that a team's QR creation asked for a new code, or ended without an application. Returns false, recording
+   * nothing, when the team is not in QR creation or its application has already been created.
+   */
+  recordCreation(teamId: string, state: Readonly<{ status: "waiting" } | { status: "action"; reason: string }>, at: number): boolean {
+    return Boolean(this.database.prepare("UPDATE application_creation SET status = ?, reason = ?, at = ? WHERE team_id = ? AND status <> 'done'")
+      .run(state.status, state.status === "action" ? state.reason : null, at, teamId).changes);
+  }
+
+  /**
+   * Gives the application a QR scan created to the team that waits for it: the team posts with it from now on, its secret is
+   * stored beside the versions, and every group the team is not draining from starts onboarding again, as for any replaced
+   * application. Returns the new version and the application it replaced. An application no team may use (a malformed ID, one
+   * already in use, a reserved one) is not attached: the creation then needs action as `unusable`. Returns undefined then, and
+   * when the team is not waiting for a creation.
+   */
+  attachCreatedApplication(teamId: string, created: Readonly<{ appId: string; appSecret: string }>, options: Readonly<{ at: number; reserved?: Readonly<Record<string, string>> }>):
+    Readonly<{ version: DefinitionsVersion; replaced?: string }> | undefined {
+    let replaced: string | undefined;
+    let attached = false;
+    this.transaction(() => {
+      const latest = this.current(), state = this.creation(teamId);
+      const team = latest?.definitions.teams.find(({ id }) => id === teamId);
+      if (!latest || !team || !state || state.status === "done") return;
+      const { definitions } = latest;
+      const taken = created.appId === definitions.coordinator.appId || definitions.teams.some(({ id, leader }) => id !== teamId && leader.appId === created.appId);
+      if (!APPLICATION_ID.test(created.appId) || taken || Object.hasOwn(options.reserved ?? {}, created.appId)) {
+        this.recordCreation(teamId, { status: "action", reason: "unusable" }, options.at);
+        return;
+      }
+      replaced = team.leader.appId || undefined;
+      const bindings = team.bindings.map((binding) => binding.state === "draining" || binding.state === "removed" ? binding : { ...binding, state: "onboarding" as const });
+      this.append({ ...definitions, teams: definitions.teams.map((candidate) => candidate.id === teamId ? { ...team, leader: { ...team.leader, appId: created.appId }, bindings } : candidate) },
+        latest.version, "onboarding");
+      this.database.prepare("DELETE FROM onboarding_outcome WHERE app_id = ?").run(created.appId);
+      this.database.prepare("INSERT INTO application_secret (app_id, secret) VALUES (?, ?) ON CONFLICT(app_id) DO UPDATE SET secret = excluded.secret").run(created.appId, created.appSecret);
+      this.database.prepare("UPDATE application_creation SET status = 'done', reason = NULL, app_id = ?, at = ? WHERE team_id = ?").run(created.appId, options.at, teamId);
+      this.forgetUnusedApplications();
+      attached = true;
+    });
+    return attached ? { version: this.current()!, ...(replaced ? { replaced } : {}) } : undefined;
   }
 
   /** Saves the Coordinator's responsibility and instructions, the only parts of Sam the console edits (team-management::REQ-001/AC-01). */
@@ -216,12 +301,25 @@ export class TeamRegistry {
 
   /** The recorded onboarding outcomes of an application, so that a restart resumes without repeating finished steps. */
   onboarding(appId: string): OnboardingRecord {
-    const record: { credentials?: OnboardingOutcome; joins: Record<string, OnboardingOutcome> } = { joins: {} };
-    for (const row of this.database.prepare("SELECT * FROM onboarding_outcome WHERE app_id = ? ORDER BY chat_id").all(appId)) {
+    const record: { configure?: OnboardingOutcome; publish?: OnboardingOutcome; credentials?: OnboardingOutcome; joins: Record<string, OnboardingOutcome> } = { joins: {} };
+    for (const row of this.database.prepare("SELECT * FROM onboarding_outcome WHERE app_id = ? AND step <> 'test' ORDER BY chat_id").all(appId)) {
       const outcome: OnboardingOutcome = { status: String(row.status) as OnboardingOutcome["status"], ...(row.reason === null ? {} : { reason: String(row.reason) }), at: Number(row.at) };
-      if (row.step === "credentials") record.credentials = outcome; else record.joins[String(row.chat_id)] = outcome;
+      if (row.step === "join") record.joins[String(row.chat_id)] = outcome;
+      else record[String(row.step) as "configure" | "publish" | "credentials"] = outcome;
     }
     return record;
+  }
+
+  /** Records the test message (step 6) an application sent, or is sending, to one group; a later one to that group replaces it. */
+  recordTestMessage(appId: string, chatId: string, outcome: TestMessageOutcome): void {
+    this.database.prepare(`INSERT INTO onboarding_outcome (app_id, step, chat_id, status, reason, at) VALUES (?, 'test', ?, ?, NULL, ?)
+      ON CONFLICT(app_id, step, chat_id) DO UPDATE SET status = excluded.status, at = excluded.at`).run(appId, chatId, outcome.status, outcome.at);
+  }
+
+  /** The latest test message of an application in each group it sent one to. */
+  testMessages(appId: string): Readonly<Record<string, TestMessageOutcome>> {
+    return Object.fromEntries(this.database.prepare("SELECT chat_id, status, at FROM onboarding_outcome WHERE app_id = ? AND step = 'test' ORDER BY chat_id").all(appId)
+      .map((row) => [String(row.chat_id), { status: String(row.status) as TestMessageOutcome["status"], at: Number(row.at) }]));
   }
 
   /**
@@ -309,10 +407,10 @@ export class TeamRegistry {
     this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (1, NULL, 'local_configuration', ?)").run(JSON.stringify(definitions));
   }
 
-  /** Appends a version unless it equals the latest; a save that changes nothing leaves the version as it is. */
-  private append(definitions: TeamDefinitions, latest: number, source: DefinitionsVersion["source"]): void {
+  /** Appends a version unless it equals the latest; a save that changes nothing leaves the version as it is, unless `always`. */
+  private append(definitions: TeamDefinitions, latest: number, source: DefinitionsVersion["source"], always = false): void {
     const serialized = JSON.stringify(definitions);
-    if (this.database.prepare("SELECT definitions FROM definitions_version WHERE version = ?").get(latest)?.definitions === serialized) return;
+    if (!always && this.database.prepare("SELECT definitions FROM definitions_version WHERE version = ?").get(latest)?.definitions === serialized) return;
     this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (?, ?, ?, ?)").run(latest + 1, latest, source, serialized);
   }
 
@@ -358,9 +456,12 @@ function representable({ coordinator, dispatchGroups, teams }: TeamDefinitions):
     new Set([coordinator.appId, ...teams.flatMap(({ leader }) => leader.appId ? [leader.appId] : [])]).size === teams.filter(({ leader }) => leader.appId).length + 1;
 }
 
-/** The parts of a team the console edits; binding states are the registry's own, so they are not compared. */
-function editable(team: TeamDefinition) {
-  return { teamName: team.teamName, responsibility: team.responsibility, leader: { name: team.leader.name, appId: team.leader.appId, instructions: team.leader.profile.instructions },
+/**
+ * The parts of a team the console edits; binding states are the registry's own, so they are not compared. In QR creation the
+ * application is not the console's either (`application` false).
+ */
+function editable(team: TeamDefinition, application: boolean) {
+  return { teamName: team.teamName, responsibility: team.responsibility, leader: { name: team.leader.name, ...(application ? { appId: team.leader.appId } : {}), instructions: team.leader.profile.instructions },
     profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools })),
     groups: team.bindings.filter(({ state }) => state !== "draining" && state !== "removed").map(({ chatId }) => chatId) };
 }
