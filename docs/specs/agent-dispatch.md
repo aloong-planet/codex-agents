@@ -7,8 +7,9 @@
 > - Teams are edited from the console's team management page and apply without a restart (ticket 11).
 > - Cross-team work goes through the Coordinator (ticket 08).
 > - Dispatch groups are chosen on the console's team management page and apply at the next start; a configuration that lists only groups takes the teams from the registry, and starts with the Coordinator alone when there is none.
+> - The console's team overview shows each dispatch group's organization, its requests' records and the group memory, read-only ([agent console](agent-console.md); ticket 10).
 >
-> The console's other views are specified here and not yet implemented.
+> The console's private conversations and private requests are specified in the agent console spec and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
 
