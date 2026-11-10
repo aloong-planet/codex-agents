@@ -1,12 +1,16 @@
+import { randomUUID } from "node:crypto";
+
+import QRCode from "qrcode";
+
 import { effectiveHostTools } from "./agent-profile.js";
 import type { ConsoleBrowser } from "./console-access.js";
 import type { ConsoleAudit } from "./console-audit.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { GroupNames } from "./group-names.js";
 import type { AnnouncementSend, TeamAnnouncements } from "./team-announcements.js";
-import { type ApplicationCredentials, type OnboardingPlatform, TeamOnboarding } from "./team-onboarding.js";
-import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type DefinitionsVersion, type OnboardingOutcome, type TeamDefinition,
-  TeamDefinitionError, type TeamEdit, type TeamRegistry } from "./team-registry.js";
+import { type ApplicationCredentials, type CreationEnd, type OnboardingPlatform, TeamOnboarding } from "./team-onboarding.js";
+import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type DefinitionsVersion, type OnboardingMethod, type OnboardingOutcome, type TeamDefinition,
+  TeamDefinitionError, type TeamEdit, type TeamRegistry, type TestMessageOutcome } from "./team-registry.js";
 
 /** A console input that is not a team definition at all; the page never sends one. */
 export class TeamInputError extends Error {}
@@ -39,20 +43,34 @@ export type TeamManagementOptions = Readonly<{
 
 const joinText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已加入本群，负责：${team.responsibility}`;
 const leaveText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已离开本群，不再接新的事务；进行中的事务会做完。`;
+const testText = (team: TeamDefinition) => `这是 ${team.leader.name}（${team.teamName}）的测试消息，用来确认可以在本群发言。`;
 
 /**
- * Team management as the running service applies it (team-management spec): console saves and their audit, onboarding of
- * existing applications, the Coordinator's join and leave announcements, and the live roster every dispatch reader takes.
- * A saved change applies to requests admitted afterwards; requests keep their definitions version (agent-dispatch::REQ-017).
+ * Posts a team's test message in one group as the team's own application, once per `operationId`, and says what the platform
+ * answered: accepted, rejected, or an outcome that is not known.
+ */
+export type TestMessageSend = (message: Readonly<{ teamId: string; appId: string; chatId: string; text: string; operationId: string }>) => Promise<"accepted" | "rejected" | "unknown">;
+
+/**
+ * Team management as the running service applies it (team-management spec): console saves and their audit, onboarding by QR
+ * creation or with an existing application, the test message, the Coordinator's join and leave announcements, and the live
+ * roster every dispatch reader takes. A saved change applies to requests admitted afterwards; requests keep their definitions
+ * version (agent-dispatch::REQ-017).
  */
 export class TeamManagement {
   private readonly onboarding: TeamOnboarding;
   private roster_: Readonly<FeishuDispatchConfiguration>;
   private send: AnnouncementSend | undefined;
+  private sendTest: TestMessageSend | undefined;
+  /** Teams whose test message is being sent, so that a second confirmation does not post it twice. */
+  private readonly testing = new Set<string>();
   private readonly groupNames: GroupNames;
+  private readonly now: () => number;
 
   constructor(private readonly options: TeamManagementOptions) {
-    this.onboarding = new TeamOnboarding(options.registry, options.platform, options.coordinator, options.now);
+    this.now = options.now ?? Date.now;
+    this.onboarding = new TeamOnboarding(options.registry, options.platform, options.coordinator, options.now,
+      { creationEnded: (end) => this.creationEnded(end), reserved: () => options.reservedApplications?.() ?? {} });
     this.roster_ = options.registry.roster(options.coordinator);
     this.groupNames = options.groupNames ?? new GroupNames(options.platform, options.coordinator, options.now);
   }
@@ -70,20 +88,33 @@ export class TeamManagement {
     this.deliver();
   }
 
+  /** Posts test messages through each team's own sending application. */
+  deliverTestMessagesWith(send: TestMessageSend): void { this.sendTest = send; }
+
   /** Resumes onboarding at startup without repeating finished steps. */
   async resume(): Promise<void> {
     this.announceJoins(await this.onboarding.resume());
   }
 
-  /** Saves one team from the console; returns the team's ID. Onboarding of its application continues in the background. */
+  /** Ends every QR code's wait, as at shutdown. */
+  close(): void { this.onboarding.close(); }
+
+  /**
+   * Saves one team from the console; returns the team's ID. Onboarding of its application continues in the background. The
+   * save that chooses QR creation asks for the team's first QR code; a save as an existing application ends a code's wait.
+   */
   saveTeam(input: unknown, options: Readonly<{ basedOn: unknown; actor: TeamActor }>): string {
     const { edit, secret } = parseTeamEdit(input, this.options.catalogToolIds);
     this.groupNames.forgetFailed(edit.groups);
     const basedOn = parseVersion(options.basedOn);
     const before = edit.id === undefined ? undefined : this.current().definitions.teams.find(({ id }) => id === edit.id);
-    const { version, teamId } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, ...(secret === undefined ? {} : { secret }) });
+    const { version, teamId, creation } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, at: this.now(),
+      ...(secret === undefined ? {} : { secret }) });
     const after = version.definitions.teams.find(({ id }) => id === teamId)!;
-    this.auditTeamSave(before, after, secret !== undefined, version.version, options.actor);
+    const method: OnboardingMethod = edit.method ?? "existing";
+    this.auditTeamSave(before, after, secret !== undefined && method === "existing", version.version, options.actor, before === undefined || creation ? method : undefined);
+    if (creation === "ended") this.onboarding.endCreation(teamId);
+    if (creation === "started") void this.requestCreation(teamId, options.actor);
     // Removing a team from a group starts at once: the Coordinator announces that it left (team-management::REQ-004/AC-01).
     for (const binding of after.bindings) {
       if (binding.state === "draining" && before?.bindings.some(({ chatId, state }) => chatId === binding.chatId && state === "accepting")) {
@@ -118,6 +149,49 @@ export class TeamManagement {
     await this.runOnboarding(team.id, actor, true);
   }
 
+  /** Asks for a new QR code for a team in QR creation, as 「刷新二维码」 does, and waits until it is shown or could not be obtained. */
+  async refreshCreation(teamId: unknown, actor: TeamActor): Promise<void> {
+    const state = typeof teamId === "string" ? this.options.registry.creation(teamId) : undefined;
+    if (!state) throw new TeamInputError("这个团队不在扫码创建中");
+    if (state.status === "done") throw new TeamInputError("应用已经创建，不需要新的二维码");
+    await this.requestCreation(teamId as string, actor);
+  }
+
+  /** The QR code a team's creation shows while it waits for the scan, as an SVG image; undefined when no code waits. */
+  async creationCode(teamId: string): Promise<string | undefined> {
+    const link = this.onboarding.creationLink(teamId);
+    return link ? QRCode.toString(link.url, { type: "svg", errorCorrectionLevel: "M", margin: 2 }) : undefined;
+  }
+
+  /**
+   * Sends the test message (step 6) once to each group the team accepts work in, as the team's own application, and records
+   * each group's result. It is sent only when the owner confirmed it; a failed or unknown send is never repeated by itself.
+   */
+  async sendTestMessage(teamId: unknown, confirmed: unknown, actor: TeamActor): Promise<void> {
+    const team = typeof teamId === "string" ? this.current().definitions.teams.find(({ id }) => id === teamId) : undefined;
+    if (!team) throw new TeamInputError("团队不存在");
+    if (confirmed !== true) throw new TeamInputError("发送测试消息前需要确认");
+    const appId = team.leader.appId;
+    const groups = team.bindings.filter(({ state }) => state === "accepting").map(({ chatId }) => chatId);
+    if (!appId || !groups.length) throw new TeamInputError("机器人还没有加入所绑定的群");
+    if (this.testing.has(team.id)) throw new TeamInputError("测试消息正在发送");
+    this.testing.add(team.id);
+    try {
+      const operation = randomUUID();
+      const results: Record<string, TestMessageOutcome["status"]> = {};
+      for (const chatId of groups) {
+        // Recorded as being sent first: a send cut off by a restart then reads as unknown, and is not repeated.
+        this.options.registry.recordTestMessage(appId, chatId, { status: "sending", at: this.now() });
+        let answer: Awaited<ReturnType<TestMessageSend>>;
+        try { answer = this.sendTest ? await this.sendTest({ teamId: team.id, appId, chatId, text: testText(team), operationId: `team-test-message:${operation}` }) : "rejected"; }
+        catch { answer = "unknown"; }
+        results[chatId] = answer === "accepted" ? "accepted" : answer === "rejected" ? "failed" : "unknown";
+        this.options.registry.recordTestMessage(appId, chatId, { status: results[chatId], at: this.now() });
+      }
+      this.audit(actor, { event: "team_test_message_sent", team: team.id, appId, groups: results });
+    } finally { this.testing.delete(team.id); }
+  }
+
   /** The console's view: no secret value ever appears in it (team-management::CON-001). */
   async view(): Promise<TeamsView> {
     const current = this.current(), { definitions } = current;
@@ -135,9 +209,16 @@ export class TeamManagement {
         responsibility: definitions.coordinator.responsibility, instructions: definitions.coordinator.profile.instructions, appId: definitions.coordinator.appId },
       teams: definitions.teams.map((team) => {
         const record = team.leader.appId ? this.options.registry.onboarding(team.leader.appId) : { joins: {} };
+        const creation = this.options.registry.creation(team.id);
+        const link = this.onboarding.creationLink(team.id);
         return { id: team.id, teamName: team.teamName, responsibility: team.responsibility,
           leader: { name: team.leader.name, appId: team.leader.appId, instructions: team.leader.profile.instructions },
           secretStored: Boolean(team.leader.appId) && this.options.registry.hasSecret(team.leader.appId),
+          method: creation ? "qr" as const : "existing" as const,
+          ...(creation ? { creation: { status: creation.status, ...(creation.status === "action" ? { reason: creation.reason } : {}),
+            ...(creation.status === "done" ? { appId: creation.appId } : {}), ...(creation.status === "waiting" && link ? { codeExpiresAt: link.expiresAt } : {}) } } : {}),
+          ...(record.configure ? { configure: record.configure } : {}), ...(record.publish ? { publish: record.publish } : {}),
+          tests: team.leader.appId ? { ...this.options.registry.testMessages(team.leader.appId) } : {},
           ...(record.credentials ? { credentials: record.credentials } : {}),
           bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}) })),
           profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => {
@@ -151,6 +232,21 @@ export class TeamManagement {
     };
   }
 
+  /** Asks for a team's QR code on behalf of `actor`; the audit names who asked, and later what the scan led to. */
+  private async requestCreation(teamId: string, actor: TeamActor): Promise<void> {
+    this.audit(actor, { event: "team_application_qr_requested", team: teamId });
+    try { await this.onboarding.requestCreation(teamId); }
+    catch (error) { this.options.report(`team_application_qr_failed: ${error instanceof Error ? error.message : "error"}`); }
+  }
+
+  /** A QR creation ended: the created application now posts for the team, and its remaining steps run; or nothing was created. */
+  private creationEnded(end: CreationEnd): void {
+    if ("failed" in end) { this.audit({}, { event: "team_application_qr_failed", team: end.teamId, reason: end.failed }); return; }
+    this.audit({}, { event: "team_application_created", team: end.teamId, appId: end.created, ...(end.replaced ? { replaced: end.replaced } : {}), version: this.current().version });
+    this.refreshRoster();
+    void this.runOnboarding(end.teamId, {}, false);
+  }
+
   private async runOnboarding(teamId: string, actor: TeamActor, requested: boolean): Promise<void> {
     try {
       const started = await this.onboarding.run(teamId);
@@ -158,6 +254,7 @@ export class TeamManagement {
       if (requested || team?.leader.appId) {
         const record = team?.leader.appId ? this.options.registry.onboarding(team.leader.appId) : { joins: {} };
         this.audit(actor, { event: "team_onboarding_checked", team: teamId, ...(team?.leader.appId ? { appId: team.leader.appId } : {}),
+          ...(record.configure ? { configure: outcome(record.configure) } : {}), ...(record.publish ? { publish: outcome(record.publish) } : {}),
           credentials: record.credentials ? outcome(record.credentials) : null,
           groups: Object.fromEntries(Object.entries(record.joins).map(([chatId, value]) => [chatId, outcome(value)])) });
       }
@@ -193,12 +290,13 @@ export class TeamManagement {
   }
 
   /** One audit entry per kind of change, naming what changed and never a secret value (agent-console::REQ-004). */
-  private auditTeamSave(before: TeamDefinition | undefined, after: TeamDefinition, secretWritten: boolean, version: number, actor: TeamActor): void {
+  private auditTeamSave(before: TeamDefinition | undefined, after: TeamDefinition, secretWritten: boolean, version: number, actor: TeamActor, method?: OnboardingMethod): void {
     const changed = before === undefined ? ["created"] : [
       ...(before.teamName !== after.teamName ? ["teamName"] : []), ...(before.responsibility !== after.responsibility ? ["responsibility"] : []),
       ...(before.leader.name !== after.leader.name ? ["leader.name"] : []), ...(before.leader.appId !== after.leader.appId ? ["leader.appId"] : []),
-      ...(before.leader.profile.instructions !== after.leader.profile.instructions ? ["leader.instructions"] : [])];
-    if (changed.length) this.audit(actor, { event: "team_changed", team: after.id, version, changed, ...(before === undefined ? { teamName: after.teamName } : {}) });
+      ...(before.leader.profile.instructions !== after.leader.profile.instructions ? ["leader.instructions"] : []), ...(method ? ["method"] : [])];
+    // `method` is given for a new team and whenever the save changed how the team gets its application.
+    if (changed.length) this.audit(actor, { event: "team_changed", team: after.id, version, changed, ...(before === undefined ? { teamName: after.teamName } : {}), ...(method ? { method } : {}) });
     if (secretWritten) this.audit(actor, { event: "team_secret_written", team: after.id, appId: after.leader.appId, version });
     const states = (team: TeamDefinition | undefined) => new Map((team?.bindings ?? []).map(({ chatId, state }) => [chatId, state]));
     const old = states(before), now = states(after);
@@ -227,6 +325,14 @@ export type TeamsView = Readonly<{
   coordinator: { id: string; name: string; teamName: string; responsibility: string; instructions: string; appId: string };
   teams: Array<{
     id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string }; secretStored: boolean;
+    /** How the team gets its application, as saved. */
+    method: OnboardingMethod;
+    /** QR creation (step 1): its state, why it needs action, the created application, and until when the code that waits for its scan is valid. */
+    creation?: { status: "waiting" | "action" | "done"; reason?: string; appId?: string; codeExpiresAt?: number };
+    /** Steps 2 and 3 of the application the team uses, when QR creation made it. */
+    configure?: OnboardingOutcome; publish?: OnboardingOutcome;
+    /** Step 6: the latest test message of the team's application in each group it sent one to. */
+    tests: Record<string, TestMessageOutcome>;
     credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome }>;
     profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[] }>;
     activeAssignments: number;
@@ -255,6 +361,7 @@ function parseTeamEdit(input: unknown, catalogToolIds: readonly string[]): Reado
   if (value.id !== undefined && typeof value.id !== "string") throw new TeamInputError("团队编号无效");
   if (!Array.isArray(value.executorProfiles) || value.executorProfiles.length > 20) throw new TeamInputError("能力档格式无效");
   if (!Array.isArray(value.groups) || !value.groups.every((group) => typeof group === "string")) throw new TeamInputError("所属群格式无效");
+  if (value.method !== undefined && value.method !== "qr" && value.method !== "existing") throw new TeamInputError("接入方式无效");
   const secret = value.secret === undefined ? undefined : text(value.secret, "App Secret");
   if (secret !== undefined && (!secret.trim() || secret.length > 256)) throw new TeamInputError("App Secret 格式无效");
   const executorProfiles = value.executorProfiles.map((item) => {
@@ -267,7 +374,7 @@ function parseTeamEdit(input: unknown, catalogToolIds: readonly string[]): Reado
   const edit: TeamEdit = { ...(value.id === undefined ? {} : { id: value.id as string }), teamName: text(value.teamName, "团队名称"),
     responsibility: text(value.responsibility, "职责"),
     leader: { name: text(leader.name, "负责人名称"), appId: text(leader.appId, "App ID"), instructions: text(leader.instructions, "负责人提示词") },
-    executorProfiles, groups: value.groups as string[] };
+    executorProfiles, groups: value.groups as string[], ...(value.method === undefined ? {} : { method: value.method }) };
   return { edit, ...(secret === undefined ? {} : { secret }) };
 }
 

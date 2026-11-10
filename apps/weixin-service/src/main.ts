@@ -1370,14 +1370,17 @@ const startup = (async () => {
       if (!stopping && name === "feishu" && agentDispatch) {
         await Promise.all([...dispatchApplications.values()].map(startDispatchApplication));
         await agentDispatch.start();
-        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped.
-        teamManagement?.deliverAnnouncementsWith(async ({ id, chatId, text }) => {
+        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped. A team's test
+        // message takes the same channel as the team's own application, so it has the effect record of the team's other posts.
+        const postInGroup = async (chatId: string, text: string, operationId: string, senderAccountId?: string) => {
           const address = feishuConfiguration!.owner.conversationAddresses().find(({ accountId, target }) => feishuConfiguration!.owner.deliveryTarget(accountId, target) === chatId);
-          if (!address) return "rejected";
+          if (!address) return "rejected" as const;
           const sent = await feishuChannel!.send({ channel: "feishu", accountId: address.accountId, target: address.target, message: text,
-            operationId: `team-announcement:${id}`, beforeSubmit: () => true });
-          return sent.ok ? "accepted" : sent.reason === "unknown" ? "unknown" : "rejected";
-        });
+            operationId, beforeSubmit: () => true, ...(senderAccountId ? { senderAccountId } : {}) });
+          return sent.ok ? "accepted" as const : sent.reason === "unknown" ? "unknown" as const : "rejected" as const;
+        };
+        teamManagement?.deliverAnnouncementsWith(({ id, chatId, text }) => postInGroup(chatId, text, `team-announcement:${id}`));
+        teamManagement?.deliverTestMessagesWith(({ appId, chatId, text, operationId }) => postInGroup(chatId, text, operationId, appId));
         void teamManagement?.resume().catch(() => process.stderr.write("team_onboarding_resume_failed\n"));
       }
       if (!stopping) {
@@ -1407,6 +1410,8 @@ function shutdown(): Promise<void> {
   try { await settleCleanup([
     () => pennyStartup,
     () => penny?.close(),
+    // A QR code that waits for its scan keeps polling; ending the wait lets the process exit.
+    () => teamManagement?.close(),
     () => agentDispatch?.close(),
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),
