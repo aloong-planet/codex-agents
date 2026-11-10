@@ -3,7 +3,7 @@
 // drawer with a node's related records and its relationships and storage. Text from members, agents and tools is always escaped
 // and set as text, so nothing in it links, loads or runs (agent-console::REQ-005/AC-04). The view is read-only.
 (() => {
-  const { esc } = window.ConsoleShell;
+  const { esc, tip } = window.ConsoleShell;
   window.ConsoleShell.mount("overview");
   const $ = (id) => document.getElementById(id);
 
@@ -59,8 +59,12 @@
       $("ats-view").innerHTML = '<div class="acv2-empty" role="alert">暂时读不到团队总览，请稍后刷新。</div>';
       return;
     }
+    // A link from elsewhere in the console, such as the dispatch-group refusal list, names a request: open its record, expanded.
+    const linked = findRequest(new window.URLSearchParams(location.search).get("request") ?? "");
+    if (linked) scope = linked.chatId;
     if (!view.groups.some((group) => group.chatId === scope)) scope = view.groups[0]?.chatId ?? null;
     render();
+    if (linked) open(`req:${linked.id}`);
   }
 
   // ── The tree ──
@@ -211,7 +215,7 @@
     const result = r.result ?? (r.status === "proposed" ? "等待发起人确认后开始。" : ["queued", "running", "waiting"].includes(r.status) ? "事务进行中，收尾后在这里显示结果。" : "没有记录结果。");
     const sam = esc(name(coordinator()));
     const path = `群任务 · ${esc(groupName(r.chatId))}<br>分派路径：${sam} → ${esc(name(r.lead))}（主责）${cross.map((teamId) => `<br>跨队：${sam} → ${esc(name(teamId))} · 应 ${esc(name(r.lead))} 请求`).join("")}${r.parts.filter((part) => part.teamId === null).map((part) => `<br>未承接：${esc(part.title)} · 没有团队承接`).join("")}<br>汇报：${[r.lead, ...cross].map((teamId) => esc(name(teamId))).join("、")} · 原群${ended ? "<br>全部执行者已结束，执行记录保留。" : ""}`;
-    const assignments = r.assignments.length ? `<div class="acv2-detail-label">分工 · ${r.assignments.length} 项</div><ul class="ats-asg-list">${r.assignments.map((a) => `<li class="ats-asg"><div class="ats-asg-top"><button class="ats-asg-name ${tone(a.teamId)}" type="button" data-open="${esc(`exec:${a.id}`)}">${esc(a.executor)}</button>${badge(a.status)}</div><div class="ats-asg-meta">${esc(name(a.teamId))} 负责 · 能力档：${esc(a.profile)}${a.crossTeam ? " · 跨队" : ""}</div><p>${esc(a.title)}${a.result ? `：${esc(a.result)}` : ""}${active(a.status) || a.status === "queued" || a.status === "blocked" ? "" : " 执行者已结束，记录保留。"}</p></li>`).join("")}</ul>` : "";
+    const assignments = r.assignments.length ? `<div class="acv2-detail-label">分工 · ${r.assignments.length} 项</div><ul class="ats-asg-list">${r.assignments.map((a) => `<li class="ats-asg"><div class="ats-asg-top"><button class="ats-asg-name ${tone(a.teamId)}" type="button" data-open="${esc(`exec:${a.id}`)}">${esc(a.executor)}</button>${badge(a.status)}</div><div class="ats-asg-meta">${esc(name(a.teamId))} 负责 · 能力档：${esc(a.profile)}${a.crossTeam ? " · 跨队" : ""}</div>${a.brief ? `<p class="ats-asg-brief">交办：${esc(a.brief)}</p>` : ""}<p>${esc(a.title)}${a.result ? `：${esc(a.result)}` : ""}${active(a.status) || a.status === "queued" || a.status === "blocked" ? "" : " 执行者已结束，记录保留。"}</p></li>`).join("")}</ul>` : "";
     const posts = `<details class="acv2-process"><summary>群内汇报 · ${r.posts.length} 条</summary><ol class="acv2-timeline">${r.posts.map((post) => `<li class="acv2-step"><time>${post.acceptedAt ? esc(clock(post.acceptedAt)) : ""}</time><div><span class="ats-report-who ${tone(post.agentId)}">${esc(name(post.agentId))}${KIND[post.kind] ? ` · ${KIND[post.kind]}` : ""}</span><p class="ats-report-text">${esc(post.text)} · ${esc(DELIVERY[post.state] ?? post.state)}</p></div></li>`).join("")}</ol></details>`;
     const source = [r.requester === "owner" ? "本人" : "群成员", groupName(r.chatId), SOURCE[r.message.source]].filter(Boolean).map(esc).join(" / ");
     const message = `${r.message.text}${r.message.attachments.length ? `\n附件：${r.message.attachments.join("、")}` : ""}`;
@@ -236,6 +240,33 @@
     "team-store": () => ["每件事务保留主责负责人、各项分工的临时执行者、过程与结果；执行者结束后仍可查阅。", "agent-dispatch.sqlite / agent-sessions.sqlite / model-runtimes/"],
     "group-schedule": () => ["群定时任务与提醒按来源群隔离，授权成员共同管理；结果由负责人发回原群。", "scheduled-tasks.sqlite / workflow-targets.sqlite / workflow-file-artifacts/"],
   };
+  // A dispatch group's memory, read-only (agent-console::US-005/AC-04): every entry by section, then every dated event.
+  const CATEGORY = { preferences: "偏好", projects: "项目", decisions: "决定", constraints: "约束" };
+  const PLAN = { pending: "计划·待落实", occurred: "计划·已发生", cancelled: "计划·已取消", unfulfilled: "计划·未落实" };
+  const DAYTIME = { morning: "上午", afternoon: "下午", evening: "晚上" };
+  const eventLabel = (event) => event.kind === "planned" ? PLAN[event.plan] ?? "计划" : event.retracted ? "已发生·已撤回" : event.fulfillsPlan ? "已发生·完成计划" : "已发生";
+  const eventTime = (event) => event.kind !== "planned" ? "" : DAYTIME[event.time] ?? event.time ?? "未指定具体时间";
+  const monthDay = (ms) => { const d = new Date(ms); return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(ms)}`; };
+  function memoryBody(memory) {
+    if (!memory?.readable) return '<p class="ats-memory-note ats-memory-error" role="alert">暂时读不到本群记忆，请稍后重新打开。</p>';
+    if (!memory.entries.length && !memory.events.length) return '<p class="ats-memory-note">本群还没有整理出的记忆。</p>';
+    const sections = Object.entries(CATEGORY).map(([key, label]) => {
+      const items = memory.entries.filter((entry) => entry.category === key);
+      return items.length ? `<h4>${label}</h4><ul>${items.map((entry) => `<li>${esc(entry.value)}</li>`).join("")}</ul>` : "";
+    }).join("");
+    const events = memory.events.length ? `<h4>事件</h4><ul>${memory.events.map((event) => `<li>${esc([event.date, eventLabel(event), eventTime(event), event.summary].filter(Boolean).join(" · "))}</li>`).join("")}</ul>` : "";
+    return `<p class="ats-memory-meta">记忆 ${memory.entries.length} 条 · 事件 ${memory.events.length} 个${memory.updatedAt ? ` · 最近整理 ${esc(monthDay(memory.updatedAt))}` : ""}</p><div class="ats-memory">${sections}${events}</div>`;
+  }
+  async function loadMemory(id, chatId) {
+    let memory = null;
+    try {
+      const response = await fetch(`/api/overview/memory?group=${encodeURIComponent(chatId)}`);
+      if (response.status === 401) { location.reload(); return; }
+      if (response.ok) memory = await response.json();
+    } catch { /* shown as unreadable */ }
+    const body = $("ats-memory-body");
+    if (selected === id && body) body.innerHTML = memoryBody(memory);
+  }
   const PENNY_STATE = () => !view.penny.configured ? "未配置" : view.penny.ready ? "就绪" : "未就绪";
   function relation(id) {
     const sam = name(coordinator()), root = view.storageRoot;
@@ -277,7 +308,8 @@
       store = "agent-dispatch.sqlite / agent-sessions.sqlite";
     }
     const isolated = PRIVATE.has(id);
-    return `<p class="ats-drawer-summary">${esc(summary ?? "")}</p><h3 class="ats-relation-title">${isolated ? "私聊与身份" : "所属关系与消息身份"}</h3><div class="ats-path-line">${esc(path ?? "")}</div>${related(links)}<h3 class="ats-relation-title">对应存储</h3><code class="acv2-path">${esc(`${root}/`)}<br>${esc(store ?? "").replace(/\n/g, "<br>")}</code>${isolated ? "" : groupStores}`;
+    const memory = groupStore?.kind === "group-memory" ? `<div class="acv-tip-row ats-memory-head"><h3 class="ats-relation-title">当前内容</h3>${tip(`只读：这是 ${sam} 处理本群事务时读取的记忆，包括启用团队之前整理的内容。\n· 事件按日期列出全部，不限时间范围。\n· 控制台不修改、不删除这份记忆。`)}</div><div id="ats-memory-body"></div>` : "";
+    return `<p class="ats-drawer-summary">${esc(summary ?? "")}</p><h3 class="ats-relation-title">${isolated ? "私聊与身份" : "所属关系与消息身份"}</h3><div class="ats-path-line">${esc(path ?? "")}</div>${related(links)}<h3 class="ats-relation-title">对应存储</h3><code class="acv2-path">${esc(`${root}/`)}<br>${esc(store ?? "").replace(/\n/g, "<br>")}</code>${isolated ? "" : groupStores}${memory}`;
   }
 
   function setTab(next, focus = false) {
@@ -306,6 +338,8 @@
     $("ats-scope-label").textContent = id?.startsWith("team:") ? "团队事务 · 包含历史" : id?.startsWith("exec:") ? "该执行者所在事务" : id?.startsWith("req:") ? "事务记录" : "关联记录";
     $("ats-back").hidden = trail.length === 0;
     $("ats-panel-storage").innerHTML = relation(id);
+    const store = storeOf(id);
+    if (store?.kind === "group-memory") void loadMemory(id, store.chatId);
     renderRows();
     updateSelection();
   }

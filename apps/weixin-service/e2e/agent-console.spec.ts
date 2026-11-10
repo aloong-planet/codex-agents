@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 
 import { requestConsoleControl } from "../src/console-control.js";
+import { groupMemoryAccount, seedEvent, seedMemory } from "../tests/support/memory.js";
 import { processWaitLimitMs } from "../tests/support/process-wait.js";
 import { exchangeLoginLink } from "./console-session.js";
 import { test } from "./fixtures.js";
@@ -237,6 +238,8 @@ test.describe("with Feishu dispatch", () => {
     expect(order).toEqual(["acv4-detail-title", "acv2-result acv2-warning", "ats-path-line", "acv2-detail-label", "ats-asg-list", "acv2-process", "acv2-detail-label",
       "acv2-message", "acv2-detail-label", "acv2-related"]);
     await expect(record.locator(".ats-asg .acv2-badge")).toHaveText(["已完成", "失败"]);
+    // Each Assignment shows the Brief its Executor received, under its meta line.
+    await expect(record.locator(".ats-asg-brief")).toHaveText(["交办：逐段校对", "交办：核对三家"]);
     await record.locator(".acv2-process summary").click();
     await expect(record.locator(".ats-report-text").last()).toHaveText("商品 C 收尾：校对已完成，交付文件为 product-c-review.md；竞品价格未能核对。 · 平台已接收");
     // Text from members and Executors is plain text: no link, image or script; a delivered file is only named (REQ-005/AC-04, AC-06).
@@ -276,6 +279,31 @@ test.describe("with Feishu dispatch", () => {
     await expect(page.locator(".ats-group-head")).toContainText("产品讨论组 · 团队关系");
     await expect(card("Bill").locator(".ats-node-foot")).toHaveText("0 执行中 · 0 待确认 · 1 历史");
     await expect(page.locator(".ats-req-frame")).toHaveCount(0);
+  });
+
+  test("shows each group's own memory read-only in the storage tab, every entry and every event", async ({ page, fixtureServer }, testInfo) => {
+    const alpha = groupMemoryAccount(fixtureServer.directory, "oc_alpha"), beta = groupMemoryAccount(fixtureServer.directory, "oc_beta");
+    await seedMemory(fixtureServer.directory, alpha.account, alpha.target, "alpha-1", "上新文案先发到上新话题 https://example.com/rules");
+    await seedEvent(fixtureServer.directory, alpha.account, alpha.target, "alpha-2", "2025-01-15", "去年的商品 C 校对完成");
+    await seedMemory(fixtureServer.directory, beta.account, beta.target, "beta-1", "产品讨论组的发布节奏是双周");
+    await page.goto("/console");
+    await page.locator(".ats-store", { hasText: "群业务记忆" }).click();
+    await page.locator("#ats-tab-storage").click();
+    const panel = page.locator("#ats-panel-storage");
+    await expect(panel.locator(".ats-memory-head")).toContainText("当前内容");
+    await expect(panel.locator(".ats-memory-head .acv-tip-btn")).toHaveAttribute("aria-label", /只读.*事件按日期列出全部，不限时间范围.*控制台不修改、不删除这份记忆/);
+    await expect(panel.locator(".ats-memory-meta")).toHaveText(/^记忆 1 条 · 事件 1 个 · 最近整理 \d\d-\d\d \d\d:\d\d$/);
+    await expect(panel.locator(".ats-memory h4")).toHaveText(["项目", "事件"]);
+    await expect(panel.locator(".ats-memory li")).toHaveText(["上新文案先发到上新话题 https://example.com/rules", "2025-01-15 · 已发生 · 去年的商品 C 校对完成"]);
+    // Read-only and plain text: nothing in the view links, edits or deletes.
+    await expect(panel.locator(".ats-memory a, .ats-memory button, .ats-memory input, .ats-memory textarea")).toHaveCount(0);
+    await testInfo.attach("group-memory", { body: await page.screenshot(), contentType: "image/png" });
+    await page.keyboard.press("Escape");
+    // The other group shows its own memory only.
+    await page.locator(".ats-chip", { hasText: "产品讨论组" }).click();
+    await page.locator(".ats-store", { hasText: "群业务记忆" }).click();
+    await page.locator("#ats-tab-storage").click();
+    await expect(panel.locator(".ats-memory li")).toHaveText(["产品讨论组的发布节奏是双周"]);
   });
 
   test("opens details in a drawer over a scrim at every width, closing on the button, the scrim and Escape, and filling the workspace on phones", async ({ page, fixtureServer }, testInfo) => {

@@ -86,9 +86,21 @@
 .ats-asg-name:hover{text-decoration:underline}
 .ats-asg-meta{font-size:10px;color:var(--acv-muted);margin-top:3px}
 .ats-asg p{margin:5px 0 0;font-size:10px;line-height:1.6;color:var(--acv-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+/* The Brief its Executor received (REQ-001): muted plain text, in full; paragraphs keep their breaks and long words wrap. */
+.ats-asg p.ats-asg-brief{margin-top:4px;color:var(--acv-muted)}
 .ats-report-who{font-weight:650;color:var(--ats-tone)}
 /* A group post keeps its line breaks: a post with several items puts each on its own line. */
 .ats-report-text{white-space:pre-line;overflow-wrap:anywhere}
+/* The group memory as the Coordinator reads it: plain text, read-only; long entries wrap and the list scrolls inside the drawer. */
+.ats-memory-head{margin:18px 0 6px}
+.ats-memory-head .ats-relation-title{margin:0}
+.ats-memory-meta{font-size:11px;color:var(--acv-muted);margin:0 0 6px}
+.ats-memory{border:1px solid var(--acv-line);border-radius:6px;background:var(--acv-paper);padding:4px 10px 8px;max-height:320px;overflow:auto}
+.ats-memory h4{font-size:11px;color:var(--acv-muted);margin:8px 0 3px}
+.ats-memory ul{margin:0;padding-left:16px}
+.ats-memory li{font-size:11px;line-height:1.7;color:var(--acv-ink);overflow-wrap:anywhere;white-space:pre-wrap}
+.ats-memory-note{font-size:11px;color:var(--acv-muted);margin:0}
+.ats-memory-note.ats-memory-error{color:var(--acv-error)}
 .acv2-badge.acv2-partial,.acv2-badge.acv2-interrupted{background:var(--acv-error-soft);color:var(--acv-error)}
 .acv2-badge.acv2-unassigned{background:var(--acv-paper);color:var(--acv-warning);box-shadow:inset 0 0 0 1px var(--acv-warning)}
 /* The drawer's tabs, filters and records. */

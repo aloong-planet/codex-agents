@@ -15,10 +15,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { authorizeLocalService, exchangeLoginLink } from "../e2e/console-session.js";
 import { startFixtureServer } from "../e2e/fixture-server.js";
-import { AccountMemoryStore } from "../src/account-memory-store.js";
-import { AccountMemoryToolHost } from "../src/account-memory-tool-host.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { seedMemory } from "./support/memory.js";
+import { groupMemoryAccount, seedEvent, seedMemory } from "./support/memory.js";
 import { signalProcessGroup } from "./support/process-group.js";
 import { config, decision, groupMessage, start } from "./support/real-main.js";
 
@@ -186,19 +184,11 @@ describe("team overview APIs against the running service", () => {
     cleanups.push(() => service.close());
     return service;
   }
-  /** The memory account a group's Coordinator recalls, and the owner's personal one, as the service derives them from the file. */
+  /** The memory accounts of both groups' Coordinator and the owner's personal one, as the service derives them from the file. */
   function accounts(directory: string) {
     const owner = parseChannelStartupConfiguration(JSON.parse(fs.readFileSync(path.join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")!.owner;
-    const group = (chatId: string) => { const address = owner.groupAddress(chatId)!; return { account: owner.memoryScope(address.accountId, address.target), target: address.target }; };
-    return { alpha: group("oc_alpha"), beta: group("oc_beta"), personal: { account: owner.memoryScope(owner.conversationAddress().accountId), target: owner.conversationAddress().target } };
-  }
-  /** Commits one dated event into `account` through the production memory tool host, as a curator's accepted decision would. */
-  async function seedEvent(directory: string, account: string, target: string, id: string, localDate: string, summary: string) {
-    const memory = new AccountMemoryStore(path.join(directory, "memory")), curator = new AccountMemoryToolHost(memory);
-    expect(await curator.commit({ accountId: account, jobId: id, batchId: id, mutationPolicy: { mode: "free_add" }, evidenceEntryIds: [id],
-      evidenceTexts: { [id]: `${localDate} ${summary}` }, evidenceLocalDates: { [id]: localDate }, evidenceOrigins: { [id]: { eventKey: id, target } } },
-    { batchId: id, basedOnRevision: memory.read(account).revision, decisions: [{ kind: "record_event", eventKind: "observed", localDate, timePrecision: "date", localTime: null,
-      summary, sourceText: null, planMatch: null, evidenceEntryIds: [id], confidence: 1 }] })).toMatchObject({ status: "committed" });
+    return { alpha: groupMemoryAccount(directory, "oc_alpha"), beta: groupMemoryAccount(directory, "oc_beta"),
+      personal: { account: owner.memoryScope(owner.conversationAddress().accountId), target: owner.conversationAddress().target } };
   }
 
   it("serves the dispatch groups, the live roster and each request's record from the running service's dispatch", async () => {

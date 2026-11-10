@@ -295,6 +295,14 @@ test.describe("with Feishu dispatch, choosing its groups", () => {
     await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 2 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认核对 <b>预算</b> & 行程处理中");
     await expect(drawer.locator(".atm-dc-busy b")).toHaveCount(0);
     await testInfo.attach("dispatch-groups-unfinished", { body: await page.screenshot(), contentType: "image/png" });
+    // Each unfinished request links to its record on the team overview, which opens it expanded (ticket 10).
+    const proposal = drawer.locator(".atm-dc-busy a", { hasText: "安排周末出行" });
+    const overview = await page.context().newPage();
+    await overview.goto((await proposal.getAttribute("href"))!);
+    await expect(overview.locator("#ats-drawer .acv2-record-button")).toHaveAttribute("aria-expanded", "true");
+    await expect(overview.locator("#ats-drawer .acv4-detail-title")).toHaveText("安排周末出行");
+    await expect(overview.locator(".ats-chip[aria-pressed=true]")).toHaveText("银河护卫队 · 群协作");
+    await overview.close();
     await dcGroup(drawer, "银河护卫队").check();
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".acf-savebar")).toContainText("已保存，重启服务后生效");
