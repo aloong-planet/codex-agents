@@ -315,7 +315,8 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
     } finally { registry.close(); }
   });
 
-  it("names the created application when the store is unavailable, and leaves the creation for the next start to record as interrupted", async () => {
+  // What the store could not record stays a creation that waits; the next start records it as interrupted (team-registry.test.ts).
+  it("names the created application when the store is unavailable, and leaves the creation waiting for the next start", async () => {
     const { registry, path, onboarding, ends, teamId, scan } = qrOnboarding();
     await onboarding.requestCreation(teamId);
     registry.close();
@@ -323,13 +324,13 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
     expect([ends, onboarding.creationLink(teamId)]).toEqual([[{ teamId, failed: "failed", unused: CREATED_APP }], undefined]);
     const reopened = new TeamRegistry(path);
     try {
-      expect([reopened.creation(teamId), reopened.hasSecret(CREATED_APP)]).toEqual([{ status: "action", reason: "interrupted", at: 1_000 }, false]);
+      expect([reopened.creation(teamId), reopened.hasSecret(CREATED_APP)]).toEqual([{ status: "waiting", at: 1_000 }, false]);
     } finally { reopened.close(); }
   });
 
   // The store is unavailable when a code runs out: nothing can be recorded or reported, and nothing is left unhandled; the
   // run fails on an unhandled rejection otherwise.
-  it("leaves a code whose end cannot be recorded for the next start to record as interrupted", async () => {
+  it("leaves a code whose end cannot be recorded waiting for the next start", async () => {
     const { registry, path, platform, onboarding, ends, teamId } = qrOnboarding();
     await onboarding.requestCreation(teamId);
     registry.close();
@@ -337,7 +338,7 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect([ends, onboarding.creationLink(teamId)]).toEqual([[], undefined]);
     const reopened = new TeamRegistry(path);
-    try { expect(reopened.creation(teamId)).toEqual({ status: "action", reason: "interrupted", at: 1_000 }); } finally { reopened.close(); }
+    try { expect(reopened.creation(teamId)).toEqual({ status: "waiting", at: 1_000 }); } finally { reopened.close(); }
   });
 
   it("does not give the team a created application that is reserved for another use, and reports it as unused", async () => {

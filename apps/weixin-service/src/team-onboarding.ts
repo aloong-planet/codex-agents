@@ -164,8 +164,8 @@ export class TeamOnboarding {
   }
 
   /**
-   * Ends every wait for a scan, as at shutdown. A confirmation made afterwards cannot be learned; at its next start the
-   * registry records each creation that still waited as interrupted.
+   * Ends every wait for a scan, as at shutdown. A confirmation made afterwards cannot be learned; the next start records
+   * each creation that still waited as interrupted.
    */
   close(): void {
     for (const teamId of [...this.shown.keys()]) this.endCreation(teamId);

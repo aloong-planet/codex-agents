@@ -100,14 +100,12 @@ const COORDINATOR_TEAM_NAME = "总协调";
  */
 export class TeamRegistry {
   private readonly database: DatabaseSync;
-  /** The teams whose QR code still waited for its scan when the store was last closed; opening it recorded those creations as interrupted. */
-  readonly interruptedCreations: readonly string[];
 
   constructor(databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
-    // A QR code's wait and a test message being sent end with the process, so opening the store records them as outcomes
-    // the owner has to look at: the creation as interrupted, the send as unknown.
+    // A test message being sent ends with the process, so opening the store records it as an outcome the owner has to look
+    // at: unknown. A QR code's wait ends with the process too; `interruptCreations` records that, where it can be reported.
     this.database.exec(`PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA busy_timeout = 5000;
       CREATE TABLE IF NOT EXISTS definitions_version (version INTEGER PRIMARY KEY, based_on INTEGER, source TEXT NOT NULL, definitions TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS application_secret (app_id TEXT PRIMARY KEY, secret TEXT NOT NULL);
@@ -115,8 +113,6 @@ export class TeamRegistry {
         reason TEXT, at INTEGER NOT NULL, PRIMARY KEY (app_id, step, chat_id));
       CREATE TABLE IF NOT EXISTS application_creation (team_id TEXT PRIMARY KEY, status TEXT NOT NULL, reason TEXT, app_id TEXT, at INTEGER NOT NULL);
       UPDATE onboarding_outcome SET status = 'unknown' WHERE step = 'test' AND status = 'sending';`);
-    this.interruptedCreations = this.database.prepare("UPDATE application_creation SET status = 'action', reason = 'interrupted' WHERE status = 'waiting' RETURNING team_id")
-      .all().map(({ team_id }) => String(team_id));
   }
 
   /**
@@ -248,6 +244,19 @@ export class TeamRegistry {
   recordCreation(teamId: string, state: Readonly<{ status: "waiting" } | { status: "action"; reason: string }>, at: number): boolean {
     return Boolean(this.database.prepare("UPDATE application_creation SET status = ?, reason = ?, at = ? WHERE team_id = ? AND status <> 'done'")
       .run(state.status, state.status === "action" ? state.reason : null, at, teamId).changes);
+  }
+
+  /**
+   * Records every creation that still waits for its scan as interrupted, as a start does before any code is asked for: the
+   * wait ended with the previous process. `report` is called with each such team before the records change, and a `report`
+   * that throws changes none. A start that stops in between therefore reports the team again at the next start instead of
+   * never.
+   */
+  interruptCreations(report: (teamId: string) => void): void {
+    this.transaction(() => {
+      for (const { team_id } of this.database.prepare("SELECT team_id FROM application_creation WHERE status = 'waiting' ORDER BY team_id").all()) report(String(team_id));
+      this.database.prepare("UPDATE application_creation SET status = 'action', reason = 'interrupted' WHERE status = 'waiting'").run();
+    });
   }
 
   /**

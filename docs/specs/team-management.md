@@ -232,7 +232,7 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
   - the code the page shows gave no application;
   - a scan created an application that the team does not use; the entry carries its App ID, and the reason is `abandoned` (the team no longer waited for one), `unusable` or `failed`;
   - the connection was lost for a code that the page no longer shows (`connection_lost`);
-  - a start finds a team whose creation step still waited for its scan when the service stopped (`interrupted`), once;
+  - a start finds a team whose creation step still waited for its scan when the service stopped (`interrupted`); the start writes the entry before it records the step as interrupted, whether or not its channels then come up;
 - `team_onboarding_checked`, with each step's outcome;
 - `team_binding_accepting`;
 - `team_test_message_sent`, with each group's result;

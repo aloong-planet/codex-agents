@@ -310,16 +310,15 @@ describe("QR creation through the team management API", () => {
       .toEqual([["service", "unusable", CREATED_APP]]);
   });
 
-  // A code's wait ends with the process. Whether the owner confirmed it afterwards cannot be learned, so the start that finds
-  // it says so in the audit (team-registry.test.ts: only the store's next open names the team).
-  it("audits, at the next start, a code that waited when the service stopped", async () => {
+  // A code's wait ends with the process. Whether the owner confirmed it afterwards cannot be learned, so the next start says
+  // so in the audit. That start does not get as far as resuming onboarding here, as when its Feishu channel fails to start.
+  it("audits a code that waited when the service stopped, at the next start, even one that never resumes onboarding", async () => {
     const before = await start();
     const first = (await before.request("/api/teams")).body;
     const teamId = (await before.request("/api/teams/save", { basedOn: first.version, team: qrDaisy })).body.teamId as string;
     await teamWhen(before.request, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
     await before.stop();
     const restarted = await start({ work: before.work });
-    await restarted.teams.resume();
     expect(((await restarted.request("/api/teams")).body.teams as Team[]).find(({ id }) => id === teamId)!.creation).toEqual({ status: "action", reason: "interrupted" });
     expect(restarted.auditEntries().filter(({ team, event }) => team === teamId && event === "team_application_qr_failed").map(({ by, reason, appId }) => [by, reason, appId]))
       .toEqual([["service", "interrupted", undefined]]);

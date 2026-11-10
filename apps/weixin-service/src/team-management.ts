@@ -69,6 +69,10 @@ export class TeamManagement {
 
   constructor(private readonly options: TeamManagementOptions) {
     this.now = options.now ?? Date.now;
+    // A QR code's wait ended with the previous process, and whether that code was confirmed since cannot be learned. The
+    // audit says so before the creation step changes, and here, not once the channels are up: a start that stops early
+    // would otherwise leave the step interrupted and the entry never written.
+    options.registry.interruptCreations((team) => this.audit({}, { event: "team_application_qr_failed", team, reason: "interrupted" }));
     this.onboarding = new TeamOnboarding(options.registry, options.platform, options.coordinator, options.now,
       { creationEnded: (end) => this.creationEnded(end), reserved: () => options.reservedApplications?.() ?? {} });
     this.roster_ = options.registry.roster(options.coordinator);
@@ -91,12 +95,8 @@ export class TeamManagement {
   /** Posts test messages through each team's own sending application. */
   deliverTestMessagesWith(send: TestMessageSend): void { this.sendTest = send; }
 
-  /**
-   * Resumes onboarding at startup without repeating finished steps. A QR code that waited when the service last stopped is
-   * audited once: whether it was confirmed since cannot be learned.
-   */
+  /** Resumes onboarding at startup without repeating finished steps. */
   async resume(): Promise<void> {
-    for (const team of this.options.registry.interruptedCreations) this.audit({}, { event: "team_application_qr_failed", team, reason: "interrupted" });
     this.announceJoins(await this.onboarding.resume());
   }
 

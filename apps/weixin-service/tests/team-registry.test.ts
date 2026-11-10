@@ -569,13 +569,23 @@ describe("QR creation of a team's application", () => {
     first.close();
     const registry = new TeamRegistry(path);
     try {
-      expect([registry.creation("bill"), registry.creation("alice")]).toEqual([{ status: "action", reason: "interrupted", at: 100 }, { status: "done", appId: CREATED.appId, at: 300 }]);
       expect(registry.testMessages(BILL_APP)).toEqual({ oc_alpha: { status: "unknown", at: 310 }, oc_beta: { status: "accepted", at: 311 } });
-      // The open that interrupted a wait names its team, so that the start can audit it; a later open has nothing to name.
-      expect(registry.interruptedCreations).toEqual(["bill"]);
+      // The start reports each team whose code waited before the creation is recorded as interrupted. When the report
+      // cannot be made, the creation stays as it was, so that the next start reports it.
+      expect(() => registry.interruptCreations(() => { throw new Error("audit unavailable"); })).toThrow("audit unavailable");
+      expect(registry.creation("bill")).toEqual({ status: "waiting", at: 100 });
+      const reported: string[] = [];
+      registry.interruptCreations((teamId) => reported.push(`${teamId}:${registry.creation(teamId)?.status}`));
+      expect([reported, registry.creation("bill"), registry.creation("alice")])
+        .toEqual([["bill:waiting"], { status: "action", reason: "interrupted", at: 100 }, { status: "done", appId: CREATED.appId, at: 300 }]);
     } finally { registry.close(); }
+    // A later start has nothing left to report.
     const later = new TeamRegistry(path);
-    try { expect([later.interruptedCreations, later.creation("bill")?.status]).toEqual([[], "action"]); } finally { later.close(); }
+    try {
+      const reported: string[] = [];
+      later.interruptCreations((teamId) => reported.push(teamId));
+      expect([reported, later.creation("bill")?.status]).toEqual([[], "action"]);
+    } finally { later.close(); }
   });
 
   it("keeps the outcomes of configuration, release and test messages per application, and forgets them with it", () => {
