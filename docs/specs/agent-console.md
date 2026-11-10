@@ -1,9 +1,9 @@
 # Agent console
 
-> Status: specified; login, local-only access and the console shell are implemented, with the console pages 团队管理 ([team management](team-management.md)) and MCP 管理 ([MCP catalog](mcp-catalog.md)); the other console pages are not.
-> Pending: the sidebar lists only the console pages that exist (today 团队管理 and MCP 管理) and has no private sections or 「本机」 section yet (agent-console::US-002/AC-01, AC-02, US-001/AC-03).
+> Status: specified; login, local-only access, the console shell with its 「本机」 section and the team overview with its records and storage tab are implemented, with the console pages 团队管理 ([team management](team-management.md)) and MCP 管理 ([MCP catalog](mcp-catalog.md)); Skill 管理 and the private conversations are not.
+> Pending: the sidebar has no Skill 管理 entry and no 私人任务 section yet, and the overview has no private scope, so it shows group requests only (agent-console::US-002/AC-01, AC-02, US-003/AC-01, US-004/AC-04). No chat button or record chat action exists yet (US-006).
 > Related: [agent dispatch](agent-dispatch.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [channel boundaries](channel-switching.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: no read projection combines requests, Assignments, reports and delivery outcomes, and no storage exists for Team Leader chats or private requests.
+> Pending: no storage exists for Team Leader chats or private requests.
 
 ## Problem Statement
 
@@ -61,6 +61,7 @@ As the owner, I want to see what each agent and identity is connected to and whe
 - agent-console::US-005/AC-01: The relationships and storage tab describes the selected node, its storage locations and links to related nodes, which open in the same drawer with a return action.
 - agent-console::US-005/AC-02: Storage is shown separately for: the group memory, which only the Coordinator reads; Team Leader memory, one scope per leader and conversation; Executor memory, one scope per Agent Profile and conversation; execution records and delivered files; group scheduled tasks; private conversations and private requests; ordinary personal memory; and Penny's financial stores.
 - agent-console::US-005/AC-03: The diagram and details distinguish a bot identity from the agent that performs the work, and show each agent's responsibility, organization, conversation scope and storage.
+- agent-console::US-005/AC-04: For a group, the relationships and storage tab shows that group's current group memory text read-only, including entries curated before agent teams existed. There is no edit or delete action, and no other group's memory or any personal memory appears.
 
 ### agent-console::US-006 Chat privately with the Coordinator or a Team Leader
 
@@ -237,7 +238,16 @@ The interface is Chinese and light only; the project's capability declaration di
 
 The unfinished requests come from the running service's dispatch records. The running groups are those the service started with. The startup and registry rules for a configuration written this way are in the agent dispatch spec's Implementation Decisions.
 
-**Read projections.** The overview and records read from a projection over Dispatch Requests, Assignments, Executors, group reports and their delivery outcomes, keyed by conversation. Penny contributes only its readiness and storage locations.
+**Console home.** The console's home is the team overview at `/console`. On the Feishu status server, `/` sends the browser there, so a login link lands on the overview; the WeChat demo server's `/` keeps the existing settings page. The sidebar's 团队总览 entry and 团队管理's 「返回团队总览」 lead to `/console`.
+
+**Read projections.** The overview and records read from a projection over Dispatch Requests, Assignments, Executors, group reports and their delivery outcomes, keyed by group. The dispatch store exposes its stored requests, Assignments and group posts read-only; nothing in the projection ever reaches an agent's input.
+- Only requests of the groups the running service dispatches in appear; a request in any other conversation is left out.
+- A Team Leader's card counts each request of the group that involves its team once: as lead, through its Assignments, or through a part placed with it. The request is waiting when any of the team's Assignments waits for a choice, running while any is unfinished, and history once all have ended; before the team has an Assignment, it follows the request's state.
+- A record's report delivery is that of the lead's latest closing in the group, including a retried send of it, or 「尚无结果汇报」 before one exists. Each group post keeps its own delivery state, and only an accepted post has a time.
+- Request and Assignment IDs are long internal keys that no group post shows. The tree and records show the first eight characters of a request's ID, and an Assignment as that prefix with its number (and its attempt after a retry); search still matches the full ID.
+- Penny contributes only whether it is configured and ready, and the storage tab names its stores; nothing else of its source reaches the console.
+
+**Group memory view.** A dispatch group's memory is the memory account its Coordinator recalls. The console reads every entry and every dated event of that account, whatever its date, through the memory store's ordinary read, and changes no entry or event. The route answers only for a group the running service dispatches in, so no other group's memory and no personal memory is reachable, and no route changes or deletes memory.
 
 **Private conversations.** Each private conversation with the Coordinator or a Team Leader is its own conversation scope for memory and requests (ADR-0027). Its transcript, drafts and private requests are stored apart from group state and ordinary personal memory. A message sent from the console enters the same admission path as other requests, with the owner as requester and the private conversation as destination.
 
