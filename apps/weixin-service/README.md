@@ -45,11 +45,15 @@ The link is valid for 2 minutes and can be used once. It sets an HttpOnly, SameS
 
 The command reaches the running service through `console-control.json` and an owner-only Unix socket in the state directory; the token in that file changes on every start. Authorizations are kept in `console-browsers.json`, which stores only a hash of each cookie. The Codex plugin authorizes through the same channel and appears as one entry, 「Codex 插件」: all plugin processes share one credential kept in `console-plugin-credential.json` (`0600`) in the state directory. Revoking that entry ends every plugin process's access; they authorize again as one new entry.
 
-Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command` or `codex-plugin`), the event and the browser's ID and label; it never contains a cookie, link token or hash. Saved MCP changes are appended to the same file with `by: "browser"` and the authorized browser's ID and label (see MCP management below). Read it with standard tools, for example:
+Each authorization and revocation is appended to `console-audit.jsonl` in the state directory (`0600`), one JSON object per line with the time, who acted (`login-link`, `local-command`, `codex-plugin`, or `browser` with the acting browser's ID and label for a revocation from the console's 本机登录 drawer), the event and the revoked or authorized browser's ID and label; it never contains a cookie, link token or hash. Saved MCP changes are appended to the same file with `by: "browser"` and the authorized browser's ID and label (see MCP management below). Read it with standard tools, for example:
 
 ```bash
 tail -n 20 "$HOME/Library/Application Support/weixin-ilink-direct-demo/console-audit.jsonl"
 ```
+
+## Team overview
+
+The console's home is `/console` (团队总览); with Feishu, a login link lands there. For each dispatch group it shows the Coordinator, the Team Leaders and the running or waiting Executors grouped per request, read from `agent-dispatch.sqlite`, with each request's records and where each kind of information is kept. It only reads: nothing on the page changes a request, a team or a memory. Penny contributes only whether it is configured and ready. The sidebar's 「本机登录」 lists and revokes authorized browsers, like `console list` and `console revoke`.
 
 ## MCP management
 

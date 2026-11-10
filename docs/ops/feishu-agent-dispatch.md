@@ -115,7 +115,7 @@ Natural-language routing can clarify instead of dispatching when information is 
 ## First start after the visibility upgrade
 
 - Group memory curated before this upgrade may hold facts the curator drew from Executor results. It is kept, and Sam may recall those facts; new captures hold only the request and what Sam and the Team Leaders posted for it.
-- To read a group's memory, open `GET /api/state` in an owner-authorized browser. It is served by `apps/weixin-service/src/http-server.ts:168`, or by `apps/weixin-service/src/channel-status-server.ts:19` when only Feishu is enabled. The text is the `memory` field of the entry in `codex.memory.accounts[]` whose `accountId` is the group's `feishu.group.<hash>` memory account. The console page does not show it, and no route deletes it.
+- To read a group's memory, open `GET /api/state` in an owner-authorized browser. It is served by `apps/weixin-service/src/http-server.ts:168`, or by `apps/weixin-service/src/channel-status-server.ts:19` when only Feishu is enabled. The text is the `memory` field of the entry in `codex.memory.accounts[]` whose `accountId` is the group's `feishu.group.<hash>` memory account. The console's 团队总览 also shows it, read-only: open a group's 群业务记忆 in the 关系与存储 tab. No route changes or deletes it.
 - While no console save exists, the first start records a new team-registry version, because Jack's seeded Executor profile changed. Requests planned afterwards use that version.
 
 ## First start after the dependencies upgrade

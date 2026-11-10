@@ -1,0 +1,151 @@
+/* 团队总览 (agent-console::US-003 to US-005), from the owner-confirmed prototype: the scope chips, the tree of the Coordinator,
+ * the Team Leaders and the request frames with their active Executors, and the drawer's records and relationships and storage. */
+.ats-tone{--ats-tone:var(--acv-ink)}
+.ats-tone-sam{--ats-tone:var(--acv-sam)}
+.ats-tone-alice{--ats-tone:var(--acv-alice)}
+.ats-tone-bill{--ats-tone:var(--acv-bill)}
+.ats-tone-jack{--ats-tone:var(--acv-jack)}
+.ats-tone-penny{--ats-tone:var(--acv-penny)}
+.ats-tone-store{--ats-tone:var(--acv-store)}
+.ats-heading-actions{display:flex;gap:8px;align-items:center;flex:none}
+.ats-entry-bar{display:flex;align-items:center;gap:8px;font-size:11px;flex-wrap:wrap;flex:none}
+.ats-entry-label{color:var(--acv-muted);margin-right:2px}
+.ats-chip{border:1px solid var(--acv-line);border-radius:6px;padding:5px 8px;background:var(--acv-paper);color:var(--acv-channel);font-size:11px;white-space:nowrap}
+.ats-chip:hover{background:var(--acv-soft)}
+.ats-chip[aria-pressed="true"]{background:var(--acv-selected);box-shadow:inset 0 0 0 1px var(--acv-channel)}
+.ats-view{flex:1;min-width:0;min-height:0;display:grid;grid-template-columns:minmax(0,1fr)}
+.ats-group{min-width:0;min-height:0;border:1px solid var(--acv-line);border-radius:14px;background:var(--acv-paper);display:flex;flex-direction:column;overflow:hidden}
+.ats-group-head{height:45px;flex:none;padding:0 16px;display:flex;gap:10px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--acv-line);font-size:12px;font-weight:650;color:var(--acv-channel)}
+.ats-legend{display:flex;align-items:center;gap:12px;color:var(--acv-muted);font-size:10px;font-weight:400}
+.ats-legend span{display:flex;gap:5px;align-items:center}
+.ats-legend i{display:inline-block;width:22px;border-top:2px solid var(--acv-sam)}
+.ats-legend i.ats-req-swatch{height:10px;border:1px dashed var(--acv-faint);border-radius:4px}
+.ats-scroll{flex:1;min-height:0;min-width:0;overflow:auto;padding:14px;overscroll-behavior:contain;display:flex}
+.ats-stage{position:relative;flex:none;margin:auto}
+.ats-surface{position:absolute;left:0;top:0;transform-origin:top left;background:var(--acv-paper)}
+.ats-lines{position:absolute;inset:0;pointer-events:none;z-index:1;width:100%;height:100%;overflow:visible}
+.ats-lines path.ats-edge{fill:none;stroke-width:2;stroke:var(--acv-ink)}
+.ats-lines path.ats-edge-sam{stroke:var(--acv-sam)}
+.ats-lines path.ats-edge-alice{stroke:var(--acv-alice)}
+.ats-lines path.ats-edge-bill{stroke:var(--acv-bill)}
+.ats-lines path.ats-edge-jack{stroke:var(--acv-jack)}
+.ats-lines marker path{fill:var(--acv-ink)}
+.ats-lines .ats-arrow-sam path{fill:var(--acv-sam)}
+.ats-lines .ats-arrow-alice path{fill:var(--acv-alice)}
+.ats-lines .ats-arrow-bill path{fill:var(--acv-bill)}
+.ats-lines .ats-arrow-jack path{fill:var(--acv-jack)}
+.ats-position{position:absolute}
+/* Tree nodes: rounded cards with a light shadow and a border tinted from the role's colour (agent-console::CON-003). */
+.ats-card{position:relative;z-index:2;border:1px solid color-mix(in srgb,var(--ats-tone) 40%,var(--acv-line));background:var(--acv-paper);border-radius:14px;color:var(--ats-tone);overflow:hidden;box-shadow:var(--acv-shadow-sm)}
+.ats-card-head{display:flex;align-items:center;gap:7px;padding:9px 13px 0;min-height:37px}
+.ats-card[data-active="true"] .ats-card-head{background:var(--acv-selected)}
+.ats-name{border:0;padding:0;background:transparent;color:var(--ats-tone);font-weight:700;text-align:left;min-width:0}
+.ats-name strong{font-size:15px;color:var(--ats-tone)}
+.ats-count{font-size:10px;color:var(--ats-tone);background:var(--acv-paper);border:1px solid var(--acv-line);border-radius:4px;padding:1px 5px;white-space:nowrap}
+.ats-card-head .ats-count{margin-left:auto}
+.ats-node-button{display:block;width:100%;text-align:left;border:0;padding:11px 13px;background:var(--acv-paper);color:var(--ats-tone)}
+.ats-card-head+.ats-node-button{padding-top:3px}
+.ats-node-button:hover{background:var(--acv-hover)}
+.ats-node-button[aria-pressed="true"],.ats-node-button[aria-pressed="true"]:hover{background:var(--acv-selected);box-shadow:inset 3px 0 var(--ats-tone)}
+.ats-role{display:block;font-size:11px;margin-top:3px;color:var(--ats-tone)}
+.ats-bot{display:inline-block;color:var(--acv-bot);font-size:10px;border:1px solid var(--acv-line);background:var(--acv-paper);border-radius:4px;padding:1px 5px;margin-top:7px}
+.ats-task-caption{display:block;font-size:11px;color:var(--acv-ink);margin-top:8px;line-height:1.5;overflow-wrap:anywhere}
+.ats-node-foot{display:flex;gap:6px;align-items:center;margin-top:6px;color:var(--acv-muted);font-size:10px}
+.ats-toggle{display:block;width:100%;border:0;border-top:1px solid var(--acv-line);padding:6px 10px;text-align:left;font-size:10px;background:var(--acv-paper);color:var(--ats-tone)}
+.ats-toggle:hover{background:var(--acv-soft)}
+.ats-branch-note{position:absolute;color:var(--acv-muted);font-size:11px;line-height:1.7}
+/* One request's active Assignments within a team: dashed frame, muted title, Executor cards side by side. */
+.ats-req-frame{z-index:2;border:1px dashed var(--acv-faint);border-radius:14px;background:var(--acv-paper);padding:0 10px 10px}
+.ats-req-label{display:block;width:100%;border:0;border-radius:6px;background:transparent;padding:7px 4px;text-align:left;color:var(--acv-muted)}
+.ats-req-label:hover{background:var(--acv-soft)}
+.ats-req-label[aria-pressed="true"],.ats-req-label[aria-pressed="true"]:hover{background:var(--acv-selected)}
+.ats-req-label:focus-visible{outline:2px solid var(--acv-brand);outline-offset:-2px}
+.ats-req-title{display:block;font-size:11px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ats-req-label small{display:block;font-size:10px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ats-req-members{display:flex;gap:20px}
+.ats-req-slot{width:174px;flex:none}
+.ats-stores{display:flex;gap:7px;flex-wrap:wrap;align-items:center;color:var(--acv-store);font-size:10px}
+.ats-store{border:1px solid var(--acv-store);border-radius:9px;padding:7px 10px;background:var(--acv-paper);color:var(--acv-store);font-size:11px;text-align:left}
+.ats-store:hover{background:var(--acv-hover)}
+.ats-store small{display:block;color:var(--acv-store);font-size:10px;margin-top:3px}
+.ats-storage-row{position:absolute;left:20px;right:20px;bottom:16px;padding:13px;border:1px dashed var(--acv-store);border-radius:14px;background:var(--acv-paper);display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ats-storage-label{color:var(--acv-store);font-size:12px;font-weight:650}
+.ats-storage-label small{display:block;color:var(--acv-store);font-size:10px;font-weight:400;margin-top:3px}
+.ats-footer{height:42px;flex:none;border-top:1px solid var(--acv-line);padding:7px 12px;display:flex;gap:10px;align-items:center;justify-content:space-between;color:var(--acv-muted);font-size:10px}
+.ats-footer .acv2-button{min-height:27px;padding:3px 7px;font-size:10px}
+.ats-footer-actions{display:flex;align-items:center;gap:5px}
+.ats-footer-output{min-width:30px;text-align:center}
+.ats-empty-scope{margin:auto;padding:28px;color:var(--acv-muted);text-align:center;font-size:12px;line-height:1.8}
+.ats-path-line{font-size:11px;color:var(--acv-sam);line-height:1.8;padding:9px 10px;border:1px solid var(--acv-line);border-radius:6px;margin:10px 0;overflow-wrap:anywhere}
+.ats-relation-title{font-size:12px;margin:18px 0 6px}
+.ats-drawer-summary{font-size:11px;color:var(--acv-muted);line-height:1.7;margin:10px 0}
+.ats-asg-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.ats-asg{border:1px solid var(--acv-line);border-radius:6px;padding:8px 9px}
+.ats-asg-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.ats-asg-name{border:0;background:transparent;padding:0;font-size:11px;font-weight:650;text-align:left;color:var(--ats-tone)}
+.ats-asg-name:hover{text-decoration:underline}
+.ats-asg-meta{font-size:10px;color:var(--acv-muted);margin-top:3px}
+.ats-asg p{margin:5px 0 0;font-size:10px;line-height:1.6;color:var(--acv-ink);white-space:pre-wrap;overflow-wrap:anywhere}
+/* The Brief its Executor received (REQ-001): muted plain text, in full; paragraphs keep their breaks and long words wrap. */
+.ats-asg p.ats-asg-brief{margin-top:4px;color:var(--acv-muted)}
+.ats-report-who{font-weight:650;color:var(--ats-tone)}
+/* A group post keeps its line breaks: a post with several items puts each on its own line. */
+.ats-report-text{white-space:pre-line;overflow-wrap:anywhere}
+/* The group memory as the Coordinator reads it: plain text, read-only; long entries wrap and the list scrolls inside the drawer. */
+.ats-memory-head{margin:18px 0 6px}
+.ats-memory-head .ats-relation-title{margin:0}
+.ats-memory-meta{font-size:11px;color:var(--acv-muted);margin:0 0 6px}
+.ats-memory{border:1px solid var(--acv-line);border-radius:6px;background:var(--acv-paper);padding:4px 10px 8px;max-height:320px;overflow:auto}
+.ats-memory h4{font-size:11px;color:var(--acv-muted);margin:8px 0 3px}
+.ats-memory ul{margin:0;padding-left:16px}
+.ats-memory li{font-size:11px;line-height:1.7;color:var(--acv-ink);overflow-wrap:anywhere;white-space:pre-wrap}
+.ats-memory-note{font-size:11px;color:var(--acv-muted);margin:0}
+.ats-memory-note.ats-memory-error{color:var(--acv-error)}
+.acv2-badge.acv2-partial,.acv2-badge.acv2-interrupted{background:var(--acv-error-soft);color:var(--acv-error)}
+.acv2-badge.acv2-unassigned{background:var(--acv-paper);color:var(--acv-warning);box-shadow:inset 0 0 0 1px var(--acv-warning)}
+/* The drawer's tabs, filters and records. */
+.acv3-tabs{display:flex;gap:4px;padding:0 16px;border-bottom:1px solid var(--acv-line);flex:none;background:var(--acv-paper)}
+.acv3-tab{flex:1;border:0;background:var(--acv-paper);color:var(--acv-muted);padding:12px 8px;box-shadow:inset 0 -2px transparent;font-size:12px;font-weight:600;min-height:43px}
+.acv3-tab:hover{background:var(--acv-soft)}
+.acv3-tab[aria-selected="true"],.acv3-tab[aria-selected="true"]:hover{color:var(--acv-brand);background:var(--acv-selected);box-shadow:inset 0 -2px var(--acv-brand)}
+.acv3-record-panel{padding-top:14px}
+.acv2-records-head{display:flex;justify-content:space-between;align-items:center;margin:0 0 10px}
+.acv2-records-head h3{font-size:13px;margin:0}
+.acv2-count{font-size:10px;border-radius:12px;background:var(--acv-soft);padding:2px 7px;color:var(--acv-muted)}
+.acv2-filters{display:flex;gap:6px;margin-bottom:12px}
+.acv2-filters select{width:auto;flex:none;padding:0 5px}
+.acv2-search{flex:1;width:0}
+.acv2-hidden{display:none!important}
+.acv2-record{border:1px solid var(--acv-line);border-radius:8px;margin-bottom:9px;overflow:hidden;background:var(--acv-paper)}
+.acv2-record-button{width:100%;display:block;text-align:left;padding:11px 12px;border:0;background:var(--acv-paper);color:var(--acv-ink)}
+.acv2-record-button:hover{background:var(--acv-soft)}
+.acv2-record-button[aria-expanded="true"],.acv2-record-button[aria-expanded="true"]:hover{background:var(--acv-selected);box-shadow:inset 3px 0 var(--acv-brand)}
+.acv4-record-top{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.acv2-record-title{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;font-weight:650;line-height:1.55}
+.acv4-record-action{flex:none;margin-left:auto;color:var(--acv-muted);font-size:10px;font-weight:400;white-space:nowrap}
+.acv2-record-meta{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--acv-muted);flex-wrap:nowrap;white-space:nowrap}
+.acv2-agent{font-size:11px;font-weight:650;color:var(--ats-tone)}
+.acv2-record-delivery{font-size:10px;white-space:nowrap}
+.acv2-record-time{margin-left:auto;flex:none;font-size:9px;font-variant-numeric:tabular-nums}
+.acv2-record-detail{padding:12px;font-size:11px;border-top:1px solid var(--acv-line)}
+.acv4-detail-title{font-size:12px;font-weight:650;line-height:1.6;margin:0 0 12px;overflow-wrap:anywhere}
+.acv2-result{padding:10px;border:1px solid var(--acv-brand-soft);background:var(--acv-brand-soft);border-radius:6px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.acv2-result.acv2-warning{background:var(--acv-warning-soft);border-color:var(--acv-warning-soft)}
+.acv2-detail-label{font-size:11px;font-weight:650;margin:14px 0 7px}
+.acv2-detail-label:first-child{margin-top:0}
+.acv2-process{margin:12px 0;border-top:1px solid var(--acv-line);border-bottom:1px solid var(--acv-line)}
+.acv2-process summary{padding:10px 0;font-weight:650;cursor:pointer;list-style-position:inside}
+.acv2-timeline{list-style:none;padding:0 0 12px;margin:0}
+.acv2-step{position:relative;display:grid;grid-template-columns:36px 1fr;gap:9px;font-size:11px;margin-left:3px;padding:0 0 12px 12px;border-left:1px solid var(--acv-line)}
+.acv2-step::before{content:"";position:absolute;left:-3px;top:5px;width:5px;height:5px;border-radius:50%;background:var(--acv-brand)}
+.acv2-step:last-child{padding-bottom:0;border-left-color:transparent}
+.acv2-step time{color:var(--acv-muted);font-size:10px}
+.acv2-step p{font-size:10px;color:var(--acv-muted);margin:3px 0 0;line-height:1.6}
+.acv2-message{margin:0;padding:10px;border:1px solid var(--acv-line);background:var(--acv-raise);border-radius:6px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.acv2-related{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+.acv2-related button{border:1px solid var(--acv-line);background:var(--acv-paper);border-radius:5px;padding:4px 7px;color:var(--acv-brand);font-size:11px}
+.acv2-related button:hover{background:var(--acv-selected)}
+.acv2-path{display:block;background:var(--acv-paper);border:1px solid var(--acv-line);border-radius:5px;padding:8px;margin:6px 0;font:10px/1.7 var(--acv-mono);overflow-wrap:anywhere;color:var(--acv-ink)}
+.acv2-drawer-foot{flex:none;border-top:1px solid var(--acv-line);font-size:10px;color:var(--acv-muted);padding:10px 16px;background:var(--acv-raise)}
+@media(max-width:719px){.ats-group-head{padding:0 12px}.ats-legend{gap:7px}.ats-footer-hint{display:none}.ats-footer-actions{margin-left:auto}.acv2-drawer-foot{font-size:9px}}
+@media(max-width:359px){.acv2-record-meta{gap:4px;font-size:9px}.acv2-record-delivery{font-size:9px}.acv2-agent{font-size:10px}}

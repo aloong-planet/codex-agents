@@ -20,6 +20,13 @@ type NoticeRow = { id: string; payload: string; state: string; result: string | 
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
 /** A team as a request's definitions version has it. A profile's noun names its Executors (`<noun> <n>`); without one they are 执行者. */
 export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: ReadonlyArray<Readonly<{ id: string; name: string; noun?: string }>>; memoryScope: AgentMemoryScope }>;
+/**
+ * One group post of a request and its delivery: `queued` or `sending` until the platform answers, then `accepted`, `rejected` or
+ * `unknown`; `cancelled` when it was never sent. `acceptedAt` is set only for an accepted post.
+ */
+export type DispatchPost = Readonly<{ id: string; agentId: string; text: string; state: "queued" | "sending" | "accepted" | "rejected" | "unknown" | "cancelled"; acceptedAt: number | null }>;
+/** A stored request as the console's records read it. */
+export type DispatchRecord = Readonly<{ job: DispatchJob; assignments: readonly DispatchAssignment[]; posts: readonly DispatchPost[] }>;
 /** One turn captured into an agent's memory; `event` names the conversation and is the source of the user entry. */
 export type DispatchMemoryTurn = Readonly<{ event: InboundContent; senderAccountId: string; userId: string; userText: string; assistantId: string; assistantText: string }>;
 type AssignmentStatus = DispatchAssignment["status"];
@@ -240,6 +247,22 @@ export class AgentDispatch {
           ({ id: assignmentId, teamId, profileId, executor, title, status: state, attempt: run, dependsOn: dependsOn ?? [] })),
         parts: (parts ?? []).map((part) => ({ title: part.title, teamId: part.teamId, attempt: part.attempt })) })),
     notices: this.database.prepare("SELECT id, state FROM dispatch_notice ORDER BY sequence").all() };
+  }
+
+  /**
+   * Every stored request with its Assignments and its group posts, in posting order, for the console's records
+   * (agent-console Implementation Decisions: read projections). It only reads; the console's view is never any agent's input.
+   */
+  records(): DispatchRecord[] {
+    const byRequest = new Map<string, DispatchPost[]>();
+    for (const row of this.database.prepare("SELECT id, payload, state, accepted_at, request_id FROM dispatch_notice WHERE request_id IS NOT NULL ORDER BY sequence").all()) {
+      const notice = JSON.parse(String(row.payload)) as Notice;
+      const list = byRequest.get(String(row.request_id)) ?? [];
+      list.push({ id: String(row.id), agentId: notice.agentId, text: notice.text, state: String(row.state) as DispatchPost["state"],
+        acceptedAt: row.accepted_at === null ? null : Number(row.accepted_at) });
+      byRequest.set(String(row.request_id), list);
+    }
+    return this.jobs().map((job) => ({ job, assignments: this.assignments(job.id), posts: byRequest.get(job.id) ?? [] }));
   }
 
   async close(): Promise<void> {

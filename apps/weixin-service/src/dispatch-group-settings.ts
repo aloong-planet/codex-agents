@@ -6,7 +6,8 @@ import { parseChannelStartupConfiguration } from "./channel-startup-config.js";
 import type { TeamActor } from "./team-management.js";
 
 /** A dispatch request that has not ended, as the save refusal lists it (agent-console::US-009/AC-04). */
-export type DispatchGroupRequest = Readonly<{ summary: string; status: "proposed" | "queued" | "running" | "waiting" }>;
+/** An unfinished request of a group; its ID links it to its record on the team overview. */
+export type DispatchGroupRequest = Readonly<{ id: string; summary: string; status: "proposed" | "queued" | "running" | "waiting" }>;
 /** The form's view. Only chat IDs, group names and a fingerprint of the file leave the service; no secret does (agent-console::US-009/AC-06). */
 export type DispatchGroupsView = Readonly<{ feishu: false }> | Readonly<{
   feishu: true;
@@ -25,12 +26,12 @@ const UNFINISHED: ReadonlySet<string> = new Set(["proposed", "queued", "running"
  * The dispatch requests that block unchecking their group: those proposed, queued, running or waiting, by chat ID, in the order
  * given (agent-console::US-009/AC-04). A request whose conversation is no group, such as a private chat, is left out.
  */
-export function unfinishedRequestsByGroup(jobs: ReadonlyArray<Readonly<{ summary: string; status: string; accountId: string; target: string }>>,
+export function unfinishedRequestsByGroup(jobs: ReadonlyArray<Readonly<{ id: string; summary: string; status: string; accountId: string; target: string }>>,
   chatIdOf: (accountId: string, target: string) => string | undefined): Record<string, DispatchGroupRequest[]> {
   const byGroup: Record<string, DispatchGroupRequest[]> = {};
   for (const job of jobs) {
     const chatId = UNFINISHED.has(job.status) ? chatIdOf(job.accountId, job.target) : undefined;
-    if (chatId) (byGroup[chatId] ??= []).push({ summary: job.summary, status: job.status as DispatchGroupRequest["status"] });
+    if (chatId) (byGroup[chatId] ??= []).push({ id: job.id, summary: job.summary, status: job.status as DispatchGroupRequest["status"] });
   }
   return byGroup;
 }

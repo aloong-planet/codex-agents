@@ -45,7 +45,7 @@ const groupRow = (page: Page, name: string) => editor(page).locator(".atm-group-
 test.describe("with Feishu dispatch", () => {
   test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
 
-  test("lists the teams under the 团队管理 entry, narrows them by search and group, and links to MCP 管理", async ({ page, fixtureServer }, testInfo) => {
+  test("lists the teams under the 团队管理 entry, narrows them by search and group, and links to MCP 管理 and 团队总览", async ({ page, fixtureServer }, testInfo) => {
     // A team bound only to 产品讨论组, so that the group filter has something to leave out.
     const { version } = await (await fetch(`${fixtureServer.url}/api/teams`, { headers: { cookie: fixtureServer.cookie } })).json() as { version: number };
     await post(fixtureServer, "/api/teams/save", { basedOn: version, team: { teamName: "设计团队", responsibility: "视觉方案", groups: ["oc_beta"],
@@ -68,6 +68,11 @@ test.describe("with Feishu dispatch", () => {
 
     await page.locator(".atm-heading-actions").getByRole("link", { name: "MCP 管理" }).click();
     await expect(page).toHaveURL(/\/console\/mcp$/);
+    // team-management::US-001/AC-04: the page also leads back to the team overview.
+    await page.goBack();
+    await page.locator(".atm-heading-actions").getByRole("link", { name: "返回团队总览" }).click();
+    await expect(page).toHaveURL(/\/console$/);
+    await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("团队总览");
   });
 
   test("adds a team with an existing application, shows each group's onboarding, and lists the team once it joins", async ({ page, fixtureServer }, testInfo) => {
@@ -290,6 +295,14 @@ test.describe("with Feishu dispatch, choosing its groups", () => {
     await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 2 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认核对 <b>预算</b> & 行程处理中");
     await expect(drawer.locator(".atm-dc-busy b")).toHaveCount(0);
     await testInfo.attach("dispatch-groups-unfinished", { body: await page.screenshot(), contentType: "image/png" });
+    // Each unfinished request links to its record on the team overview, which opens it expanded (ticket 10).
+    const proposal = drawer.locator(".atm-dc-busy a", { hasText: "安排周末出行" });
+    const overview = await page.context().newPage();
+    await overview.goto((await proposal.getAttribute("href"))!);
+    await expect(overview.locator("#ats-drawer .acv2-record-button")).toHaveAttribute("aria-expanded", "true");
+    await expect(overview.locator("#ats-drawer .acv4-detail-title")).toHaveText("安排周末出行");
+    await expect(overview.locator(".ats-chip[aria-pressed=true]")).toHaveText("银河护卫队 · 群协作");
+    await overview.close();
     await dcGroup(drawer, "银河护卫队").check();
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".acf-savebar")).toContainText("已保存，重启服务后生效");
