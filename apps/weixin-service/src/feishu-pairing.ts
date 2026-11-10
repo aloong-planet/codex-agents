@@ -14,7 +14,7 @@ export interface PairingIO {
 }
 type Credentials = { appId: string; appSecret: string };
 type Document = { channel?: PersonalChannel; enabledChannels?: PersonalChannel[]; owner: PersonalOwnerConfiguration;
-  taskScope: { accountId: string; target: string }; feishu?: Credentials; [key: string]: unknown };
+  taskScope: { accountId: string; target: string }; feishu?: Credentials & Record<string, unknown>; [key: string]: unknown };
 export type PairingResult = "saved" | "cancelled" | "failed";
 const object = (v: unknown): Record<string, unknown> | undefined => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
 
@@ -64,7 +64,8 @@ class PairingFile {
     return ["feishu", ...previous.filter((channel) => channel !== "feishu")];
   }
   save(credentials: Credentials, candidate: { senderId: string; target: string }): void {
-    const document: Document = { ...this.document, enabledChannels: this.enabledChannels(), feishu: credentials,
+    // Re-pairing replaces only the application's credentials; every other Feishu key is kept (channel-switching::US-003/AC-08).
+    const document: Document = { ...this.document, enabledChannels: this.enabledChannels(), feishu: { ...this.document.feishu, ...credentials },
       owner: { ...this.document.owner, bindings: [...this.document.owner.bindings.filter(b => b.channel !== "feishu"),
         { channel: "feishu", accountId: credentials.appId, ...candidate }] } };
     delete document.channel;

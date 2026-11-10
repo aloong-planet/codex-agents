@@ -14,19 +14,19 @@ const base = () => ({ channel: "weixin", owner: { memoryAccountId: "old-bot", bi
   { channel: "weixin", accountId: "old-bot", target: "owner@im.wechat", senderId: "owner@im.wechat" },
 ] }, taskScope: { accountId: "old-bot", target: "owner@im.wechat" }, extension: { keep: true } });
 // im.message.receive_v1 shape matches the pinned SDK and feishu-channel.test.ts fixture.
-function event(code: string) { return { app_id: appId, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+function event(code: string, app = appId) { return { app_id: app, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
   message: { chat_type: "p2p", chat_id: "oc_private", message_type: "text", message_id: "om_pair", content: JSON.stringify({ text: code }) } }; }
-function harness() {
+function harness(pairedApp = appId) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "feishu-pair-")); fs.chmodSync(dir, 0o700);
   const configPath = path.join(dir, "channel.json");
   fs.writeFileSync(configPath, JSON.stringify(base()), { mode: 0o600 });
   const before = fs.readFileSync(configPath, "utf8");
-  const output: string[] = []; const answers = [appId, "hidden-test-secret", "y", "y"];
+  const output: string[] = []; const answers = [pairedApp, "hidden-test-secret", "y", "y"];
   let handlers: Parameters<PairingTransport["start"]>[0] | undefined;
   let closed = false;
   const transport: PairingTransport = { async start(h) { handlers = h; h.ready(); }, close() { closed = true; } };
   const io: PairingIO = { async ask() { const answer = answers.shift(); if (answer === undefined) throw Error("unexpected prompt"); return answer; },
-    write(text) { output.push(text); if (text.startsWith("PAIR ")) void handlers!.message(event(text)); } };
+    write(text) { output.push(text); if (text.startsWith("PAIR ")) void handlers!.message(event(text, pairedApp)); } };
   return { dir, configPath, before, output, answers, io, transport, get closed() { return closed; },
     cleanup() { fs.rmSync(dir, { recursive: true, force: true }); } };
 }
@@ -212,5 +212,53 @@ it.each(["legacy-weixin", "weixin", "both", "feishu"])("P09 preserves configured
     expect(h.output.join("\n")).toContain(mode === "feishu" ? "下次启动渠道：飞书\n" : "下次启动渠道：飞书、微信\n");
     expect(h.output.join("\n")).not.toContain("hidden-test-secret");
     expect(h.output.join("\n")).not.toContain("previous-secret");
+  } finally { h.cleanup(); }
+});
+
+// A configured service as the ops guides describe it (docs/ops/feishu-agent-dispatch.md, the service README's webhook section);
+// the owner's real channel.json is production data and is not read.
+const repairedApp = "cli_fedcba9876543210";
+const configured = (dispatch: unknown) => ({ enabledChannels: ["feishu", "weixin"],
+  owner: { memoryAccountId: "old-bot", bindings: [
+    { channel: "weixin", accountId: "old-bot", target: "owner@im.wechat", senderId: "owner@im.wechat" },
+    { channel: "feishu", accountId: appId, target: "oc_previous", senderId: "ou_previous" }] },
+  taskScope: { accountId: "old-bot", target: "owner@im.wechat" }, extension: { keep: true },
+  feishu: { appId, appSecret: "previous-secret", receiveMode: "webhook",
+    webhook: { port: 8443, path: "/feishu/events", verificationToken: "verify-token", encryptKey: "encrypt-key" },
+    groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }], dispatch, futureSetting: { kept: true } } });
+
+it("P10 re-pairing another application replaces only its credentials and the owner's Feishu binding, keeping every other Feishu key", async () => {
+  const h = harness(repairedApp);
+  fs.writeFileSync(h.configPath, JSON.stringify(configured({ groupChatIds: ["oc_alpha"] })));
+  h.answers.unshift("y");
+  try {
+    expect(await runFeishuPairing({ configPath: h.configPath, statePath: path.join(h.dir, "state.json"), io: h.io, transport: () => h.transport })).toBe("saved");
+    expect(JSON.parse(fs.readFileSync(h.configPath, "utf8"))).toEqual({ enabledChannels: ["feishu", "weixin"],
+      owner: { memoryAccountId: "old-bot", bindings: [
+        { channel: "weixin", accountId: "old-bot", target: "owner@im.wechat", senderId: "owner@im.wechat" },
+        { channel: "feishu", accountId: repairedApp, target: "oc_private", senderId: "ou_owner" }] },
+      taskScope: { accountId: "old-bot", target: "owner@im.wechat" }, extension: { keep: true },
+      feishu: { appId: repairedApp, appSecret: "hidden-test-secret", receiveMode: "webhook",
+        webhook: { port: 8443, path: "/feishu/events", verificationToken: "verify-token", encryptKey: "encrypt-key" },
+        groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }], dispatch: { groupChatIds: ["oc_alpha"] }, futureSetting: { kept: true } } });
+    expect(fs.statSync(h.configPath).mode & 0o777).toBe(0o600);
+    expect(h.output.join("\n")).not.toMatch(/hidden-test-secret|previous-secret|verify-token|encrypt-key/);
+  } finally { h.cleanup(); }
+});
+
+it("P05 refuses a re-pair whose kept dispatch roster already uses the new App ID, and releases its lock", async () => {
+  const h = harness("cli_1111111111111111");
+  fs.writeFileSync(h.configPath, JSON.stringify(configured({ groupChatIds: ["oc_alpha"], agents: [{ id: "sam" },
+    { id: "alice", appId: "cli_1111111111111111", appSecret: "alice-secret" },
+    { id: "bill", appId: "cli_2222222222222222", appSecret: "bill-secret" },
+    { id: "jack", appId: "cli_3333333333333333", appSecret: "jack-secret" }] })));
+  const before = fs.readFileSync(h.configPath, "utf8");
+  h.answers.unshift("y");
+  try {
+    expect(await runFeishuPairing({ configPath: h.configPath, statePath: path.join(h.dir, "state.json"), io: h.io, transport: () => h.transport })).toBe("failed");
+    expect(fs.readFileSync(h.configPath, "utf8")).toBe(before);
+    expect(h.output.join("\n")).toContain("原配置未被本次配对修改。");
+    expect(h.closed).toBe(true);
+    expect(fs.readdirSync(h.dir).sort()).toEqual(["channel.json"]);
   } finally { h.cleanup(); }
 });
