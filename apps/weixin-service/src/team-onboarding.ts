@@ -67,16 +67,40 @@ export interface OnboardingPlatform {
 type Started = ReadonlyArray<Readonly<{ teamId: string; chatId: string }>>;
 
 /**
- * Runs the onboarding steps of an existing application: the credential and bot check, then joining the bot to each group the
- * team is onboarding in. A step whose recorded outcome is done never runs again, so a restart resumes where onboarding stopped;
- * every other step runs again on each run. Each run ends by turning finished bindings accepting (team-management::REQ-003).
+ * How a team's QR creation ended: the scan created `created`, which the team now uses in place of `replaced`; or no
+ * application was created, for `failed`.
+ */
+export type CreationEnd = Readonly<{ teamId: string } & ({ created: string; replaced?: string } | { failed: string })>;
+type OnboardingHooks = Readonly<{
+  /** Called once a QR creation has ended, after the registry holds its outcome. */
+  creationEnded?(end: CreationEnd): void;
+  /** Applications no team may use, which a created one is checked against. */
+  reserved?(): Readonly<Record<string, string>>;
+}>;
+
+/**
+ * Runs a team's onboarding steps (team-management::US-002/AC-03).
+ * - Step 1, QR creation: `requestCreation` shows a QR code; when the owner's scan has created the application, it becomes the
+ *   team's. A code's wait lives in this process only.
+ * - Steps 2 and 3, for an application created that way: configure it and submit its release, then wait for the bot to be
+ *   enabled. An enabled bot completes both steps whoever configured and released the application, so a refused automatic
+ *   call can be made good by hand in the Feishu developer console.
+ * - Steps 4 and 5, for every application: the credential and bot check, then joining the bot to each group the team is
+ *   onboarding in.
+ *
+ * A step whose recorded outcome is done never runs again, and a submitted release is not submitted again, so a restart resumes
+ * where onboarding stopped; every other step runs again on each run. Each run ends by turning finished bindings accepting
+ * (team-management::REQ-003).
  */
 export class TeamOnboarding {
   /** Runs one at a time, so that a save's run and a 重新检查 never add a bot twice or overwrite each other's outcome. */
   private queue: Promise<unknown> = Promise.resolve();
+  /** The QR creations in progress by team: how to end the wait, and the code's link once the platform gave it. */
+  private readonly creations = new Map<string, { controller: AbortController; link?: Readonly<{ url: string; expiresAt: number }> }>();
 
-  constructor(private readonly registry: Pick<TeamRegistry, "current" | "onboarding" | "recordOnboarding" | "settleOnboarding" | "secret">,
-    private readonly platform: OnboardingPlatform, private readonly coordinator: ApplicationCredentials, private readonly now: () => number = Date.now) {}
+  constructor(private readonly registry: Pick<TeamRegistry, "current" | "onboarding" | "recordOnboarding" | "settleOnboarding" | "secret" | "creation" | "recordCreation" | "attachCreatedApplication">,
+    private readonly platform: OnboardingPlatform, private readonly coordinator: ApplicationCredentials, private readonly now: () => number = Date.now,
+    private readonly hooks: OnboardingHooks = {}) {}
 
   /** Runs the team's pending steps after any run in progress, and returns the bindings that started accepting. */
   run(teamId: string): Promise<Started> {
@@ -85,13 +109,104 @@ export class TeamOnboarding {
     return run;
   }
 
+  /**
+   * Asks for a new QR code for a team in QR creation, ending the wait of the code it showed before. Resolves once the new
+   * code's link is known or the request for it has failed. The scan ends later: `creationEnded` then reports the application
+   * it created, already attached to the team, or why there is none. Does nothing for a team that is not in QR creation or
+   * whose application has been created.
+   */
+  async requestCreation(teamId: string): Promise<void> {
+    const team = this.registry.current()?.definitions.teams.find(({ id }) => id === teamId);
+    if (!team || !this.registry.recordCreation(teamId, { status: "waiting" }, this.now())) return;
+    this.creations.get(teamId)?.controller.abort();
+    const creation: { controller: AbortController; link?: Readonly<{ url: string; expiresAt: number }> } = { controller: new AbortController() };
+    this.creations.set(teamId, creation);
+    // A newer request, or the end of QR creation, takes this one's place; whatever it still reports is then ignored.
+    const current = () => this.creations.get(teamId) === creation;
+    const failed = (reason: string) => {
+      this.creations.delete(teamId);
+      this.registry.recordCreation(teamId, { status: "action", reason }, this.now());
+      this.hooks.creationEnded?.({ teamId, failed: reason });
+    };
+    const answer = await this.platform.createApplication({ name: team.leader.name, description: team.teamName }, creation.controller.signal).catch(() => "unreachable" as const);
+    if (!current()) return;
+    if (typeof answer === "string") { failed(answer); return; }
+    creation.link = { url: answer.url, expiresAt: this.now() + answer.expiresInSeconds * 1000 };
+    void answer.result.then((result) => {
+      if (!current()) return undefined;
+      // Without a code the platform was never reached; once a code was shown, a lost connection is a scan that did not finish.
+      if (typeof result === "string") { failed(result === "unreachable" ? "connection_lost" : result); return undefined; }
+      this.creations.delete(teamId);
+      return this.attach(teamId, result);
+    }).catch(() => {
+      // The created application could not be stored. If this cannot be recorded either, the next start records the creation as interrupted.
+      try { failed("failed"); } catch { /* the registry is unavailable */ }
+    });
+  }
+
+  /** The link of the QR code a team's creation shows while it waits for the scan, with the time it runs out. */
+  creationLink(teamId: string): Readonly<{ url: string; expiresAt: number }> | undefined { return this.creations.get(teamId)?.link; }
+
+  /** Ends the wait of a team's QR code without recording an outcome, as when the team is saved as an existing application. */
+  endCreation(teamId: string): void {
+    const creation = this.creations.get(teamId);
+    this.creations.delete(teamId);
+    creation?.controller.abort();
+  }
+
+  /** Ends every wait for a scan, as at shutdown; the registry turns them into interrupted creations at its next start. */
+  close(): void { for (const teamId of [...this.creations.keys()]) this.endCreation(teamId); }
+
+  /** Makes a created application the team's, between runs, so that no run sees the team change application under it. */
+  private attach(teamId: string, created: ApplicationCredentials): Promise<void> {
+    const attaching = this.queue.then(() => {
+      const attached = this.registry.attachCreatedApplication(teamId, created, { at: this.now(), reserved: this.hooks.reserved?.() ?? {} });
+      const state = this.registry.creation(teamId);
+      this.hooks.creationEnded?.(attached ? { teamId, created: created.appId, ...(attached.replaced ? { replaced: attached.replaced } : {}) }
+        : { teamId, failed: state?.status === "action" ? state.reason : "abandoned" });
+    });
+    this.queue = attaching.catch(() => undefined);
+    return attaching;
+  }
+
   private async runNow(teamId: string): Promise<Started> {
     const team = this.registry.current()?.definitions.teams.find(({ id }) => id === teamId);
     const appId = team?.leader.appId;
     if (!team || !appId) return this.registry.settleOnboarding();
     const secret = this.registry.secret(appId);
+    const creation = this.registry.creation(teamId);
+    // What this run already heard about the application's bot, so that one run asks once.
+    let check: ApplicationCheck | undefined;
+    if (creation?.status === "done" && creation.appId === appId && secret !== undefined) {
+      const application = { appId, appSecret: secret };
+      const record = (step: "configure" | "publish", outcome: Omit<OnboardingOutcome, "at">) => this.registry.recordOnboarding(appId, { step }, { ...outcome, at: this.now() });
+      if (this.registry.onboarding(appId).configure?.status !== "done") {
+        const answer = await this.platform.configureApplication(application);
+        if (answer === "under_review") {
+          record("configure", { status: "done" });
+          if (!this.registry.onboarding(appId).publish) record("publish", this.outcome("review", "submitted"));
+        } else if (answer !== "done" && (check = await this.platform.checkApplication(application)) !== "enabled") {
+          record("configure", this.outcome("action", answer));
+          return this.registry.settleOnboarding();
+        } else record("configure", { status: "done" });
+      }
+      if (this.registry.onboarding(appId).publish?.status !== "done") {
+        if (check !== "enabled" && this.registry.onboarding(appId).publish?.status !== "review") {
+          const answer = await this.platform.publishApplication(application);
+          if (answer === "submitted") record("publish", this.outcome("review", "submitted"));
+          else if ((check = await this.platform.checkApplication(application)) !== "enabled") {
+            record("publish", this.outcome("action", answer));
+            return this.registry.settleOnboarding();
+          }
+        }
+        check ??= await this.platform.checkApplication(application);
+        // Until the bot is enabled the release awaits the admin's review; a check that got no answer changes nothing.
+        if (check !== "enabled") return this.registry.settleOnboarding();
+        record("publish", { status: "done" });
+      }
+    }
     if (this.registry.onboarding(appId).credentials?.status !== "done") {
-      const outcome = secret === undefined ? this.outcome("action", "secret_missing") : CHECK_OUTCOME[await this.platform.checkApplication({ appId, appSecret: secret })];
+      const outcome = secret === undefined ? this.outcome("action", "secret_missing") : CHECK_OUTCOME[check ?? await this.platform.checkApplication({ appId, appSecret: secret })];
       this.registry.recordOnboarding(appId, { step: "credentials" }, { ...outcome, at: this.now() });
       if (outcome.status !== "done") return this.registry.settleOnboarding();
     }

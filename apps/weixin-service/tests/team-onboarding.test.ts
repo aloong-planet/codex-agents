@@ -7,7 +7,7 @@ import { gunzipSync } from "node:zlib";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { fetchRequest, FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform, TeamOnboarding, type PlatformRequest } from "../src/team-onboarding.js";
+import { fetchRequest, FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform, TeamOnboarding, type CreationEnd, type PlatformRequest } from "../src/team-onboarding.js";
 import { TeamRegistry, type TeamEdit } from "../src/team-registry.js";
 
 // Onboarding of an existing application (team-management::US-002/AC-02, REQ-003) against the fixture platform, the fake of the
@@ -25,7 +25,7 @@ const daisy: TeamEdit = { teamName: "设计团队", responsibility: "视觉方�
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
-function registryWithDaisy(secret: string | null = "daisy-secret") {
+function registryWithDaisy(secret: string | null = "daisy-secret", edit: TeamEdit = daisy) {
   const directory = mkdtempSync(join(tmpdir(), "team-onboarding-"));
   directories.push(directory);
   const path = join(directory, "team-registry.sqlite");
@@ -39,7 +39,7 @@ function registryWithDaisy(secret: string | null = "daisy-secret") {
   const feishu = parsed.entries.find((entry) => entry.channel === "feishu");
   if (!feishu?.dispatch) throw new Error("expected_dispatch_configuration");
   registry.importLocalConfiguration(feishu.dispatch, { executorHostTools: [] });
-  const { teamId } = registry.saveTeam(daisy, { basedOn: 1, ...(secret === null ? {} : { secret }) });
+  const { teamId } = registry.saveTeam(edit, { basedOn: 1, ...(secret === null ? {} : { secret }) });
   return { registry, teamId, path };
 }
 const statuses = (registry: TeamRegistry) => {
@@ -147,6 +147,221 @@ describe("joining the bot to each bound group (step 5)", () => {
       expect(started).toEqual([{ teamId, chatId: "oc_alpha" }]);
       expect(platform.calls).toEqual([{ call: "add", chatId: "oc_alpha", appId: DAISY_APP, as: SAM.appId }, { call: "in_chat", chatId: "oc_alpha", as: DAISY_APP }]);
     } finally { reopened.close(); }
+  });
+});
+
+// QR creation and the steps only a created application has (team-management::US-002/AC-01, AC-03, AC-04), against the fixture
+// platform. Whether Feishu accepts the automatic configuration and release of a QR-created application is not known without a
+// real tenant (team-management spec, Pending); both answers are covered here.
+describe("onboarding a team by QR creation (steps 1 to 5)", () => {
+  // The fixture platform's first created application and its secret.
+  const CREATED_APP = "cli_c0de000000000001";
+  const BILL_APP = "cli_2222222222222222";
+  const QR_DAISY: TeamEdit = { ...daisy, method: "qr", leader: { ...daisy.leader, appId: "" } };
+  function qrOnboarding<Platform extends FixtureOnboardingPlatform = FixtureOnboardingPlatform>(path?: string, platform = new FixtureOnboardingPlatform() as Platform) {
+    const opened = path === undefined ? registryWithDaisy(null, QR_DAISY) : undefined;
+    const registry = opened?.registry ?? new TeamRegistry(path!);
+    const ends: CreationEnd[] = [];
+    let waiting: (() => void) | undefined;
+    const onboarding = new TeamOnboarding(registry, platform, SAM, () => 1_000, { creationEnded: (end) => { ends.push(end); waiting?.(); } });
+    const daisyId = opened?.teamId ?? registry.current()!.definitions.teams.find(({ teamName }) => teamName === "设计团队")!.id;
+    return { registry, path: opened?.path ?? path!, platform, onboarding, ends, teamId: daisyId,
+      /** Ends the code that waits for its scan, and resolves once the creation has ended. */
+      scan: async (answer: "confirmed" | "expired" | "denied" | "failed" | "unreachable") => {
+        const ended = new Promise<void>((resolve) => { waiting = resolve; });
+        platform.configure({ scan: answer });
+        await ended;
+      } };
+  }
+  const team = (registry: TeamRegistry, teamId: string) => registry.current()!.definitions.teams.find(({ id }) => id === teamId)!;
+  const calls = (platform: FixtureOnboardingPlatform) => platform.calls.map(({ call, chatId }) => chatId ? `${call} ${chatId}` : call);
+  const outcomes = (registry: TeamRegistry, appId = CREATED_APP) => {
+    const { configure, publish, credentials, joins } = registry.onboarding(appId);
+    const short = (outcome?: { status: string; reason?: string }) => outcome && (outcome.reason ? `${outcome.status}:${outcome.reason}` : outcome.status);
+    return { configure: short(configure), publish: short(publish), credentials: short(credentials), joins: Object.fromEntries(Object.entries(joins).map(([chatId, outcome]) => [chatId, short(outcome)])) };
+  };
+  const ACCEPTING = [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }];
+  const ONBOARDING = [{ chatId: "oc_alpha", state: "onboarding" }, { chatId: "oc_beta", state: "onboarding" }];
+
+  it("shows a code for a saved team, prefilled with its leader and team names, and gives the created application to the team", async () => {
+    const { registry, platform, onboarding, ends, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      expect([registry.creation(teamId), onboarding.creationLink(teamId), platform.calls]).toEqual([{ status: "waiting", at: 1_000 },
+        { url: "https://accounts.feishu.cn/fixture/registration?create=1", expiresAt: 601_000 }, [{ call: "create", name: "Daisy", description: "设计团队" }]]);
+      await scan("confirmed");
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId), team(registry, teamId).leader.appId, registry.secret(CREATED_APP)])
+        .toEqual([[{ teamId, created: CREATED_APP }], { status: "done", appId: CREATED_APP, at: 1_000 }, undefined, CREATED_APP, "fixture-created-secret-1"]);
+      // The scan is over: asking again shows no new code and changes nothing.
+      await onboarding.requestCreation(teamId);
+      expect([onboarding.creationLink(teamId), registry.creation(teamId)?.status, platform.calls.length]).toEqual([undefined, "done", 1]);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["the code ran out", "expired", "expired"],
+    ["the owner declined", "denied", "denied"],
+    ["the platform refused the scan", "failed", "failed"],
+    ["the connection dropped after the code was shown", "unreachable", "connection_lost"],
+  ] as const)("creates no application when %s, and records why", async (_case, answer, reason) => {
+    const { registry, onboarding, ends, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      await scan(answer);
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId), team(registry, teamId).leader.appId])
+        .toEqual([[{ teamId, failed: reason }], { status: "action", reason, at: 1_000 }, undefined, ""]);
+    } finally { registry.close(); }
+  });
+
+  it("records that no code was obtained when the platform cannot be reached", async () => {
+    const { registry, platform, onboarding, ends, teamId } = qrOnboarding();
+    try {
+      platform.configure({ link: "unreachable" });
+      await onboarding.requestCreation(teamId);
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)]).toEqual([[{ teamId, failed: "unreachable" }], { status: "action", reason: "unreachable", at: 1_000 }, undefined]);
+    } finally { registry.close(); }
+  });
+
+  it("replaces a code that waits for its scan with a new one, without recording the old one as failed", async () => {
+    const { registry, platform, onboarding, ends, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      await onboarding.requestCreation(teamId);
+      expect([ends, registry.creation(teamId)?.status, onboarding.creationLink(teamId)?.url, platform.calls.length])
+        .toEqual([[], "waiting", "https://accounts.feishu.cn/fixture/registration?create=2", 2]);
+      // Only the new code is left to scan, and its application is attached once.
+      await scan("confirmed");
+      expect([ends, team(registry, teamId).leader.appId]).toEqual([[{ teamId, created: CREATED_APP }], CREATED_APP]);
+      expect(() => platform.configure({ scan: "confirmed" })).toThrow("fixture_onboarding_no_creation_waiting");
+    } finally { registry.close(); }
+  });
+
+  // 刷新二维码 pressed while the first code's link is still on its way: the first request ends as cancelled after the second
+  // one has its code, and must not take that code away.
+  it("lets a request that was replaced before its link arrived end without touching the new code", async () => {
+    class SlowFirstLink extends FixtureOnboardingPlatform {
+      release: () => void = () => {};
+      private first = true;
+      override async createApplication(...[preset, signal]: Parameters<FixtureOnboardingPlatform["createApplication"]>) {
+        if (!this.first) return super.createApplication(preset, signal);
+        this.first = false;
+        await new Promise<void>((resolve) => { this.release = resolve; });
+        return signal.aborted ? "cancelled" as const : super.createApplication(preset, signal);
+      }
+    }
+    const { registry, platform, onboarding, ends, teamId } = qrOnboarding(undefined, new SlowFirstLink());
+    try {
+      const replaced = onboarding.requestCreation(teamId);
+      await onboarding.requestCreation(teamId);
+      platform.release();
+      await replaced;
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)?.url]).toEqual([[], { status: "waiting", at: 1_000 }, "https://accounts.feishu.cn/fixture/registration?create=1"]);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["the team leaves QR creation", (onboarding: TeamOnboarding, teamId: string) => onboarding.endCreation(teamId)],
+    ["the service stops", (onboarding: TeamOnboarding) => onboarding.close()],
+  ] as const)("ends the wait for the scan without an outcome when %s", async (_case, end) => {
+    const { registry, platform, onboarding, ends, teamId } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      end(onboarding, teamId);
+      expect(() => platform.configure({ scan: "confirmed" })).toThrow("fixture_onboarding_no_creation_waiting");
+      // Whatever the ended wait still reports has been delivered by the next turn of the event loop.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect([ends, onboarding.creationLink(teamId), registry.creation(teamId)]).toEqual([[], undefined, { status: "waiting", at: 1_000 }]);
+    } finally { registry.close(); }
+  });
+
+  it("configures and releases the created application, checks it and joins its groups, in that order", async () => {
+    const { registry, platform, onboarding, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      await scan("confirmed");
+      expect(team(registry, teamId).bindings).toEqual(ONBOARDING);
+      const started = await onboarding.run(teamId);
+      expect(calls(platform)).toEqual(["create", "configure", "publish", "check", "add oc_alpha", "in_chat oc_alpha", "add oc_beta", "in_chat oc_beta"]);
+      expect(platform.calls.filter(({ call }) => call === "configure" || call === "publish" || call === "check").map(({ appId }) => appId)).toEqual([CREATED_APP, CREATED_APP, CREATED_APP]);
+      expect(outcomes(registry)).toEqual({ configure: "done", publish: "done", credentials: "done", joins: { oc_alpha: "done", oc_beta: "done" } });
+      expect([started, team(registry, teamId).bindings]).toEqual([[{ teamId, chatId: "oc_alpha" }, { teamId, chatId: "oc_beta" }], ACCEPTING]);
+    } finally { registry.close(); }
+  });
+
+  // US-002/AC-03 step 3: the release awaits the admin's review. The submitted release is not submitted again, by a later run or after a restart.
+  it("waits for the admin's review after submitting the release once, and finishes when the bot is enabled", async () => {
+    const first = qrOnboarding();
+    await first.onboarding.requestCreation(first.teamId);
+    await first.scan("confirmed");
+    first.platform.configure({ applications: { [CREATED_APP]: "not_enabled" } });
+    expect(await first.onboarding.run(first.teamId)).toEqual([]);
+    expect([outcomes(first.registry), calls(first.platform)]).toEqual([{ configure: "done", publish: "review:submitted", credentials: undefined, joins: {} }, ["create", "configure", "publish", "check"]]);
+    await first.onboarding.run(first.teamId);
+    expect(calls(first.platform).slice(4)).toEqual(["check"]);
+    first.registry.close();
+    const restarted = qrOnboarding(first.path);
+    try {
+      restarted.platform.configure({ applications: { [CREATED_APP]: "not_enabled" } });
+      await restarted.onboarding.resume();
+      expect([calls(restarted.platform), outcomes(restarted.registry).publish]).toEqual([["check"], "review:submitted"]);
+      restarted.platform.configure({ applications: { [CREATED_APP]: "enabled" } });
+      const started = await restarted.onboarding.run(restarted.teamId);
+      expect(calls(restarted.platform).slice(1)).toEqual(["check", "add oc_alpha", "in_chat oc_alpha", "add oc_beta", "in_chat oc_beta"]);
+      expect([outcomes(restarted.registry), started.length]).toEqual([{ configure: "done", publish: "done", credentials: "done", joins: { oc_alpha: "done", oc_beta: "done" } }, 2]);
+    } finally { restarted.registry.close(); }
+  });
+
+  // The automatic calls may be refused: no official page says the application-v7 APIs accept a QR-created application. The step
+  // then needs the owner's action, and an enabled bot later completes both steps whoever configured and released it.
+  it.each([
+    ["the configuration is refused", { configure: { [CREATED_APP]: "refused" } }, { configure: "action:refused", publish: undefined }, ["configure", "check"]],
+    ["the configuration gets no answer", { configure: { [CREATED_APP]: "unreachable" } }, { configure: "action:unreachable", publish: undefined }, ["configure", "check"]],
+    ["the release is refused", { publish: { [CREATED_APP]: "refused" } }, { configure: "done", publish: "action:refused" }, ["configure", "publish", "check"]],
+    ["the release gets no answer", { publish: { [CREATED_APP]: "unreachable" } }, { configure: "done", publish: "action:unreachable" }, ["configure", "publish", "check"]],
+  ] as const)("needs the owner's action when %s, and completes both steps once the bot is enabled", async (_case, answers, expected, asked) => {
+    const { registry, platform, onboarding, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      await scan("confirmed");
+      platform.configure({ ...answers, applications: { [CREATED_APP]: "not_enabled" } });
+      await onboarding.run(teamId);
+      expect([outcomes(registry), calls(platform).slice(1)]).toEqual([{ ...expected, credentials: undefined, joins: {} }, asked]);
+      // The owner configured and released it by hand; the automatic calls are still refused.
+      platform.configure({ applications: { [CREATED_APP]: "enabled" } });
+      const started = await onboarding.run(teamId);
+      expect([outcomes(registry), started.length]).toEqual([{ configure: "done", publish: "done", credentials: "done", joins: { oc_alpha: "done", oc_beta: "done" } }, 2]);
+    } finally { registry.close(); }
+  });
+
+  it("does not ask for a release that the platform says is already under review", async () => {
+    const { registry, platform, onboarding, teamId, scan } = qrOnboarding();
+    try {
+      await onboarding.requestCreation(teamId);
+      await scan("confirmed");
+      platform.configure({ configure: { [CREATED_APP]: "under_review" }, applications: { [CREATED_APP]: "not_enabled" } });
+      await onboarding.run(teamId);
+      expect([outcomes(registry), calls(platform).slice(1)]).toEqual([{ configure: "done", publish: "review:submitted", credentials: undefined, joins: {} }, ["configure", "check"]]);
+    } finally { registry.close(); }
+  });
+
+  // Owner decision D2 (2026-11-11): a team with an application may be saved as QR creation; its application works until the scan.
+  it("keeps a team on the application it has until the scan, then onboards it again with the created one", async () => {
+    const { registry, platform, onboarding, ends, scan } = qrOnboarding();
+    try {
+      const bill = team(registry, "bill");
+      registry.saveTeam({ id: "bill", method: "qr", teamName: bill.teamName, responsibility: bill.responsibility, leader: { name: bill.leader.name, appId: "", instructions: "" },
+        executorProfiles: bill.executorProfiles.map(({ id, name, instructions, hostTools }) => ({ id, name, noun: "执行者", instructions, hostTools })), groups: ["oc_alpha", "oc_beta"] },
+        { basedOn: registry.current()!.version });
+      await onboarding.requestCreation("bill");
+      await onboarding.run("bill");
+      // Before the scan Bill's own application is checked; nothing is configured or released, and Bill keeps accepting work.
+      expect([platform.calls.slice(1), team(registry, "bill").bindings]).toEqual([[{ call: "check", appId: BILL_APP }], ACCEPTING]);
+      await scan("confirmed");
+      expect([ends, team(registry, "bill").leader.appId, team(registry, "bill").bindings, registry.hasSecret(BILL_APP)])
+        .toEqual([[{ teamId: "bill", created: CREATED_APP, replaced: BILL_APP }], CREATED_APP, ONBOARDING, false]);
+      await onboarding.run("bill");
+      expect([outcomes(registry), team(registry, "bill").bindings]).toEqual([{ configure: "done", publish: "done", credentials: "done", joins: { oc_alpha: "done", oc_beta: "done" } }, ACCEPTING]);
+    } finally { registry.close(); }
   });
 });
 
