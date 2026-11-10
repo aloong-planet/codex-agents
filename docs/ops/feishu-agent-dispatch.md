@@ -64,7 +64,35 @@ A different application needs its own setup before that start:
 
 Sam's application must not be one a team uses. If a start after re-pairing stops with `team_registry_roster_unsupported`, which stops the whole service and not only Feishu, re-pair Sam's own application and start again; the refused start changed nothing in the registry.
 
-Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team added there uses an existing Feishu application: its App ID and App Secret are entered on the page, and the secret is stored in the registry, never shown. The service then checks the credentials and the bot. Sam adds the bot to each bound group, and the team's application confirms it is in the group. Sam's application must therefore be allowed to add bots to the dispatch groups and to read their group information. Which permission scopes this needs is not yet verified on a real tenant. A group where only the owner and admins add members needs that setting changed in Feishu, or the bot added by hand, before 「重新检查」. Sam announces each team that starts or stops taking work in a group; a failed or uncertain announcement is never resent.
+### Team Leader applications
+
+Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team gets its Feishu application in one of two ways, chosen as 接入方式 and saved with the team. Either way the secret is stored in the registry and never shown.
+
+**扫码一键创建.** Saving the team with this choice shows a QR code. Scan it in Feishu and confirm on the phone: Feishu creates a new application, and the service takes its App ID and secret for the team. The code is valid for the time Feishu gives it, about ten minutes, and for one scan; 「刷新二维码」 requests a new one. The application's name is prefilled with the leader's name and its description with the team's name.
+
+The created application asks for the bot capability and five permissions. This is what the tenant's admin sees when reviewing it:
+
+| Permission | Used for |
+| --- | --- |
+| `im:message:send_as_bot` | posting in the groups as the bot |
+| `im:resource` | uploading the images and files it sends |
+| `im:chat:readonly` | confirming that the bot is in a group |
+| `application:application:patch` | enabling its own bot capability, adding these permissions and submitting its release |
+| `application:bot.basic_info:read` | reading its own bot information |
+
+The release it submits carries the reason 「团队负责人机器人：在派单群里以自己的身份发言。」 and the description 「开启机器人能力，申请发送消息、上传文件和读取群信息的权限。」. Until an admin approves it, the page shows 等待审核. Press 「重新检查」 after the approval: nothing checks again by itself, except a restart of the service.
+
+Not yet verified on a real tenant: whether Feishu's application-management APIs accept an application created by QR code. If the configuration or release step shows 需处理 with 「飞书没有接受…」, open the application in the Feishu developer console, enable the bot capability, add the permissions above, create a version and submit it. Once it is approved, press 「重新检查」: a check that finds the bot enabled completes both steps.
+
+A team that already has an application can be saved as 扫码一键创建 too. It keeps working with its application until the scan. The created application then replaces it, and the team onboards again in its groups.
+
+If the owner confirms on the phone in the moment a code is replaced or QR creation is ended, Feishu creates an application that the service does not use and whose secret it does not keep. The audit file `console-audit.jsonl` in the state directory then has a `team_application_qr_failed` entry with that application's `appId`. Look for such entries after onboarding, and remove the application in the Feishu developer console.
+
+**已有应用，手动填写.** The App ID and App Secret of an application created in the Feishu developer console are entered on the page. It needs `im:message:send_as_bot` and `im:resource`, a published version and an enabled bot.
+
+**For both.** The service checks the credentials and the bot. Sam adds the bot to each bound group, and the team's application confirms it is in the group. Sam's application must therefore be allowed to add bots to the dispatch groups and to read their group information. Which permission scopes this needs is not yet verified on a real tenant. A group where only the owner and admins add members needs that setting changed in Feishu, or the bot added by hand, before 「重新检查」. Sam announces each team that starts or stops taking work in a group; a failed or uncertain announcement is never resent.
+
+**Test message.** Once a team accepts work in a group, 「发送测试消息…」 on the page posts 「这是 <负责人>（<团队名>）的测试消息，用来确认可以在本群发言。」 once to each such group as the team's own bot, after a confirmation that shows the text. A failed or unknown send is never repeated by itself; look in the group before sending again.
 
 ## Public ingress and cutover
 
