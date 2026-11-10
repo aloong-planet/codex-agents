@@ -49,16 +49,24 @@ The owner chose this layout: the team list on the left, and the selected team's 
   - "Skill 管理" and "MCP 管理" lead to `prototype-skill-library.html` and `prototype-mcp-catalog.html`.
   - "返回团队总览" leads to `prototype-team-structures.html`, whose "团队管理" button leads here.
 - **Shared visual block.** The console shell, colors, buttons, inputs, badges, form sections and confirmation cards come from the shared `agent-console` visual block.
+- **Onboarding additions.** They keep structures this page already has:
+  - the states of the QR area fill the same placeholder, text and action slots;
+  - the test-message confirmation is the shared block's inline confirmation;
+  - step 6's rows per group are step 5's rows, and their delivery texts are those of Sam's announcements.
 
 ### Editor sections
 
 #### 1. Basic information and Feishu onboarding
 
 - **Fields.** Leader name and team name.
-- **Onboarding method.** A segmented control switches between QR one-click creation and an existing application.
+- **Onboarding method.** A segmented control switches between QR one-click creation and an existing application. The choice is saved with the team.
 - **QR creation.**
   - A QR placeholder asks the owner to scan in Feishu and confirm. The scan creates a new agent application without selecting an existing one, and its credentials fill in automatically.
+  - The code appears once the team is saved with QR creation chosen. Until then the placeholder says 「保存后显示」, the text says the code appears after saving, and step 1 is not started. A team that already has an application is also told that the scanned application replaces it and that the team then onboards again in its groups.
+  - While the code is being fetched, the placeholder says 「正在生成」 and step 1 is in progress.
+  - When Feishu gives no code, the placeholder says 「未取得二维码」, step 1 needs action with that reason, and "刷新二维码" is the primary action.
   - Once the scan has completed, the section shows the created App ID; the credentials are saved and never displayed.
+  - Until the scan has created the application, steps 2 to 6 are not started and the section offers no re-check or test message.
 - **Existing application.**
   - The owner enters the App ID.
   - The App Secret can only be written or replaced. "填写" or "替换" opens a password field with "取消"; saving stores the secret, and the field returns to "已保存 · 不显示".
@@ -72,6 +80,12 @@ The owner chose this layout: the team list on the left, and the selected team's 
     6. Send a test message, which needs confirmation.
   - Step 6 is optional: the team takes work once steps 1–5 are done, whether or not a test message was sent.
   - The existing-application path starts at step 4.
+  - Step 2 or step 3 shows "需处理" when Feishu does not accept the automatic configuration or the automatic release; the note says what to do in the Feishu developer console before "重新检查".
+  - Step 3 shows "等待审核" after the release was submitted; its note says to press "重新检查" once the admin has approved.
+  - **Test message.** "发送测试消息…" appears once the team's bot is in a bound group.
+    - It opens an inline confirmation below the actions, which names the sending bot, the groups and the exact text, and says that the group's members will see it. Only "确认发送" sends; "取消" closes it.
+    - The text is 「这是 <负责人>（<团队名>）的测试消息，用来确认可以在本群发言。」, posted by the team's own bot.
+    - Step 6 then has one row per group the message was sent to, each with its delivery result: 飞书已接收, 发送失败 or 发送结果未知. A failed or unknown send is never repeated automatically, and marks the row and the step "需处理".
   - Step 4 shows "等待审核" while the application's version is not yet published or enabled, and "需处理" when the App ID and App Secret do not match; each note says what to do.
   - Step 5 has one row per bound group, each with its own status. The step needs action when any group does; a team with no bound group is asked to choose one first.
   - A team takes work in a group once step 4 is done and its bot has joined that group, so it can take work in one bound group while another still needs action.
@@ -144,15 +158,16 @@ A save based on an outdated version is refused with "重新载入", which reload
 
 ## Demo scaffolding
 
-- **Onboarding progress switch.** When the new unnamed team is selected, the floating `Demo ·` bar switches its onboarding progress between four states: waiting for the scan, waiting for review, blocked when joining a group, and complete. In the product, the results Feishu returns decide this progress, and there is no such control. The bar is not part of the design and must not be implemented.
-- **Onboarding states.** The onboarding switch includes "二维码过期".
+- **Onboarding progress switch.** Once the new team is saved with QR creation chosen, the floating `Demo ·` bar switches its onboarding progress between nine states: 正在生成, 等待扫码, 二维码过期, 未取得二维码, 配置受阻, 发布受阻, 等待审核, 进群受阻 and 全部完成. In the product, the results Feishu returns decide this progress, and there is no such control. The bar is not part of the design and must not be implemented.
+- **Fetching a code.** Saving with QR creation chosen, and "刷新二维码", show 正在生成 for a moment and then 等待扫码; the bar's 正在生成 holds that moment.
+- **测试消息结果.** 飞书已接收 / 发送失败 / 结果未知 appears while the selected team's bot is in a bound group. A confirmed test message gives the chosen result to the first group and 飞书已接收 to the others. In the product, Feishu's answer to each send decides this, and there is no such control.
 - **已有应用接入进度.** 未检查 / 凭证无效 / 等待审核 / 进群受阻 / 全部完成 appears while a team entered as an existing application is still being checked (Frank, or the new team switched to 已有应用). In the product, the credential check and the group-joining results decide this, and there is no such control.
 - **移除中的分工与待确认.** 未结束 / 已结束 appears while the selected team has a removal in progress. 已结束 simulates the active assignments finishing and the waiting requests being answered. In the product, the assignments and the requesters decide this.
 - **保存结果.** 按实际校验 / 校验不通过 / 版本已过期. 按实际校验 checks the edited team: try saving the new team with empty names, or entering Sam's App ID. The other two show those refusals for any team. In the product, validation and the version check decide this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
 - **派单配置.** 已配置 / 未配置 / 未接入飞书. In the product, whether the local channel configuration has Feishu paired and dispatch enabled decides it.
 - **派单群保存结果.** 按实际校验 / 配对向导占用 / 文件已变更 appears while the dispatch-group form is shown. 按实际校验 refuses unchecking 银河护卫队 or 产品讨论组 with dispatch configured, since both have unfinished requests in the sample. In the product, the pairing wizard's lock and the file comparison decide this.
-- **Visual-only actions.** Save, dispatch-group save, re-check, test message, QR refresh, MCP binding and unbinding, group binding, moving or deleting a scheduled task, and delete give visual feedback only. A refresh restores the mock data.
+- **Visual-only actions.** Save, dispatch-group save, re-check, the test message, QR refresh, MCP binding and unbinding, group binding, moving or deleting a scheduled task, and delete give visual feedback only: nothing is created, scanned or sent. A refresh restores the mock data.
 
 ## Uncovered dimensions
 
