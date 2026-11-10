@@ -52,8 +52,13 @@ A save is refused, leaving the file unchanged, while the pairing wizard's lock `
 
 Before restarting after unchecking a group, inspect that group's in-flight work in `/api/state`: a request admitted there after the save is cancelled at the restart, because the group no longer has dispatch.
 
-Re-running `pnpm feishu:pair` replaces only `feishu.appId`, `feishu.appSecret` and the owner's Feishu binding; `groups`, `dispatch`, `receiveMode`, `webhook` and every other `feishu` key are kept. At the next start Sam follows `feishu.appId`: the team registry records Sam on the new application and keeps the teams and their secrets. A different application needs its own setup before that start:
+Re-running `pnpm feishu:pair` replaces only `feishu.appId`, `feishu.appSecret` and the owner's Feishu binding; `groups`, `dispatch`, `receiveMode`, `webhook` and every other `feishu` key are kept. At the next start Sam follows `feishu.appId`: the team registry records Sam on the new application and keeps the teams and their secrets.
+
+The wizard pairs over a long connection and asks for long-connection events in the platform console, while a kept `receiveMode: "webhook"` makes the next start listen only for callbacks. After re-pairing a callback-mode service, start the service and ingress, then switch the application's event subscription back to the request URL `https://YOUR_HOST/feishu/events` and complete URL verification, as in the cutover below. Until then Sam receives nothing, and nothing reports an error.
+
+A different application needs its own setup before that start:
 - its bot must be published and added to the dispatch groups, as at the first setup above;
+- `webhook.verificationToken` and `webhook.encryptKey` are kept from the previous application and must be replaced with the new application's;
 - the open IDs in `groups[].allowedSenderIds` belong to the previous application and must be replaced with the new application's;
 - each group's conversation and memory are keyed by the application as well as the chat, so the new application starts them afresh and does not continue the previous application's.
 

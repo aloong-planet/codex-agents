@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
-import { runFeishuPairing, type PairingTransport } from "../src/feishu-pairing.js";
+import { runFeishuPairing } from "../src/feishu-pairing.js";
 import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { RuntimePool } from "../src/runtime-pool.js";
@@ -16,6 +16,7 @@ import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
+import { scriptedPairing } from "./support/feishu-pairing.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
 import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
@@ -140,14 +141,9 @@ it("names the Coordinator from the registry in its default reassignment explanat
 
 /** Re-pairs the service in `directory` onto `appId` through the pairing wizard, with a scripted terminal and the owner's private-chat answer. */
 async function repair(directory: string, appId: string, appSecret: string) {
-  let handlers: Parameters<PairingTransport["start"]>[0] | undefined;
-  const answers = ["y", appId, appSecret, "y", "y"];
-  const result = await runFeishuPairing({ configPath: join(directory, "channel.json"), statePath: join(directory, "state.json"),
-    transport: () => ({ async start(h) { handlers = h; h.ready(); }, close() {} }),
-    io: { async ask() { const answer = answers.shift(); if (answer === undefined) throw new Error("unexpected prompt"); return answer; },
-      write(text) { if (text.startsWith("PAIR ")) void handlers!.message({ app_id: appId, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-        message: { chat_type: "p2p", chat_id: "oc_private", message_type: "text", message_id: "om_pair", content: JSON.stringify({ text }) } }); } } });
-  expect(result).toBe("saved");
+  const pairing = scriptedPairing(appId, ["y", appId, appSecret, "y", "y"]);
+  expect(await runFeishuPairing({ configPath: join(directory, "channel.json"), statePath: join(directory, "state.json"),
+    io: pairing.io, transport: () => pairing.transport })).toBe("saved");
 }
 
 it("starts with Sam on a re-paired application and the teams kept, after refusing a start on a team's application", async () => {

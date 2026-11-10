@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { expect, it } from "vitest";
 import { runFeishuPairing, type PairingIO, type PairingTransport } from "../src/feishu-pairing.js";
+import { pairingEvent, scriptedPairing } from "./support/feishu-pairing.js";
 import { PrivateStateStore } from "../src/private-state-store.js";
 import { AutoBindingFileStore } from "../src/auto-binding-store.js";
 import { loadChannelStartupConfiguration } from "../src/channel-startup-config.js";
@@ -13,22 +14,15 @@ const appId = "cli_0123456789abcdef";
 const base = () => ({ channel: "weixin", owner: { memoryAccountId: "old-bot", bindings: [
   { channel: "weixin", accountId: "old-bot", target: "owner@im.wechat", senderId: "owner@im.wechat" },
 ] }, taskScope: { accountId: "old-bot", target: "owner@im.wechat" }, extension: { keep: true } });
-// im.message.receive_v1 shape matches the pinned SDK and feishu-channel.test.ts fixture.
-function event(code: string, app = appId) { return { app_id: app, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-  message: { chat_type: "p2p", chat_id: "oc_private", message_type: "text", message_id: "om_pair", content: JSON.stringify({ text: code }) } }; }
+const event = (code: string) => pairingEvent(code, appId);
 function harness(pairedApp = appId) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "feishu-pair-")); fs.chmodSync(dir, 0o700);
   const configPath = path.join(dir, "channel.json");
   fs.writeFileSync(configPath, JSON.stringify(base()), { mode: 0o600 });
   const before = fs.readFileSync(configPath, "utf8");
-  const output: string[] = []; const answers = [pairedApp, "hidden-test-secret", "y", "y"];
-  let handlers: Parameters<PairingTransport["start"]>[0] | undefined;
-  let closed = false;
-  const transport: PairingTransport = { async start(h) { handlers = h; h.ready(); }, close() { closed = true; } };
-  const io: PairingIO = { async ask() { const answer = answers.shift(); if (answer === undefined) throw Error("unexpected prompt"); return answer; },
-    write(text) { output.push(text); if (text.startsWith("PAIR ")) void handlers!.message(event(text, pairedApp)); } };
-  return { dir, configPath, before, output, answers, io, transport, get closed() { return closed; },
-    cleanup() { fs.rmSync(dir, { recursive: true, force: true }); } };
+  const pairing = scriptedPairing(pairedApp, [pairedApp, "hidden-test-secret", "y", "y"]);
+  return { dir, configPath, before, output: pairing.output, answers: pairing.answers, io: pairing.io, transport: pairing.transport,
+    get closed() { return pairing.closed; }, cleanup() { fs.rmSync(dir, { recursive: true, force: true }); } };
 }
 it("P01 pairs via a private message and saves startup-valid configuration without resetting owner state", async () => {
   const h = harness();
@@ -44,6 +38,8 @@ it("P01 pairs via a private message and saves startup-valid configuration withou
     const saved = JSON.parse(fs.readFileSync(h.configPath, "utf8"));
     expect(saved.owner.bindings[0]).toEqual({ channel: "weixin", accountId: "old-bot", target: "owner@im.wechat", senderId: "owner@im.wechat" });
     expect(saved.extension).toEqual({ keep: true });
+    // A first pairing, with no Feishu configuration yet, writes only the application's credentials (channel-switching::US-003/AC-08).
+    expect(saved.feishu).toEqual({ appId, appSecret: "hidden-test-secret" });
     expect(fs.statSync(h.configPath).mode & 0o777).toBe(0o600);
     expect(h.closed).toBe(true); expect(h.output.join("\n")).not.toContain("hidden-test-secret");
   } finally { h.cleanup(); }
