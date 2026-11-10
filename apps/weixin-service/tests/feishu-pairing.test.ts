@@ -40,6 +40,7 @@ it("P01 pairs via a private message and saves startup-valid configuration withou
     expect(saved.extension).toEqual({ keep: true });
     // A first pairing, with no Feishu configuration yet, writes only the application's credentials (channel-switching::US-003/AC-08).
     expect(saved.feishu).toEqual({ appId, appSecret: "hidden-test-secret" });
+    expect(h.output[0]).toBe("飞书配对\n保存前不会修改配置。请先停止正式服务。");
     expect(fs.statSync(h.configPath).mode & 0o777).toBe(0o600);
     expect(h.closed).toBe(true); expect(h.output.join("\n")).not.toContain("hidden-test-secret");
   } finally { h.cleanup(); }
@@ -242,10 +243,13 @@ it("P10 re-pairing another application replaces only its credentials and the own
   } finally { h.cleanup(); }
 });
 
+// Owner-confirmed wording, 2026-11-10. A kept `webhook` without `receiveMode: "webhook"` is refused by the startup parser before
+// the wizard connects, so the token step never appears without the callback step.
 const TOKEN_STEP = "本次换了应用：webhook 里的 Verification Token 和 Encrypt Key 仍是原应用的，请换成新应用的再启动。";
+const CALLBACK_STEP = "接收方式：回调（webhook）保留。保存后先启动服务，再在飞书后台把事件订阅改回请求地址并完成地址验证。";
 it.each([
-  ["a different application keeping webhook", repairedApp, true, [TOKEN_STEP]],
-  ["the same application keeping webhook", appId, true, []],
+  ["a different application keeping webhook", repairedApp, true, [TOKEN_STEP, CALLBACK_STEP]],
+  ["the same application keeping webhook", appId, true, [CALLBACK_STEP]],
   ["a different application without webhook", repairedApp, false, []],
 ] as const)("P10 the save preview of a re-pair onto %s names the kept steps still to do", async (_case, pairedApp, webhook, steps) => {
   const h = harness(pairedApp);
@@ -255,6 +259,8 @@ it.each([
   h.answers.unshift("y");
   try {
     expect(await runFeishuPairing({ configPath: h.configPath, statePath: path.join(h.dir, "state.json"), io: h.io, transport: () => h.transport })).toBe("saved");
+    // One heading for first pairing and re-pairing alike (owner-confirmed wording, 2026-11-10).
+    expect(h.output[0]).toBe("飞书配对\n保存前不会修改配置。请先停止正式服务。");
     const preview = h.output.find((text) => text.startsWith("保存预览："));
     expect(preview?.split("\n").slice(-steps.length - 1)).toEqual(["文件仅限本机当前用户读写。", ...steps]);
   } finally { h.cleanup(); }

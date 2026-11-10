@@ -61,12 +61,14 @@ class PairingFile {
   }
   /**
    * Steps the kept Feishu configuration still needs before the next start, one preview line each, in the order they are done
-   * (channel-switching::US-003/AC-08). A kept webhook holds the previous application's verification token and encrypt key.
+   * (channel-switching::US-003/AC-08). A kept webhook holds the previous application's verification token and encrypt key, and
+   * a kept callback receive mode listens only for callbacks while pairing left the platform on long connection.
    */
   keptConfigurationSteps(appId: string): string[] {
     const previous = this.document.feishu;
     return [
       ...(previous?.webhook !== undefined && previous.appId !== appId ? ["本次换了应用：webhook 里的 Verification Token 和 Encrypt Key 仍是原应用的，请换成新应用的再启动。"] : []),
+      ...(previous?.receiveMode === "webhook" ? ["接收方式：回调（webhook）保留。保存后先启动服务，再在飞书后台把事件订阅改回请求地址并完成地址验证。"] : []),
     ];
   }
   enabledChannels(): PersonalChannel[] {
@@ -125,7 +127,7 @@ export async function runFeishuPairing(options: {
   }
   try {
     controller.signal.throwIfAborted();
-    io.write("飞书首次配对\n保存前不会修改配置。请先停止正式服务。");
+    io.write("飞书配对\n保存前不会修改配置。请先停止正式服务。");
     file = new PairingFile(options.configPath, options.statePath);
     io.write(`保留原记忆与任务身份：${file.document.owner.memoryAccountId}`);
     if (file.document.owner.bindings.some(b => b.channel === "feishu") && (await ask("已有飞书绑定，是否重新配对并在最后确认替换？[y/N] ")).toLowerCase() !== "y") return "cancelled";
