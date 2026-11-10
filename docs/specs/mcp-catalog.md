@@ -148,7 +148,7 @@ Applies to: every agent. Capability beyond module permissions reaches an agent o
 
 ## Testing Decisions
 
-- **Connection manager.** Tested at its public interface against real local test servers over stdio and Streamable HTTP: connection, retry, timeout, pinning and review, human-interaction filtering, secret masking and proxy-call checks. Where URL-server secrets go is checked with a second loopback origin that records the header names reaching it, while the test servers redirect requests there or name it in their metadata.
+- **Connection manager.** Tested at its public interface against real local test servers over stdio and Streamable HTTP: connection, retry, timeout, pinning and review, human-interaction filtering, secret masking, proxy-call checks, and that closing stops every program, including one still connecting and one a reconnection replaced. Where URL-server secrets go is checked with a second loopback origin that records the header names reaching it, while the test servers redirect requests there or name it in their metadata.
 - **Proxy boundary.** Tested at the host tool boundary: the tools a turn is offered, refusal of calls outside the snapshot or after a revocation, and the audit entry.
 - **Console.** HTTP-boundary tests of the catalog API with an authorized browser, including that no response contains a secret. Playwright end-to-end tests drive register, confirm, import, review, disable and delete.
 
