@@ -3,6 +3,8 @@
 // runs onboarding and audits every change. Every value from the service is inserted as text (agent-console::REQ-005/AC-04).
 // Not built yet (ticket 11, decision D1): QR creation and the test message, MCP binding, skills, and team deletion with its
 // removal panel. An existing application is the only onboarding method, so the editor shows its two steps.
+// The dispatch-group form (agent-console::US-009) fills the 未配置 panel and, with dispatch, the 派单群设置 drawer; a save writes
+// the channel configuration file and applies after the service restarts.
 (() => {
   const { mount, tip, esc } = window.ConsoleShell;
   mount("teams");
@@ -33,6 +35,9 @@
   const drafts = new Map();
   let query = "";
   let filter = "all";
+  /** The dispatch-group form: the service's view of the file, the checked groups while edited, the save bar state and a refusal. */
+  const dc = { view: null, open: false, checked: null, state: "clean", refusal: null };
+  const DC_BAR = { clean: "保存后重启服务才生效。", dirty: "有未保存的修改", saved: "已保存，重启服务后生效", reloaded: "已重新载入最新的配置，请再修改。" };
 
   async function api(path, payload) {
     const response = await fetch(path, payload === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
@@ -232,24 +237,100 @@
     if (field) field.value = current().value.secret;
   }
 
+  // ---- dispatch groups ----
+  const sameGroups = (a, b) => a.length === b.length && a.every((chatId) => b.includes(chatId));
+  const dcName = (chatId) => dc.view.groups.find((group) => group.chatId === chatId)?.name ?? chatId;
+  const dcList = (ids) => ids.map(dcName).join("、");
+  const DC_STATE = { proposed: "等待发起人确认", waiting: "等待发起人确认", queued: "处理中", running: "处理中" };
+
+  /** The reasons of a refused save, in the order the save bar lists them (agent-console::US-009/AC-04). */
+  function dcReasons(refusal) {
+    if (refusal.kind === "locked") {
+      return [`${esc("飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。")}<br>${esc("如果没有配对命令在运行，这个锁文件可能是配对中途退出留下的：")}<code class="atm-empty-path">${esc(refusal.lockPath)}</code>${esc("确认没有配对命令运行后删除它，再保存。")}`];
+    }
+    if (refusal.kind === "changed") return [esc("渠道配置文件在页面载入后被修改过；为避免覆盖，本次保存没有生效。")];
+    if (refusal.kind === "unfinished") {
+      return refusal.groups.map(({ chatId, requests }) => `${esc(`${dcName(chatId)}还有 ${requests.length} 项未结束的派单事务，结束后才能取消勾选：`)}<ul class="atm-dc-busy">${requests.map(({ summary, status }) => `<li>${esc(summary)}<small>${esc(DC_STATE[status] ?? status)}</small></li>`).join("")}</ul>`);
+    }
+    return [esc(refusal.message ?? "请求失败")];
+  }
+
+  function dcFormHtml() {
+    const checked = dc.checked ?? dc.view.saved;
+    const rows = dc.view.groups.map(({ chatId, name }) => {
+      const named = name !== chatId;
+      return `<label class="acf-check atm-dc-group"><input type="checkbox" data-dc-group="${esc(chatId)}" ${checked.includes(chatId) ? "checked" : ""}><span>${named ? esc(name) : `<code>${esc(chatId)}</code>`}<small>${named ? esc(chatId) : "未取到群名，显示群 ID"}</small></span></label>`;
+    }).join("");
+    const compare = sameGroups(dc.view.saved, dc.view.running) ? ""
+      : `<dl class="atm-dc-compare"><dt>运行中的服务</dt><dd>${esc(dcList(dc.view.running) || "未启用派单")}</dd><dt>已保存，重启后</dt><dd>${esc(dcList(dc.view.saved) || "不启用派单")}</dd></dl>`;
+    const bar = dc.refusal
+      ? `<div class="acf-savebar" data-state="error"><div class="atm-save-err" role="alert"><b>无法保存</b><ul>${dcReasons(dc.refusal).map((reason) => `<li>${reason}</li>`).join("")}</ul></div><div class="acf-row-actions">${dc.refusal.kind === "changed" ? '<button class="acv2-button acv2-primary" type="button" data-dc-reload>重新载入</button>' : '<button class="acv2-button acv2-primary" type="button" data-dc-save>保存</button>'}</div></div>`
+      : `<div class="acf-savebar" data-state="${dc.state === "reloaded" ? "clean" : dc.state}"><span>${DC_BAR[dc.state]}</span><button class="acv2-button acv2-primary" type="button" data-dc-save>保存</button></div>`;
+    return `<div class="atm-dc-groups">${rows}</div>${compare}${bar}`;
+  }
+
+  /** Draws the form where it is shown: the 未配置 panel, or the drawer when it is open. */
+  function renderDc() {
+    if (!view?.configured) { renderEmpty(); return; }
+    $("atm-dc-drawer").hidden = !dc.open;
+    if (dc.open && dc.view?.feishu) $("atm-dc-body").innerHTML = `<p class="atm-dc-intro">勾选要启用派单的飞书群。这里列出渠道配置里已允许的群；保存后重启服务生效。</p>${dcFormHtml()}`;
+    renderStrip();
+  }
+
+  /** While the saved groups differ from those the running service uses, a strip above the team list says so. */
+  function renderStrip() {
+    const strip = $("atm-dc-pending");
+    const pending = Boolean(dc.view?.feishu) && !sameGroups(dc.view.saved, dc.view.running);
+    if (strip) strip.hidden = !pending;
+  }
+
+  async function loadDc() {
+    const { ok, body } = await api("/api/teams/dispatch-groups");
+    if (ok) dc.view = body;
+    return ok;
+  }
+
+  async function saveDc() {
+    const { ok, body } = await api("/api/teams/dispatch-groups", { groups: dc.checked ?? dc.view.saved, basedOn: dc.view.basedOn });
+    if (ok) Object.assign(dc, { view: body, checked: null, state: "saved", refusal: null });
+    else dc.refusal = body.refusal ?? { kind: "error", message: body.error };
+    renderDc();
+  }
+
+  async function openDc() {
+    if (!(await loadDc())) return;
+    Object.assign(dc, { open: true, checked: null, refusal: null, state: dc.state === "saved" ? "saved" : "clean" });
+    renderDc();
+    $("atm-dc-drawer").querySelector("[data-dc-close]").focus();
+  }
+
+  function closeDc() {
+    if (!dc.open) return;
+    Object.assign(dc, { open: false, refusal: null });
+    renderDc();
+  }
+
   // ---- page ----
   function renderEmpty() {
     $("atm-new").hidden = true;
-    const body = view.feishu
-      ? `飞书派单目前在本机渠道配置文件中启用：在 <code class="atm-empty-path">${esc(view.configurationPath ?? "")}</code> 的 feishu 中加入 dispatch，然后重启服务。详细步骤见运维文档《Feishu agent dispatch》。`
-      : '飞书尚未接入本机服务：请先停止服务，在终端运行 <code class="atm-empty-path">pnpm feishu:pair</code> 完成飞书配对，再在渠道配置文件的 feishu 中加入 dispatch。';
-    $("atm-view").innerHTML = `<section class="atm-panel"><div class="acv2-empty"><strong>尚未配置派单群</strong><p class="atm-empty-body">${body}</p></div></section>`;
+    $("atm-dc-open").hidden = true;
+    $("atm-view").innerHTML = dc.view?.feishu
+      ? `<section class="atm-panel"><div class="atm-scroll"><div class="acv2-empty"><strong>尚未配置派单群</strong><p>勾选要启用派单的飞书群，保存后重启服务生效。</p></div><div class="atm-dc-wrap">${dcFormHtml()}</div></div></section>`
+      : '<section class="atm-panel"><div class="acv2-empty"><strong>尚未配置派单群</strong><p class="atm-empty-body">飞书尚未接入本机服务：请先停止服务，在终端运行 <code class="atm-empty-path">pnpm feishu:pair</code> 完成飞书配对，再回到这里选择派单群。</p></div></section>';
   }
 
   function renderPage() {
     $("atm-new").hidden = false;
-    $("atm-view").innerHTML = '<div class="atm-a"><section class="atm-panel"><div class="atm-panel-head">团队<small id="atm-count"></small></div>'
+    $("atm-dc-open").hidden = !dc.view?.feishu;
+    $("atm-view").innerHTML = '<div class="atm-dc-pending" id="atm-dc-pending" role="status" hidden><span>派单群设置已保存，重启服务后生效。</span><button class="atm-link" type="button" data-dc-open>查看派单群设置</button></div>'
+      + '<div class="atm-a"><section class="atm-panel"><div class="atm-panel-head">团队<small id="atm-count"></small></div>'
       + '<div class="atm-list-tools"><input class="acv2-input" id="atm-search" type="search" placeholder="搜索团队或职责" aria-label="搜索团队"><select class="acv2-input" id="atm-filter" aria-label="按群筛选"></select></div>'
       + '<div class="atm-scroll" id="atm-list"></div></section><section class="atm-panel"><div class="atm-scroll"><div class="atm-editor-wrap" id="atm-editor"></div></div></section></div>';
     $("atm-search").value = query;
     renderFilter();
     renderList();
     renderEditor();
+    renderStrip();
   }
 
   function renderFilter() {
@@ -283,7 +364,9 @@
     const { ok, body } = await api("/api/teams");
     if (!ok) return;
     const before = JSON.stringify(view);
-    if (!body.configured) { view = body; renderEmpty(); return; }
+    if (first) await loadDc();
+    // The 未配置 panel is the form itself; the page's polling never redraws it under the owner.
+    if (!body.configured) { const was = view; view = body; if (first || was?.configured !== false) renderEmpty(); return; }
     const wasConfigured = Boolean(view?.configured);
     accept(body);
     if (first || !wasConfigured) { renderPage(); return; }
@@ -354,6 +437,13 @@
   // ---- events ----
   document.addEventListener("click", (event) => {
     const target = event.target;
+    if (target.closest("[data-dc-open]")) { void openDc(); return; }
+    if (target.closest("[data-dc-close]")) { closeDc(); return; }
+    if (target.closest("[data-dc-save]")) { void saveDc(); return; }
+    if (target.closest("[data-dc-reload]")) {
+      void loadDc().then((ok) => { if (ok) { Object.assign(dc, { checked: null, refusal: null, state: "reloaded" }); renderDc(); } });
+      return;
+    }
     const item = target.closest("[data-select]");
     if (item) { open(item.dataset.select); return; }
     if (target.closest("#atm-new")) { if (!drafts.has(NEW)) drafts.set(NEW, entryFor(NEW)); open(NEW); return; }
@@ -393,6 +483,16 @@
 
   document.addEventListener("change", (event) => {
     const target = event.target;
+    const dcGroup = target.dataset.dcGroup;
+    if (dcGroup) {
+      const checked = dc.checked ?? dc.view.saved;
+      dc.checked = target.checked ? [...checked, dcGroup] : checked.filter((chatId) => chatId !== dcGroup);
+      Object.assign(dc, { state: "dirty", refusal: dc.refusal?.kind === "changed" ? dc.refusal : null });
+      renderDc();
+      // The form is drawn again; keyboard focus stays on the group just changed.
+      [...document.querySelectorAll("[data-dc-group]")].find((box) => box.dataset.dcGroup === dcGroup)?.focus();
+      return;
+    }
     if (target.id === "atm-filter") { filter = target.value; renderList(); return; }
     if (!target.closest("[data-editor]")) return;
     const draft = current().value;
@@ -408,6 +508,8 @@
       edited(); renderEditor();
     }
   });
+
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDc(); });
 
   void load(true);
   // Onboarding outcomes, announcement delivery and active Assignments change in the service; the page follows them.

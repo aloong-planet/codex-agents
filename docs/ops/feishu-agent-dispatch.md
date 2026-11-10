@@ -12,7 +12,7 @@ Platform references: [event subscription configuration](https://open.feishu.cn/d
 
 ## Local configuration
 
-Use the existing private `channel.json` or `CHANNEL_CONFIG_PATH`. Merge this fragment into its `feishu` object, retaining Sam's actual `appId` and `appSecret`. The callback token and encryption key must match Sam's event configuration. Both are required; plaintext callbacks are rejected.
+Use the existing private `channel.json` or `CHANNEL_CONFIG_PATH`. Merge this fragment into its `feishu` object, retaining Sam's actual `appId` and `appSecret`. The callback token and encryption key must match Sam's event configuration. Both are required; plaintext callbacks are rejected. The `dispatch` section is what the console's dispatch-group form writes (below); leave it out to configure dispatch from the page.
 
 ```json
 {
@@ -27,20 +27,32 @@ Use the existing private `channel.json` or `CHANNEL_CONFIG_PATH`. Merge this fra
     { "chatId": "oc_EXAMPLEGROUP", "allowedSenderIds": ["ou_EXAMPLEOWNER"] }
   ],
   "dispatch": {
-    "groupChatIds": ["oc_EXAMPLEGROUP"],
-    "agents": [
-      { "id": "sam" },
-      { "id": "alice", "appId": "cli_aaaaaaaaaaaaaaaa", "appSecret": "REPLACE_WITH_ALICE_SECRET" },
-      { "id": "bill", "appId": "cli_bbbbbbbbbbbbbbbb", "appSecret": "REPLACE_WITH_BILL_SECRET" },
-      { "id": "jack", "appId": "cli_cccccccccccccccc", "appSecret": "REPLACE_WITH_JACK_SECRET" }
-    ]
+    "groupChatIds": ["oc_EXAMPLEGROUP"]
   }
 }
 ```
 
-The four required role IDs have built-in names and responsibilities. Additional roles may supply an explicit `name` and `responsibility`, plus a unique application; the roster accepts 4–16 entries. Sam inherits the canonical credentials and must not specify them again. Dispatch groups must be a nonempty subset of the existing group allowlist. Preserve unrelated groups when merging configuration. Configuration is read at startup and malformed values stop startup.
+Dispatch groups must be a nonempty list of distinct groups from the group allowlist, at most 98. Preserve unrelated groups when merging configuration. Configuration is read at startup and malformed values stop startup.
 
-At startup the service imports `feishu.dispatch` into its team registry (`team-registry.sqlite` in the state directory), and dispatch reads the roster only from there. Until the agent console saves its first change, each start imports the file again and records a new registry version when it differs, so editing this fragment and restarting still changes the roster. After the console's first save, this fragment no longer changes the roster. The registry stores Alice, Bill and Jack's App Secrets beside its versions with owner-only file permissions, never inside a version; Sam's secret stays in `feishu.appSecret`.
+A hand-written `dispatch` section may also carry a roster, as configurations did before the console managed teams: `"agents"` with `{ "id": "sam" }` and `{ "id": "alice" | "bill" | "jack", "appId": "cli_…", "appSecret": "…" }`. The four role IDs have built-in names and responsibilities. Additional roles may supply an explicit `name` and `responsibility`, plus a unique application; the roster accepts 4–16 entries. Sam inherits the canonical credentials and must not specify them again.
+
+At startup the service imports `feishu.dispatch` into its team registry (`team-registry.sqlite` in the state directory), and dispatch reads the roster only from there:
+
+- The dispatch groups follow the file at every start. A team bound to a group the file no longer lists loses that binding at that start, with no announcement in the group.
+- A section without `agents` never changes the teams, Sam or the stored secrets. On a new state directory, dispatch starts with Sam alone; Sam can only clarify until a team is added on the console and accepts work in the group.
+- A roster changes the teams only until the console saves its first change: each start imports it again and records a new registry version when it differs. After the console's first save, the roster no longer changes the teams; its group list still applies.
+
+The registry stores Team Leader App Secrets beside its versions with owner-only file permissions, never inside a version; Sam's secret stays in `feishu.appSecret`.
+
+### Choosing dispatch groups from the console
+
+Open 团队管理 in the console. Without dispatch, the page shows the dispatch-group form; with dispatch, 「派单群设置」 opens it. The form lists the groups in `feishu.groups` and checks those that `feishu.dispatch` names. Saving writes only `feishu.dispatch.groupChatIds` into the channel configuration file the service loaded, keeping every other key, as an owner-only file replaced in one step. Saving with no group checked removes `feishu.dispatch`, so the next start runs without dispatch; the teams stay in the registry for a later re-enable. A save applies when the service next starts, and until then the page shows the running groups beside the saved ones.
+
+A save is refused, leaving the file unchanged, while the pairing wizard's lock `channel.json.pairing-lock` exists, when the file changed after the page loaded it, or when it unchecks a group that still has a dispatch request proposed, queued, running or waiting. A lock that remains after `pnpm feishu:pair` was stopped mid-run is never removed by the service: confirm no pairing command runs, then delete it.
+
+Before restarting after unchecking a group, inspect that group's in-flight work in `/api/state`: a request admitted there after the save is cancelled at the restart, because the group no longer has dispatch.
+
+Re-running `pnpm feishu:pair` currently replaces the whole `feishu` object with the new credentials. It drops `groups`, `dispatch`, `receiveMode` and `webhook`, so the next start runs without dispatch. Merge those keys back before restarting, and check the dispatch groups on the page again; a group missing at a start loses its team bindings. Pairing a different Feishu application for Sam also stops the next start with dispatch, because the team registry keeps Sam's previous App ID; until the registry follows `feishu.appId`, keep Sam on the same application while dispatch is configured.
 
 Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team added there uses an existing Feishu application: its App ID and App Secret are entered on the page, and the secret is stored in the registry, never shown. The service then checks the credentials and the bot. Sam adds the bot to each bound group, and the team's application confirms it is in the group. Sam's application must therefore be allowed to add bots to the dispatch groups and to read their group information. Which permission scopes this needs is not yet verified on a real tenant. A group where only the owner and admins add members needs that setting changed in Feishu, or the bot added by hand, before 「重新检查」. Sam announces each team that starts or stops taking work in a group; a failed or uncertain announcement is never resent.
 
@@ -132,7 +144,7 @@ When the service cannot confirm a home's records, it keeps the whole home and wr
 
 ## Rollback and diagnosis
 
-For operational rollback, first stop intake and inspect existing in-flight work. Remove `feishu.dispatch` to restore mention-only handling on the current binary, keeping the same state. If returning Sam to long connection, remove `webhook`, set `receiveMode` to `websocket` (or omit it), restore that mode in Sam's platform console, and restart once. Reminders created under a Team Leader's bot still need their original application route; disabling dispatch does not transfer them to Sam. Reconcile those tasks before removing their configuration.
+For operational rollback, first stop intake and inspect existing in-flight work. Remove `feishu.dispatch`, or save the console's dispatch-group form with no group checked, to restore mention-only handling on the current binary, keeping the same state. If returning Sam to long connection, remove `webhook`, set `receiveMode` to `websocket` (or omit it), restore that mode in Sam's platform console, and restart once. Reminders created under a Team Leader's bot still need their original application route; disabling dispatch does not transfer them to Sam. Reconcile those tasks before removing their configuration.
 
 Retain new state and delivery evidence. Do not restore a pre-cutover database over later accepted or uncertain sends, or downgrade the binary without checking compatibility. Re-enabling a prior identity can make retained eligible work available again; inspect the queue before resuming.
 

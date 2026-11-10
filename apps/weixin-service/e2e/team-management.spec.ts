@@ -1,6 +1,7 @@
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { test } from "./fixtures.js";
@@ -207,23 +208,111 @@ test.describe("with Feishu dispatch", () => {
   });
 });
 
-for (const [name, channelConfiguration, body] of [
-  ["Feishu paired, dispatch not enabled", { channel: "feishu", owner, taskScope: { accountId: "fixture-bot", target: "fixture-user@im.wechat" }, feishu },
-    (directory: string) => `飞书派单目前在本机渠道配置文件中启用：在 ${path.join(directory, "channel.json")} 的 feishu 中加入 dispatch，然后重启服务。详细步骤见运维文档《Feishu agent dispatch》。`],
-  ["Feishu not paired", undefined,
-    () => "飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再在渠道配置文件的 feishu 中加入 dispatch。"],
-] as const) {
-  test.describe(`without Feishu dispatch (${name})`, () => {
-    test.use({ fixtureStart: channelConfiguration ? { channelConfiguration } : {} });
+// The dispatch-group form (agent-console::US-009). The file write and its refusals are covered by
+// tests/dispatch-group-settings.test.ts and the restart by tests/team-management.integration.test.ts; these journeys check the page.
+// Coverage gap: the page's request states are driven for proposed and running only. Holding a request queued or waiting needs a
+// queue behind it or an Executor's pending choice, which no team-management fixture gives; the module test covers all four states.
+const channelFile = (server: Server) => path.join(server.directory, "channel.json");
+const readChannel = (server: Server) => JSON.parse(readFileSync(channelFile(server), "utf8")) as { feishu: { dispatch?: { groupChatIds: string[] } } };
+const dcGroup = (scope: Page | Locator, name: string) => scope.locator(".atm-dc-group", { hasText: name }).getByRole("checkbox");
 
-    test("keeps the 团队管理 entry and shows only where dispatch is enabled", async ({ page, fixtureServer }, testInfo) => {
-      await page.goto("/console/teams");
-      await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("团队管理");
-      await expect(page.locator(".acv2-empty strong")).toHaveText("尚未配置派单群");
-      await expect(page.locator(".atm-empty-body")).toHaveText(body(fixtureServer.directory));
-      await expect(page.getByRole("button", { name: "新增团队" })).toBeHidden();
-      await expect(page.locator(".atm-list-item")).toHaveCount(0);
-      await testInfo.attach("no-dispatch", { body: await page.screenshot(), contentType: "image/png" });
-    });
+test.describe("with Feishu paired and dispatch not enabled", () => {
+  test.use({ fixtureStart: { channelConfiguration: { channel: "feishu", owner, taskScope: { accountId: "fixture-bot", target: "fixture-user@im.wechat" }, feishu },
+    env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
+
+  test("shows the dispatch-group form in the 未配置 panel, and a save waits for a restart", async ({ page, fixtureServer }, testInfo) => {
+    await page.goto("/console/teams");
+    await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("团队管理");
+    await expect(page.locator(".acv2-empty strong")).toHaveText("尚未配置派单群");
+    await expect(page.locator(".atm-dc-group")).toHaveText(["银河护卫队oc_alpha", "产品讨论组oc_beta"]);
+    await expect(page.getByRole("button", { name: "新增团队" })).toBeHidden();
+    await expect(page.getByRole("button", { name: "派单群设置" })).toBeHidden();
+    await expect(page.locator(".acf-savebar")).toHaveText("保存后重启服务才生效。保存");
+    await dcGroup(page, "银河护卫队").check();
+    await expect(page.locator(".acf-savebar")).toContainText("有未保存的修改");
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator(".acf-savebar")).toContainText("已保存，重启服务后生效");
+    await expect(page.locator(".atm-dc-compare")).toHaveText("运行中的服务未启用派单已保存，重启后银河护卫队");
+    expect(readChannel(fixtureServer).feishu.dispatch).toEqual({ groupChatIds: ["oc_alpha"] });
+    await testInfo.attach("dispatch-groups-unconfigured-saved", { body: await page.screenshot(), contentType: "image/png" });
   });
-}
+
+  test("refuses a save while the pairing lock exists, and after the file changed, until it is reloaded", async ({ page, fixtureServer }, testInfo) => {
+    await page.goto("/console/teams");
+    await dcGroup(page, "银河护卫队").check();
+    writeFileSync(`${channelFile(fixtureServer)}.pairing-lock`, "", { mode: 0o600 });
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator(".atm-save-err")).toHaveText(`无法保存飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。如果没有配对命令在运行，这个锁文件可能是配对中途退出留下的：${channelFile(fixtureServer)}.pairing-lock确认没有配对命令运行后删除它，再保存。`);
+    await testInfo.attach("dispatch-groups-locked", { body: await page.screenshot(), contentType: "image/png" });
+    rmSync(`${channelFile(fixtureServer)}.pairing-lock`);
+    const edited = readChannel(fixtureServer);
+    writeFileSync(channelFile(fixtureServer), JSON.stringify({ ...edited, feishu: { ...edited.feishu, dispatch: { groupChatIds: ["oc_beta"] } } }, null, 2));
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator(".atm-save-err")).toHaveText("无法保存渠道配置文件在页面载入后被修改过；为避免覆盖，本次保存没有生效。");
+    await page.getByRole("button", { name: "重新载入" }).click();
+    await expect(page.locator(".acf-savebar")).toContainText("已重新载入最新的配置，请再修改。");
+    await expect(dcGroup(page, "产品讨论组")).toBeChecked();
+    await expect(dcGroup(page, "银河护卫队")).not.toBeChecked();
+    expect(readChannel(fixtureServer).feishu.dispatch).toEqual({ groupChatIds: ["oc_beta"] });
+  });
+});
+
+test.describe("with Feishu dispatch, choosing its groups", () => {
+  test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
+
+  test("opens the form in the 派单群设置 drawer, saves no group, refuses to uncheck a group with an unfinished request, and keeps a strip until the restart", async ({ page, fixtureServer }, testInfo) => {
+    await page.goto("/console/teams");
+    await expect(page.getByRole("button", { name: "派单群设置" })).toBeVisible();
+    await expect(page.locator("#atm-dc-pending")).toBeHidden();
+    await page.getByRole("button", { name: "派单群设置" }).click();
+    const drawer = page.locator("#atm-dc-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(dcGroup(drawer, "银河护卫队")).toBeChecked();
+    await expect(dcGroup(drawer, "产品讨论组")).toBeChecked();
+    // No group checked turns dispatch off at the restart.
+    await dcGroup(drawer, "银河护卫队").uncheck();
+    await dcGroup(drawer, "产品讨论组").uncheck();
+    await drawer.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(drawer.locator(".atm-dc-compare")).toHaveText("运行中的服务银河护卫队、产品讨论组已保存，重启后不启用派单");
+    expect(readChannel(fixtureServer).feishu.dispatch).toBeUndefined();
+    // Then a proposal waits for its author in 银河护卫队, and a second request runs there, held at its start message, so that group
+    // cannot stay unchecked. The running request's summary carries markup, which the page must show as text.
+    const groupMessage = (messageId: string, text: string, dispatchDecision: unknown) => post(fixtureServer, "/api/fixture/inbound", {
+      event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+          content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision });
+    await groupMessage("om_dc_proposal", "周末可能想去附近玩玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
+    await post(fixtureServer, "/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await groupMessage("om_dc_running", "帮我核对预算和行程", { kind: "dispatch", agentId: "bill", requestId: null, summary: "核对 <b>预算</b> & 行程", message: "" });
+    await expect.poll(async () => (await (await fetch(`${fixtureServer.url}/api/state`, { headers: { cookie: fixtureServer.cookie } })).json() as
+      { agentDispatch?: { jobs: Array<{ status: string }> } }).agentDispatch?.jobs.map(({ status }) => status), LONG).toEqual(["proposed", "running"]);
+    await drawer.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 2 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认核对 <b>预算</b> & 行程处理中");
+    await expect(drawer.locator(".atm-dc-busy b")).toHaveCount(0);
+    await testInfo.attach("dispatch-groups-unfinished", { body: await page.screenshot(), contentType: "image/png" });
+    await dcGroup(drawer, "银河护卫队").check();
+    await drawer.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(drawer.locator(".acf-savebar")).toContainText("已保存，重启服务后生效");
+    await expect(drawer.locator(".atm-dc-compare")).toHaveText("运行中的服务银河护卫队、产品讨论组已保存，重启后银河护卫队");
+    expect(readChannel(fixtureServer).feishu.dispatch?.groupChatIds).toEqual(["oc_alpha"]);
+    await page.keyboard.press("Escape");
+    await expect(drawer).toBeHidden();
+    await expect(page.locator("#atm-dc-pending")).toHaveText("派单群设置已保存，重启服务后生效。查看派单群设置");
+    await testInfo.attach("dispatch-groups-strip", { body: await page.screenshot(), contentType: "image/png" });
+    await page.getByRole("button", { name: "查看派单群设置" }).click();
+    await expect(drawer).toBeVisible();
+    await expect(dcGroup(drawer, "产品讨论组")).not.toBeChecked();
+  });
+});
+
+test.describe("without Feishu paired", () => {
+  test("keeps the 团队管理 entry and shows only how to pair Feishu, with no group list", async ({ page }, testInfo) => {
+    await page.goto("/console/teams");
+    await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("团队管理");
+    await expect(page.locator(".acv2-empty strong")).toHaveText("尚未配置派单群");
+    await expect(page.locator(".atm-empty-body")).toHaveText("飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再回到这里选择派单群。");
+    await expect(page.getByRole("checkbox")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "新增团队" })).toBeHidden();
+    await testInfo.attach("no-feishu", { body: await page.screenshot(), contentType: "image/png" });
+  });
+});

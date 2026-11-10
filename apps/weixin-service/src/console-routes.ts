@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ConsoleRequestContext } from "./console-access.js";
+import { DispatchGroupRefusal, type DispatchGroupSettings } from "./dispatch-group-settings.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
 import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team-management.js";
@@ -17,8 +18,10 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team
  *   document. No response carries a secret value (mcp-catalog::REQ-001); every change is audited with the authorized
  *   browser (agent-console::REQ-004).
  * - `/console/teams` and its assets: the 团队管理 page (team-management spec).
- * - `/api/teams/...`: team management. Without Feishu dispatch the view says so, with where dispatch would be enabled, and saves are refused.
+ * - `/api/teams/...`: team management. Without Feishu dispatch the view says so and team saves are refused.
  *   No response carries an App Secret (team-management::CON-001); every change is audited.
+ * - `/api/teams/dispatch-groups`: the dispatch-group form (agent-console::US-009), with or without dispatch. A save writes the
+ *   channel configuration file and applies at the next start; a refusal answers 409 with its kind and leaves the file unchanged.
  */
 const CONSOLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "console");
 const MAX_BODY_BYTES = 64 * 1024;
@@ -91,16 +94,25 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
   team_registry_group_unknown: [400, "所属群不在派单群里"],
 };
 
-/** Where dispatch would be enabled, for the team page's empty state: the channel configuration file the service loaded, and whether Feishu is paired. */
-export type DispatchSetup = Readonly<{ configurationPath: string; feishu: boolean }>;
-
-export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchSetup?: DispatchSetup }): ConsoleRoutes {
-  const { catalog, teams, dispatchSetup } = options;
+export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchGroups?: DispatchGroupSettings }): ConsoleRoutes {
+  const { catalog, teams, dispatchGroups } = options;
 
   async function teamsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
     const actor = context.browser ? { browser: context.browser } : {};
     if (pathname === "/api/teams" && req.method === "GET") {
-      json(res, 200, teams ? await teams.view() : { configured: false, ...dispatchSetup });
+      json(res, 200, teams ? await teams.view() : { configured: false });
+      return;
+    }
+    if (pathname === "/api/teams/dispatch-groups" && dispatchGroups) {
+      if (req.method === "GET") { json(res, 200, await dispatchGroups.view()); return; }
+      if (req.method !== "POST") throw new RequestError(404, "未找到");
+      const input = await body(req);
+      try {
+        json(res, 200, await dispatchGroups.save({ groups: input.groups, basedOn: input.basedOn }, actor));
+      } catch (error) {
+        if (!(error instanceof DispatchGroupRefusal)) throw error;
+        json(res, error.refusal.kind === "invalid" ? 400 : 409, { error: "无法保存", refusal: error.refusal });
+      }
       return;
     }
     if (req.method !== "POST") throw new RequestError(404, "未找到");

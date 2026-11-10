@@ -343,17 +343,108 @@ it("refuses a host tool removed from a profile at the next call of a request adm
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-// The empty state names the configuration file the service loaded and whether Feishu is paired, so its text can say where dispatch is enabled.
-it.each([["Weixin only", "weixin", false], ["Feishu without dispatch", "feishu", true]] as const)(
-  "answers the team API without Feishu dispatch (%s), saying where dispatch would be enabled", async (_, channel, feishu) => {
-    const directory = mkdtempSync(join(tmpdir(), "team-no-dispatch-"));
-    let running: Running | undefined;
-    try {
-      writeFileSync(join(directory, "channel.json"), JSON.stringify(config(channel)));
-      running = await start(directory);
-      expect(await running.get<View>("/api/teams")).toEqual({ configured: false, feishu, configurationPath: join(directory, "channel.json") });
-    } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
-  }, 30000);
+// The dispatch-group form (agent-console::US-009) through real main: the file, the startup import and dispatch in the saved group.
+it("enables a group from the console: the save writes it, and after a restart a request there reaches Sam alone", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-groups-enable-"));
+  const secret = "sam-secret-SENTINEL-30a1";
+  const outputs: string[] = [];
+  let running: Running | undefined;
+  try {
+    const configuration = config("feishu");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration,
+      feishu: { ...configuration.feishu, appSecret: secret, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }] } }));
+    running = await start(directory);
+    expect(await running.get("/api/teams")).toEqual({ configured: false });
+    const form = await running.get<{ basedOn: string; groups: unknown }>("/api/teams/dispatch-groups");
+    expect(form.groups).toEqual([{ chatId: "oc_alpha", name: "oc_alpha" }]);
+    const saved = await running.post("/api/teams/dispatch-groups", { groups: ["oc_alpha"], basedOn: form.basedOn });
+    expect(saved).toMatchObject({ feishu: true, saved: ["oc_alpha"], running: [] });
+    const responses = JSON.stringify([form, saved]);
+    outputs.push(running.output());
+    await running.close(); running = undefined;
+    expect((JSON.parse(readFileSync(join(directory, "channel.json"), "utf8")) as { feishu: { dispatch: unknown } }).feishu.dispatch).toEqual({ groupChatIds: ["oc_alpha"] });
+
+    running = await start(directory);
+    const teams = await running.get<{ configured: boolean; coordinator: { name: string }; teams: unknown[]; groups: unknown }>("/api/teams");
+    expect({ configured: teams.configured, coordinator: teams.coordinator.name, teams: teams.teams, groups: teams.groups })
+      .toEqual({ configured: true, coordinator: "Sam", teams: [], groups: [{ chatId: "oc_alpha", name: "oc_alpha" }] });
+    await running.post("/api/fixture/inbound", groupMessage("om_enabled_group", "帮我看看这件事",
+      { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明想完成的事情。" }));
+    const result = await running.until((state) => (state.fixtureTextOutbox?.length ?? 0) > 0);
+    console.log(JSON.stringify({ kind: "dispatch_groups_enabled_restart", command: "帮我看看这件事", saved, outbox: result.fixtureTextOutbox, agentDispatch: result.agentDispatch }));
+    expect(result.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["请说明想完成的事情。"]);
+    outputs.push(running.output());
+    await running.close(); running = undefined;
+    const audit = readFileSync(join(directory, "console-audit.jsonl"), "utf8");
+    expect(audit.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>).filter(({ event }) => event === "dispatch_groups_saved")
+      .map(({ by, before, after }) => ({ by, before, after }))).toEqual([{ by: "browser", before: [], after: ["oc_alpha"] }]);
+    expect([responses, ...outputs, audit].filter((text) => text.includes(secret))).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
+
+it("refuses to uncheck a dispatch group that has an unfinished request, and lists it, leaving the file unchanged", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-groups-unfinished-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_unfinished_proposal", "周末可能想去附近玩玩",
+      { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" }));
+    await running.until((state) => state.agentDispatch?.jobs.some(({ status }) => status === "proposed") === true);
+    const before = readFileSync(join(directory, "channel.json"));
+    const form = await running.get<{ basedOn: string; running: string[] }>("/api/teams/dispatch-groups");
+    expect(form.running).toEqual(["oc_alpha"]);
+    expect(await running.send("/api/teams/dispatch-groups", { groups: [], basedOn: form.basedOn })).toEqual({ status: 409, body: { error: "无法保存",
+      refusal: { kind: "unfinished", groups: [{ chatId: "oc_alpha", requests: [{ summary: "安排周末出行", status: "proposed" }] }] } } });
+    expect(await running.send("/api/teams/dispatch-groups", { groups: ["oc_alpha", "oc_unlisted"], basedOn: form.basedOn }))
+      .toEqual({ status: 400, body: { error: "无法保存", refusal: { kind: "invalid" } } });
+    expect(readFileSync(join(directory, "channel.json")).equals(before)).toBe(true);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// agent-dispatch failure-mode row: a request admitted in a group after the owner saved it unchecked, before the restart.
+it("does not continue requests admitted in a group unchecked on the page before the restart, and posts nothing more there", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-groups-unchecked-"));
+  let running: Running | undefined;
+  try {
+    const configuration = config("feishu");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration, feishu: { ...configuration.feishu,
+      groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+      dispatch: { groupChatIds: ["oc_alpha", "oc_beta"], agents: [{ id: "sam" }, { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } }));
+    running = await start(directory);
+    // oc_alpha has no request yet, so the save that leaves it out is accepted.
+    const form = await running.get<{ basedOn: string }>("/api/teams/dispatch-groups");
+    await running.post("/api/teams/dispatch-groups", { groups: ["oc_beta"], basedOn: form.basedOn });
+    // Then two requests reach Bill in oc_alpha: the first holds at its start message, the second queues behind it.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_unchecked_first", "帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1);
+    await running.post("/api/fixture/inbound", groupMessage("om_unchecked_second", "再帮我订一家餐厅", decision("bill", "订餐厅")));
+    const before = await running.until((state) => state.agentDispatch?.jobs.map(({ status }) => status).join() === "running,queued");
+    await running.crash(); running = undefined;
+    running = await start(directory);
+    const after = await running.until((state) => state.agentDispatch?.jobs.every(({ status }) => !["queued", "running"].includes(status)) === true);
+    console.log(JSON.stringify({ kind: "dispatch_groups_unchecked_restart", commands: ["帮我规划周末一日行程", "再帮我订一家餐厅"],
+      before: before.agentDispatch, after: after.agentDispatch, outboxes: after.agentFixtureOutboxes, sam: after.fixtureTextOutbox }));
+    // In admission order: the request that was running, then the one queued behind it.
+    expect(after.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["cancelled", "cancelled"]);
+    // In a dispatch group the same crash makes Bill post 「接单通知未确认发送…」 at the restart (agent-dispatch.integration.test.ts);
+    // here neither Bill nor Sam posts anything more.
+    expect({ bill: after.agentFixtureOutboxes?.bill?.text, sam: after.fixtureTextOutbox }).toEqual({ bill: [], sam: [] });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
+
+it("answers the team API and the dispatch-group form without Feishu: not configured, and Feishu not paired", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-no-feishu-"));
+  let running: Running | undefined;
+  try {
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    running = await start(directory);
+    expect(await running.get("/api/teams")).toEqual({ configured: false });
+    expect(await running.get("/api/teams/dispatch-groups")).toEqual({ feishu: false });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
 
 it("refuses a team on Penny's application, read from Penny's configuration", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-penny-application-"));

@@ -6,7 +6,6 @@
 > - It shows 接入方式 as 「已有应用，手动填写」, with two steps, the credential check and group joining, and offers 「重新检查」.
 > - Not built yet: QR creation and the test message (team-management::US-002/AC-01, and the QR steps of US-002/AC-03 and AC-04); MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the links to the team overview and to skill management (US-001/AC-04).
 > - Unchecking a group stops the team taking work there and announces its departure; the team then stays draining in that group.
-> Pending: without Feishu dispatch, the page says where dispatch is enabled. With Feishu paired, it names the channel configuration file the service loaded and says to add `dispatch` under `feishu` and restart. Without Feishu, it says to stop the service and run `pnpm feishu:pair` first. Choosing dispatch groups in the console replaces this text.
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
 
 ## Problem Statement
@@ -132,11 +131,11 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 | A save's onboarding run and 「重新检查」 overlap | They run one after the other; no step is done twice (Implementation Decisions: onboarding) |
 | The platform's reply cannot be read, such as a gateway's error page | The step needs action as unreachable, never as wrong credentials or a refused join |
 | A group's name cannot be read | The page shows the chat ID; the name is asked for again after 10 minutes, or at once on 「重新检查」 or a save of a team in that group |
-| Feishu dispatch is not configured | The 团队管理 entry stays; the page shows only where dispatch is enabled, with no list, editor or 新增团队 |
+| Feishu dispatch is not configured | The 团队管理 entry stays; the page shows the dispatch-group form, or without Feishu the pairing instruction, with no list, editor or 新增团队 ([agent-console::US-009](agent-console.md)) |
 
 ## Implementation Decisions
 
-**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded from the existing local configuration. Until the console saves its first change, each start imports that configuration again and records a new definitions version only when the import differs; after the first console save, the console is its only editor. Application secrets are stored beside the versions, never inside one. The seed reproduces today's roster:
+**Team registry.** The team registry (agent-dispatch Implementation Decisions) is the single store of teams, profiles and group bindings. Each save creates a new definitions version and carries the version it was based on, so stale saves can be refused. The registry is seeded from the existing local configuration. Until the console saves its first change, each start imports that configuration again and records a new definitions version only when the import differs; after the first console save, the console is the only editor of the teams. The dispatch groups follow the local configuration at every start, as the agent dispatch spec's Implementation Decisions (local configuration) state. Application secrets are stored beside the versions, never inside one. The seed reproduces today's roster:
 - The teams are named 运营团队, 生活团队 and 技术团队. An extra configured role's team is named "<name> 团队", and the Coordinator's entry is labelled 总协调.
 - Each team's single Executor profile, 能力档 1, allows every production workflow tool. Only Bill's carries domain instructions: the weather, route, walking, opening-hours and budget-and-schedule rules. The source-verification rules stay in shared prompt assembly.
 - Leader and Coordinator profiles start with empty instructions, and the Coordinator has no host tools.

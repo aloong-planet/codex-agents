@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
+import type { FeishuDispatchConfiguration, LocalDispatchConfiguration } from "./feishu-agent-config.js";
 
 /** The Coordinator's fixed identity: Sam cannot be replaced, deleted or unbound (team-management::REQ-001/AC-01). */
 export const COORDINATOR_ID = "sam";
+/** The Coordinator's built-in name and responsibility, used when the local configuration names none. */
+export const COORDINATOR_DEFAULTS = Object.freeze({ name: "Sam", responsibility: "协调、澄清和分派任务，不执行具体业务事务。" });
 
 /**
  * Seeded Executor instructions by team. Bill's team owns the weather, route, walking, opening-hours and budget-and-schedule
@@ -74,6 +76,7 @@ export type OnboardingRecord = Readonly<{ credentials?: OnboardingOutcome; joins
 
 const SEEDED_TEAM_NAMES: Readonly<Record<string, string>> = { alice: "运营团队", bill: "生活团队", jack: "技术团队" };
 const EMPTY_PROFILE: AgentProfile = { instructions: "", hostTools: [] };
+const COORDINATOR_TEAM_NAME = "总协调";
 
 /**
  * The single store of the Coordinator, the Agent Teams, their group bindings and their Agent Profiles
@@ -93,14 +96,18 @@ export class TeamRegistry {
   }
 
   /**
-   * Imports the parsed local `feishu.dispatch` configuration, with the production host tools for the seeded Executor profiles.
-   * Until the first console save, each start imports again and appends a version only when the definitions differ;
-   * leader secrets follow the import without a new version. After a console save the console is the only editor and this returns the current version unchanged.
+   * Imports the parsed local `feishu.dispatch` section at startup (agent-dispatch Implementation Decisions: local configuration).
+   * - With a roster and before the first console save, the roster seeds the teams, with the production host tools for their
+   *   Executor profiles; a version is appended only when the definitions differ, and leader secrets follow without a new version.
+   * - Otherwise only the dispatch groups follow the file: bindings to groups it no longer lists are dropped in the same version,
+   *   and the teams, the Coordinator and the secrets are left as they are. An empty registry starts with the Coordinator alone,
+   *   on `coordinatorAppId`.
    */
-  importLocalConfiguration(local: Readonly<FeishuDispatchConfiguration>, seed: Readonly<{ executorHostTools: readonly string[] }>): DefinitionsVersion {
-    const definitions = seededDefinitions(local, seed.executorHostTools);
+  importLocalConfiguration(local: Readonly<LocalDispatchConfiguration>, seed: Readonly<{ executorHostTools: readonly string[]; coordinatorAppId?: string }>): DefinitionsVersion {
     this.transaction(() => {
-      if (this.database.prepare("SELECT 1 FROM definitions_version WHERE source = 'console' LIMIT 1").get()) return;
+      const consoleSaved = Boolean(this.database.prepare("SELECT 1 FROM definitions_version WHERE source = 'console' LIMIT 1").get());
+      if (!local.agents || consoleSaved) { this.followDispatchGroups(local.groupChatIds, seed.coordinatorAppId); return; }
+      const definitions = seededDefinitions({ groupChatIds: local.groupChatIds, agents: local.agents }, seed.executorHostTools);
       const latest = this.database.prepare("SELECT version, definitions FROM definitions_version ORDER BY version DESC LIMIT 1").get();
       const serialized = JSON.stringify(definitions);
       if (latest?.definitions !== serialized) {
@@ -286,6 +293,18 @@ export class TeamRegistry {
 
   close(): void { this.database.close(); }
 
+  /** Sets the dispatch groups to the file's, dropping bindings to groups it no longer lists; appends a version only on a change. */
+  private followDispatchGroups(groupChatIds: readonly string[], coordinatorAppId: string | undefined): void {
+    const latest = this.current();
+    if (!latest && !coordinatorAppId) throw new Error("team_registry_coordinator_missing");
+    const base: TeamDefinitions = latest?.definitions ?? { coordinator: { id: COORDINATOR_ID, ...COORDINATOR_DEFAULTS, teamName: COORDINATOR_TEAM_NAME,
+      appId: coordinatorAppId!, profile: EMPTY_PROFILE }, dispatchGroups: [], teams: [] };
+    const definitions: TeamDefinitions = { ...base, dispatchGroups: [...groupChatIds],
+      teams: base.teams.map((team) => ({ ...team, bindings: team.bindings.filter(({ chatId }) => groupChatIds.includes(chatId)) })) };
+    if (latest) { this.append(definitions, latest.version, "local_configuration"); return; }
+    this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (1, NULL, 'local_configuration', ?)").run(JSON.stringify(definitions));
+  }
+
   /** Appends a version unless it equals the latest; a save that changes nothing leaves the version as it is. */
   private append(definitions: TeamDefinitions, latest: number, source: DefinitionsVersion["source"]): void {
     const serialized = JSON.stringify(definitions);
@@ -356,7 +375,7 @@ function seededDefinitions(local: Readonly<FeishuDispatchConfiguration>, executo
   const coordinator = local.agents.find(({ id }) => id === COORDINATOR_ID);
   if (!coordinator) throw new Error("team_registry_coordinator_missing");
   return {
-    coordinator: { id: COORDINATOR_ID, name: coordinator.name, teamName: "总协调", responsibility: coordinator.responsibility, appId: coordinator.appId, profile: EMPTY_PROFILE },
+    coordinator: { id: COORDINATOR_ID, name: coordinator.name, teamName: COORDINATOR_TEAM_NAME, responsibility: coordinator.responsibility, appId: coordinator.appId, profile: EMPTY_PROFILE },
     dispatchGroups: [...local.groupChatIds],
     teams: local.agents.filter(({ id }) => id !== COORDINATOR_ID).map((agent) => ({
       id: agent.id, teamName: SEEDED_TEAM_NAMES[agent.id] ?? `${agent.name} 团队`, responsibility: agent.responsibility,

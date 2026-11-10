@@ -37,14 +37,14 @@ The owner chose this layout: the team list on the left, and the selected team's 
 - **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows the panel 「尚未配置派单群」, with no list, editor or "新增团队".
   - Feishu paired, dispatch not enabled: the panel holds the dispatch-group form (below).
   - Feishu not paired: 「飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再回到这里选择派单群。」 Pairing stays in the terminal.
-- **Dispatch groups (ticket 30).** The dispatch-group form and its refusals are drawn ahead of their build in ticket 30; until then the built page shows text with the configuration file's path in the 未配置 state.
+- **Dispatch groups.** The dispatch-group form and its refusals:
   - The form lists the Feishu groups in the channel's group allowlist, each with a checkbox, by group name, with its chat ID beneath; a group whose name was not read shows its chat ID and 「未取到群名，显示群 ID」.
   - It opens in the 未配置 panel, and with dispatch configured from 「派单群设置」 in the page header, in the right drawer.
   - Saving writes the local channel configuration and shows 「已保存，重启服务后生效」. The form then compares 「运行中的服务」 with 「已保存，重启后」, and with dispatch configured a status strip above the team list says the saved change takes effect after a restart, with 「查看派单群设置」.
   - A refused save shows "无法保存" with one reason:
-    - the Feishu pairing wizard holds the channel configuration;
+    - the Feishu pairing wizard holds the channel configuration. A second line names the wizard's lock file, in the path style of the 未接入飞书 panel, for a lock that a pairing run left behind;
     - the configuration file changed after the page loaded it, with 「重新载入」;
-    - an unchecked group that the running service uses still has unfinished dispatch requests, each listed with a link to its record.
+    - an unchecked group that the running service uses still has unfinished dispatch requests. Each is listed as plain text: its Coordinator summary, then its state, 等待发起人确认 (proposed or waiting) or 处理中 (queued or running). An item has no request number, because the service has none shorter than the Feishu message key, and no link, because no console page shows a request's records yet.
 - **Navigation.**
   - "Skill 管理" and "MCP 管理" lead to `prototype-skill-library.html` and `prototype-mcp-catalog.html`.
   - "返回团队总览" leads to `prototype-team-structures.html`, whose "团队管理" button leads here.
