@@ -8,6 +8,7 @@
 // the channel configuration file and applies after the service restarts.
 (() => {
   const { mount, tip, esc } = window.ConsoleShell;
+  const { onboardingView, SENT } = window.TeamOnboardingView;
   mount("teams");
 
   // Host tools by group, labelled as in the prototype. A catalog tool without a label is listed by its ID under 其他.
@@ -24,7 +25,7 @@
   const STEP = { done: ["已完成", "acv2-badge acv2-completed"], todo: ["未开始", "acv2-badge"], active: ["进行中", "acv2-badge acv2-running"],
     review: ["等待审核", "acv2-badge acv2-waiting"], blocked: ["需处理", "acv2-badge acv2-failed"] };
   const STATUS = { fixed: ["固定", "acv2-badge"], active: ["正常接单", "acv2-badge acv2-completed"], onboarding: ["接入未完成", "acv2-badge acv2-waiting"] };
-  const ANNOUNCED = { accepted: "飞书已接收", failed: "发送失败 · 不会自动重发", unknown: "发送结果未知 · 不会自动重发", pending: "正在发送", sending: "正在发送" };
+  const ANNOUNCED = { ...SENT, pending: SENT.sending };
   const SAVEBAR = { clean: "保存后新事务立即使用新配置。", dirty: "有未保存的修改", saved: "已保存：新事务使用新配置，进行中的事务保持原配置。", reloaded: "已重新载入最新版本，请再修改。" };
   const SAM = "sam";
   const NEW = "new";
@@ -112,106 +113,28 @@
   }
 
   // ---- onboarding: six steps for an application created by QR code, the last three for an existing one ----
-  const stepState = (outcome) => !outcome ? "todo" : outcome.status === "done" ? "done" : outcome.status === "review" ? "review" : "blocked";
-  function credentialNote(outcome) {
-    if (outcome?.status === "review") return "应用版本尚未发布，或还没有被企业管理员启用。审核通过后点「重新检查」。";
-    if (outcome?.status === "action") {
-      return { bad_credentials: "凭证校验没有通过：App ID 与 App Secret 不匹配。请替换 App Secret 后保存。", secret_missing: "还没有填写 App Secret。填写后保存，会自动开始检查。" }[outcome.reason]
-        ?? "暂时连不上飞书，稍后点「重新检查」。";
-    }
-    return "确认凭证可用，读取机器人名称。";
-  }
-  function joinNote(chatId, outcome, credentialsDone) {
-    const group = groupName(chatId);
-    if (outcome?.status === "done") return "机器人已在群里。";
-    if (outcome) {
-      return {
-        owner_only: `${group}只允许群主和管理员添加成员，Sam 无法拉入。请在飞书调整群设置，或由群主手动添加。`,
-        pending_approval: `${group}开启了入群审批，Sam 的添加申请正等待群主或管理员批准；批准后点「重新检查」。`,
-        refused: `飞书没有接受把机器人加入${group}。请确认应用已开启机器人能力，再点「重新检查」。`,
-        not_joined: `机器人还不在${group}里。请把机器人加入该群后点「重新检查」。`,
-      }[outcome.reason] ?? "暂时连不上飞书，稍后点「重新检查」。";
-    }
-    return credentialsDone ? "尚未检查，可点「重新检查」。" : "等待前面的步骤完成。";
-  }
-
-  /**
-   * What the QR area shows for a team: its choice of QR creation is not saved yet (`unsaved`), the code is being fetched
-   * (`generating`), it waits for the scan (`scan`), it ran out or the scan did not finish (`expired`), Feishu gave no code
-   * (`unreachable`), or the scan has created the application (`created`).
-   */
-  function qrState(team) {
-    const creation = team?.method === "qr" ? team.creation : undefined;
-    if (!creation) return "unsaved";
-    if (creation.status === "done") return "created";
-    if (creation.status === "waiting") return creation.codeExpiresAt ? "scan" : "generating";
-    return creation.reason === "unreachable" ? "unreachable" : "expired";
-  }
-  const QR_STEP = { unsaved: "todo", generating: "active", scan: "active", expired: "blocked", unreachable: "blocked", created: "done" };
-  const QR_BOX = { unsaved: "保存后显示", generating: "正在生成", expired: "二维码已过期", unreachable: "未取得二维码" };
-  const QR_TEXT = { generating: "正在向飞书取二维码。", scan: "用飞书扫码，在手机上确认创建。创建完成后，App ID 与 App Secret 自动回填，你不需要复制任何凭证。",
-    expired: "这个二维码已过期，或扫码没有完成。刷新后重新扫码即可，不会创建重复的应用。", unreachable: "暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」再试。" };
-  const QR_STEP_NOTE = { expired: "二维码已过期，或扫码没有完成。请刷新二维码后重新扫码。", unreachable: "暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」。" };
-
-  function qrHtml(state, team) {
-    if (state === "created") return `<div class="atm-created">已创建应用 ${esc(team.creation.appId)}<small>凭证已自动保存，不显示</small></div>`;
-    // A team that already has an application keeps it until the scan; the text says what the scan then replaces.
-    const text = state !== "unsaved" ? QR_TEXT[state]
-      : `保存团队后，这里显示二维码；用飞书扫码即可创建应用。${team?.leader.appId ? `扫码创建的新应用会替换现在的应用 ${team.leader.appId}，替换后团队在各群重新接入。` : ""}`;
+  /** The QR area of a team in QR creation, as team-onboarding-view.js describes it. */
+  function qrHtml(area, team) {
+    if (area.created) return `<div class="atm-created">已创建应用 ${esc(area.created)}<small>凭证已自动保存，不显示</small></div>`;
     // The image's address changes with each code, so a new code is never drawn from the previous one.
-    const box = state === "scan" ? `<img src="/api/teams/qr?team=${esc(encodeURIComponent(team.id))}&amp;code=${Number(team.creation.codeExpiresAt)}" alt="创建应用的二维码">` : QR_BOX[state];
-    const refresh = state === "scan" || QR_STEP[state] === "blocked"
-      ? `<div class="acf-row-actions"><button class="acv2-button${state === "scan" ? "" : " acv2-primary"}" type="button" data-qr-refresh>刷新二维码</button></div>` : "";
-    return `<div class="atm-qr"><div class="atm-qr-box">${box}</div><div><p>${esc(text)}</p>${refresh}</div></div>`;
+    const box = area.image ? `<img src="/api/teams/qr?team=${esc(encodeURIComponent(team.id))}&amp;code=${Number(team.creation.codeExpiresAt)}" alt="创建应用的二维码">` : area.box;
+    const refresh = area.refresh ? `<div class="acf-row-actions"><button class="acv2-button${area.refresh === "main" ? " acv2-primary" : ""}" type="button" data-qr-refresh>刷新二维码</button></div>` : "";
+    return `<div class="atm-qr"><div class="atm-qr-box">${box}</div><div><p>${esc(area.text)}</p>${refresh}</div></div>`;
   }
-
-  /** The note of step 2 (`configure`) or step 3 (`publish`) of an application created by QR code. */
-  function createdStepNote(step, outcome) {
-    if (outcome?.status === "review") return "已提交发布，等待企业管理员审核。审核通过后点「重新检查」。";
-    if (outcome?.status === "action") {
-      if (outcome.reason === "unreachable") return "暂时连不上飞书，稍后点「重新检查」。";
-      return step === "configure" ? "飞书没有接受自动配置。请在飞书开发者后台为这个应用开启机器人能力，并开通发送消息、读取群信息等权限，完成后点「重新检查」。"
-        : "飞书没有接受自动提交发布。请在飞书开发者后台为这个应用创建版本并提交发布，完成后点「重新检查」。";
-    }
-    return step === "configure" ? "自动申请发送消息、读取群信息等所需权限，并开启机器人能力。" : "自动提交发布，企业管理员审核通过后生效；管理员开启免审可跳过审核。";
-  }
-  const TEST_STEP = { accepted: "done", failed: "blocked", unknown: "blocked", sending: "active" };
 
   /**
    * The onboarding block of the selected team: how it gets its application, the application or its QR code, the steps and
-   * their actions. Only an existing application's block holds a field, so QR creation's block can be redrawn while the
-   * owner edits the rest of the team.
+   * their actions. What each of them shows is decided in team-onboarding-view.js; this draws it. Only an existing
+   * application's block holds a field, so QR creation's block can be redrawn while the owner edits the rest of the team.
    */
   function onboardingBlock() {
     const fixed = selected === SAM;
     const draft = current().value;
     const team = fixed || selected === NEW ? undefined : teamOf(selected);
-    const qr = !fixed && draft.method === "qr";
-    const code = qr ? qrState(team) : null;
-    // Until the scan has created the application, steps 2 to 6 belong to an application that does not exist yet.
-    const pending = qr && code !== "created";
-    const live = (team?.bindings ?? []).filter(({ state }) => state !== "draining");
-    const done = { status: "done" };
-    // A binding that accepts work has passed the check and the join, even when it came from the local configuration without recorded checks.
-    const credentials = pending ? undefined : fixed ? done : team?.credentials ?? (live.some(({ state }) => state === "accepting") ? done : undefined);
-    const joins = fixed ? view.groups.map(({ chatId }) => ({ chatId, join: done }))
-      : live.map(({ chatId, state, join }) => ({ chatId, join: pending ? undefined : join ?? (state === "accepting" ? done : undefined) }));
-    const checked = stepState(credentials);
-    const joined = !joins.length ? "todo" : joins.some(({ join }) => stepState(join) === "blocked") ? "blocked" : joins.every(({ join }) => stepState(join) === "done") ? "done" : "todo";
-    // Step 6 has one row per group a test message went to; a failed or unknown send makes the step need action.
-    const tests = fixed || pending ? [] : live.flatMap(({ chatId }) => team.tests[chatId] ? [[chatId, team.tests[chatId].status]] : []);
-    const tested = fixed ? "done" : !tests.length ? "todo" : tests.some(([, status]) => status === "sending") ? "active" : tests.some(([, status]) => status !== "accepted") ? "blocked" : "done";
-    const rows = (items) => items.length ? `<ul class="atm-joins">${items.map(([chatId, state, note]) => `<li data-state="${state}"><div>${esc(groupName(chatId))}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span></li>`).join("")}</ul>` : "";
-    const steps = [
-      ...(qr ? [
-        [QR_STEP[code], "扫码创建应用", QR_STEP_NOTE[code] ?? "用飞书扫码并确认，创建一个新的智能体应用；不会选中已有应用，凭证自动回填。", ""],
-        [pending ? "todo" : stepState(team.configure), "配置权限与机器人能力", createdStepNote("configure", pending ? undefined : team.configure), ""],
-        [pending ? "todo" : stepState(team.publish), "发布版本", createdStepNote("publish", pending ? undefined : team.publish), ""]] : []),
-      [checked, "校验凭证并读取机器人信息", credentialNote(credentials), ""],
-      [joined, "加入所绑定的群", joins.length ? "由 Sam 把机器人拉进每个绑定的群。" : "先在下面勾选所属群。", rows(joins.map(({ chatId, join }) => [chatId, stepState(join), joinNote(chatId, join, checked === "done")]))],
-      [tested, "发送测试消息", "可选：向所绑定的群发一条测试消息，发送前需你确认；不发也不影响接单。", rows(tests.map(([chatId, status]) => [chatId, TEST_STEP[status], ANNOUNCED[status]]))],
-    ];
-    const list = `<ol class="atm-onboard">${steps.map(([state, title, note, sub], index) => `<li data-state="${state}"><span class="atm-onboard-num">${index + 1}</span><div>${title}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span>${sub}</li>`).join("")}</ol>`;
+    const shown = onboardingView({ fixed, team, method: draft.method, groups: view.groups, confirming: testConfirm === selected });
+    const qr = shown.qr;
+    const rows = (items) => items.length ? `<ul class="atm-joins">${items.map(({ group, state, note }) => `<li data-state="${state}"><div>${esc(group)}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span></li>`).join("")}</ul>` : "";
+    const list = `<ol class="atm-onboard">${shown.steps.map(({ state, title, note, rows: items }, index) => `<li data-state="${state}"><span class="atm-onboard-num">${index + 1}</span><div>${title}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span>${rows(items)}</li>`).join("")}</ol>`;
     const c = view.coordinator;
     const mode = fixed ? '<div class="atm-mode">接入方式：已有应用，手动填写</div>'
       : `<div class="atm-mode">接入方式<div class="acf-seg"><button type="button" data-method="qr" aria-pressed="${qr}">扫码一键创建</button><button type="button" data-method="existing" aria-pressed="${!qr}">已有应用，手动填写</button></div></div>`;
@@ -219,15 +142,12 @@
     const secret = fixed ? '<div class="acf-secret">已保存 · 不显示</div>'
       : draft.secretEditing ? '<div class="atm-secret-input"><input class="acv2-input" type="password" data-field="secret" placeholder="粘贴 App Secret，保存后不再显示" autocomplete="off" aria-label="App Secret"><button class="acv2-button" type="button" data-secret-cancel>取消</button></div>'
         : `<div class="acf-secret">${stored ? "已保存 · 不显示" : "尚未填写"}<button class="acv2-button" type="button" data-secret-edit>${stored ? "替换" : "填写"}</button></div>`;
-    const source = qr ? qrHtml(code, team)
+    const source = qr ? qrHtml(shown.area, team)
       : `<div class="acf-fields atm-field-gap"><label class="acf-field">App ID<input class="acv2-input" data-field="appId" value="${esc(fixed ? c.appId : draft.leader.appId)}" placeholder="cli_…" ${fixed ? "disabled" : ""}></label><div class="acf-field">App Secret${secret}</div></div>`;
-    // 重新检查 and the test message are offered once they can do something: for a saved team with an application to check, and
-    // for one that accepts work in a group. The message is sent only from the confirmation below the actions.
-    const accepting = !team || pending ? [] : team.bindings.filter(({ state }) => state === "accepting").map(({ chatId }) => chatId);
-    const confirm = testConfirm === selected && accepting.length
-      ? `<div class="acf-inline-confirm atm-test-confirm">${esc(`将以 ${team.leader.name}（${team.teamName}）的机器人向${accepting.map(groupName).join("、")}${accepting.length > 1 ? "各" : ""}发一条测试消息，群里的成员都会看到：「${team.testMessage}」`)}`
-        + '<div class="acf-row-actions"><button class="acv2-button acv2-primary" type="button" data-test-ok>确认发送</button><button class="acv2-button" type="button" data-test-cancel>取消</button></div></div>' : "";
-    const actions = team && !pending ? `<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button>${accepting.length ? '<button class="acv2-button" type="button" data-test-open>发送测试消息…</button>' : ""}</div>${confirm}` : "";
+    // The message is sent only from the confirmation below the actions.
+    const confirm = shown.confirm ? `<div class="acf-inline-confirm atm-test-confirm">${esc(shown.confirm)}`
+      + '<div class="acf-row-actions"><button class="acv2-button acv2-primary" type="button" data-test-ok>确认发送</button><button class="acv2-button" type="button" data-test-cancel>取消</button></div></div>' : "";
+    const actions = shown.recheck ? `<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button>${shown.test ? '<button class="acv2-button" type="button" data-test-open>发送测试消息…</button>' : ""}</div>${confirm}` : "";
     return `<div data-onboarding>${mode}${source}${list}${actions}</div>`;
   }
 
@@ -521,7 +441,7 @@
     renderEditor();
   }
 
-  /** 刷新二维码: the service ends the code that waits and answers once the new one is known, or could not be obtained. */
+  /** 刷新二维码: the service answers once the new code, which the page then shows in place of the old one, is known or could not be obtained. */
   async function refreshCode(button) {
     button.disabled = true;
     const { ok, body } = await api("/api/teams/qr", { teamId: selected });

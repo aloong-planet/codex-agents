@@ -47,6 +47,7 @@ const ASSETS: Record<string, { file: string; type: string }> = {
   "/console/mcp.js": { file: "mcp.js", type: "text/javascript; charset=utf-8" },
   "/console/team.css": { file: "team.css", type: "text/css; charset=utf-8" },
   "/console/team.js": { file: "team.js", type: "text/javascript; charset=utf-8" },
+  "/console/team-onboarding-view.js": { file: "team-onboarding-view.js", type: "text/javascript; charset=utf-8" },
 };
 
 export type ConsoleRoutes = {
