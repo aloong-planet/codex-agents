@@ -45,6 +45,7 @@ As the existing owner, I can supply application credentials and confirm my priva
 - channel-switching::US-003/AC-05: Save produces a startup-valid private configuration with owner-only access using atomic replacement. Concurrent wizard execution or configuration changes during pairing cannot silently overwrite another result.
 - channel-switching::US-003/AC-06: Cancellation, interruption, timeout, connection failure or unsuccessful saving closes the pairing connection without changing the original configuration. Failure messages and terminal output never expose application secrets.
 - channel-switching::US-003/AC-07: Pairing never invokes the model, tools, scheduler, media downloads or outbound messages. Successful save closes the pairing connection and explains the next manual service start; it does not start, restart or switch the running service.
+- channel-switching::US-003/AC-08: Re-pairing an already configured service replaces only the Feishu application's ID and secret and the owner's Feishu binding. Every other key of the Feishu configuration is kept unchanged: the group allowlist, the dispatch section, the receive mode, the webhook settings and keys the wizard does not know. A first pairing, with no Feishu configuration yet, writes only the application ID and secret. The save is still validated as a whole by the startup parser.
 
 ### channel-switching::US-004 Keep simultaneous conversations separate
 
@@ -206,6 +207,8 @@ An invalid startup configuration, startup connection failure or active channel f
 | Lose connection or let the challenge expire, including during confirmation | End pairing without committing stale identity (channel-switching::US-003/AC-06) |
 | Run a second wizard, edit configuration, encounter unsafe file permissions or a failed write | Refuse unsafe or conflicting replacement; preserve original bytes (channel-switching::US-003/AC-05, channel-switching::US-003/AC-06) |
 | Save successfully, then start normally | Existing startup validation admits only explicitly bound owners; pairing messages are not replayed as business work (channel-switching::US-003/AC-07, channel-switching::REQ-006/AC-01) |
+| Re-pair a configured service with a different application | Only the application ID, secret and the owner's Feishu binding change; the group allowlist, dispatch, receive mode, webhook and unknown keys are kept, though the new application's bot may not be in the kept groups (channel-switching::US-003/AC-08). At the next start the Coordinator follows the new application ([agent-dispatch](agent-dispatch.md), Implementation Decisions: local configuration) |
+| Re-pair onto an application ID that the kept dispatch roster already gives a team | The startup parser rejects the result at save, after the private-chat confirmation: the wizard reports its existing generic failure, and the original configuration is unchanged, so 「原配置未被本次配对修改。」 stays true. Before re-pairing kept the dispatch section, this input saved and dropped it (channel-switching::US-003/AC-05, channel-switching::US-003/AC-08) |
 | External strings contain control characters or excessive text | Validate bounded scalar values and render only validated IDs; never interpret external content as terminal commands (channel-switching::US-003/AC-02, channel-switching::US-003/AC-06) |
 
 ### Group boundaries

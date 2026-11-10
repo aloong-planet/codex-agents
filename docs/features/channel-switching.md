@@ -8,7 +8,7 @@ The owner can use personal Weixin and Feishu chats and enable selected people in
 
 ## Capabilities
 
-- A local pairing guide accepts hidden application credentials, discovers the owner's Feishu private conversation from a one-time message and asks for confirmation before saving. Pairing enables Feishu while preserving already enabled Weixin access; cancellation, timeout or failed saving retains the original configuration and personal data.
+- A local pairing guide accepts hidden application credentials, discovers the owner's Feishu private conversation from a one-time message and asks for confirmation before saving. Pairing enables Feishu while preserving already enabled Weixin access; re-pairing replaces only the application credentials and the owner's Feishu binding, keeping group and dispatch settings; cancellation, timeout or failed saving retains the original configuration and personal data.
 - Only the bound owner uses private chats. In explicitly enabled groups, only listed members can invoke the assistant; joining a group never enables it automatically. The default mode requires a genuine bot mention; selected groups can use [automatic task dispatch](agent-dispatch.md).
 - Feishu supports text, images, files, supported rich text and text reminders. Private chats and mention-only groups reply directly without an automatic processing acknowledgement; in dispatch groups the Team Leader announces which Executor handles the request. Weixin retains its typing indication and fallback acknowledgement.
 - Current, quoted and recent images and authorized local files can be selected and sent. Replies, errors and media return to the conversation that requested them.
