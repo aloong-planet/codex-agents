@@ -68,9 +68,9 @@ With Feishu dispatch configured, the console page `/console/teams` (团队管理
 - **Announcements.** Sam announces in the group when a team starts or stops taking work there; a failed announcement is not resent.
 - **State files.** Teams, versions, each team's QR creation, onboarding outcomes and test-message results are kept in `team-registry.sqlite`, with App Secrets beside the versions and never inside one; announcements are kept in `team-announcements.sqlite`. Both are `0600` in the state directory.
 - **Audit.** Every save, QR code request, created application and test message is appended to `console-audit.jsonl`, never with a secret.
+- **Dispatch groups.** Without dispatch the page shows the dispatch-group form, and with dispatch 「派单群设置」 opens it. A save writes only `feishu.dispatch.groupChatIds` into the channel configuration file and applies at the next start. Without Feishu paired, the page names `pnpm feishu:pair`. See [dispatch setup](../../docs/ops/feishu-agent-dispatch.md).
 
 The [ops guide](../../docs/ops/feishu-agent-dispatch.md#team-leader-applications) lists the permissions a created application asks for and what to do when a step needs action.
-- **Dispatch groups.** Without dispatch the page shows the dispatch-group form, and with dispatch 「派单群设置」 opens it. A save writes only `feishu.dispatch.groupChatIds` into the channel configuration file and applies at the next start. Without Feishu paired, the page names `pnpm feishu:pair`. See [dispatch setup](../../docs/ops/feishu-agent-dispatch.md).
 
 ## Penny private bookkeeping
 

@@ -59,7 +59,7 @@ The owner chose this layout: the team list on the left, and the selected team's 
 #### 1. Basic information and Feishu onboarding
 
 - **Fields.** Leader name and team name.
-- **Onboarding method.** A segmented control switches between QR one-click creation and an existing application, with a 1px line in the page's line colour between its two segments. The choice is saved with the team.
+- **Onboarding method.** A segmented control switches between QR creation (扫码一键创建) and an existing application (已有应用，手动填写), with a 1px line in the page's line colour between its two segments. The choice is saved with the team.
 - **QR creation.**
   - A QR placeholder asks the owner to scan in Feishu and confirm. The scan creates a new agent application without selecting an existing one, and its credentials fill in automatically.
   - The code appears once the team is saved with QR creation chosen. Until then the placeholder says 「保存后显示」, the text says the code appears after saving, and step 1 is not started. A team that already has an application is also told that the scanned application replaces it and that the team then onboards again in its groups.
@@ -172,8 +172,9 @@ A save based on an outdated version is refused with "重新载入", which reload
 ## Uncovered dimensions
 
 - Chinese and light appearance only. Per the project capability declaration, i18n and theming are disabled, so their checks are skipped.
-- **Unverified onboarding facts.** The onboarding steps follow official Feishu documentation and have not been verified on a real tenant. Two points remain open:
-  - whether the preset permissions are enough to change the application's configuration;
+- **Unverified onboarding facts.** The onboarding steps follow official Feishu documentation and have not been verified on a real tenant. The points that remain open are those of the [team-management spec](../../specs/team-management.md)'s Pending note:
+  - whether Feishu's application-management APIs accept an application created by QR code, and whether the permissions asked for at creation let it change its own configuration;
+  - whether a created application is already released when the scan ends, or only by step 3;
   - which permission the group-membership check needs.
 - **Not modeled:**
   - color choice for new teams;

@@ -182,7 +182,7 @@ The team's 接入方式 is one of its editable fields, so a save from a page tha
 **Onboarding.** QR creation uses the pinned Feishu SDK's application registration in create-only mode. Configuration, publishing, credential checks, bot information, group joining and the test message use platform APIs. Each step records its outcome so that a restart resumes without repeating completed steps.
 
 **QR creation.** A team's 接入方式 is part of its definition in each definitions version; a definition that names none uses an existing application, as every imported team and every version stored before 接入方式 existed does. The state of a team's QR creation is stored in the registry beside the definitions versions.
-- **The code.** The service asks Feishu for a registration link and serves it to the page as a QR image; the link and the secret never reach the page. A request that gets no link within 15 seconds counts as no code. The link is valid for the time Feishu states with it, and for one scan.
+- **The code.** The service asks Feishu for a registration link and serves it to the page as a QR image; the link reaches the page only inside that image, and the secret never does. A request that gets no link within 15 seconds counts as no code. The link is valid for the time Feishu states with it, and for one scan.
 - **What the scan page is given.** It can only create a new application. The application's name is prefilled with the leader's name and its description with the team's name; the owner can change both there. The application asks for Feishu's minimal template, which has the bot capability and no other permission, plus these permissions:
   - `im:message:send_as_bot`, to post in groups as the bot;
   - `im:resource`, to upload the images and files it sends;
@@ -200,7 +200,7 @@ The team's 接入方式 is one of its editable fields, so a save from a page tha
 - **Credential check.** It gets a tenant token with the App ID and secret, then reads the bot information. An enabled bot (activate_status 2) completes the step. An application not yet published or enabled (20069), or a bot not yet enabled, awaits review. A refused secret, or no stored secret, needs action. A reply that cannot be read counts as unreachable and needs action.
 - **Group joining**, per group. The Coordinator adds the bot by its App ID, then the team's own application confirms it is in the group. A group where only the owner and admins add members (232017), a join awaiting approval, or a bot not in the group afterwards needs action with that reason.
 - **Outcomes** are stored per application, and per group for joining. A done step never runs again, except the credential check after a new secret.
-- **When checks run:** after a save that changes the credentials or adds a group, after a scan has created the application, on 「重新检查」, and at startup for teams still onboarding. Runs take place one at a time.
+- **When checks run:** after every save of the team, after a scan has created the application, on 「重新检查」, and at startup for teams still onboarding. Runs take place one at a time.
 - **Acceptance.** A binding starts accepting once the credential check and its group's joining are done. A later failed check never moves an accepting binding out of accepting.
 
 **Test message.** The team's own application posts it through the group channel, so it has the delivery record of the team's other posts. Each group's latest result is stored per application: being sent, accepted, failed or unknown. A send cut off by a restart is unknown.
