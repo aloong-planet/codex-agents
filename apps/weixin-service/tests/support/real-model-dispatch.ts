@@ -1,7 +1,9 @@
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { EXECUTOR_RUNTIME_HOME } from "../../src/agent-dispatch-executor.js";
 import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
+import { ISOLATED_RUNTIME_KINDS } from "../../src/isolated-runtime-kinds.js";
 import { allowNotes, dispatchConfig, start, type State } from "./real-main.js";
 
 /**
@@ -11,7 +13,8 @@ import { allowNotes, dispatchConfig, start, type State } from "./real-main.js";
  *
  * Each scenario has its own service process, state directory and granted directory, all temporary and removed when it ends,
  * and leaves one run record, also when it fails: a failed scenario's record is its evidence. The record holds what a reviewer
- * needs to judge the run without repeating it. It never holds a runtime home, which is where the login copies are.
+ * needs to judge the run without repeating it. Of the runtime homes, where the login copies are, it keeps only the Executors'
+ * thread rollouts.
  */
 export const realModelDispatch = process.env.DISPATCH_REAL_MODEL_TEST === "1";
 
@@ -44,10 +47,12 @@ export type RunRecord = {
   notices: unknown[];
   /** Every file or image the group received, saved beside the record. */
   deliverables: Array<{ identity: string; chatId: string; kind: string; fileName: string; savedAs: string }>;
+  /** Each Executor's thread rollouts, saved beside the record: its whole turn, with the tool calls and web searches it made. */
+  executorRollouts: string[];
 };
 
 /** The run record of a scenario, from the state the service reports, and the delivered files to save with it. */
-export function runRecord(state: State | undefined, context: Pick<RunRecord, "scenario" | "acceptance" | "outcome" | "failure" | "startedAt" | "endedAt" | "messages">):
+export function runRecord(state: State | undefined, context: Pick<RunRecord, "scenario" | "acceptance" | "outcome" | "failure" | "startedAt" | "endedAt" | "messages" | "executorRollouts">):
   { record: RunRecord; files: Array<{ path: string; bytes: Buffer }> } {
   const identities = [[COORDINATOR, { text: state?.feishuFixtureTextOutbox ?? [], media: state?.feishuFixtureMediaOutbox ?? [] }] as const,
     ...Object.entries(state?.agentFixtureOutboxes ?? {})];
@@ -62,6 +67,34 @@ export function runRecord(state: State | undefined, context: Pick<RunRecord, "sc
   return { files, record: { ...context,
     models: (state?.codex?.models?.accounts ?? []).map(({ accountId, resolved }) => ({ accountId, ...resolved })),
     requests: state?.agentDispatch?.jobs ?? [], turns: state?.fixtureDispatchTurns ?? [], posts, notices: state?.agentDispatch?.notices ?? [], deliverables } };
+}
+
+/** What a login copy holds, and what a model credential looks like; a rollout that matches is never copied. */
+const CREDENTIAL = /"(?:access_token|refresh_token|id_token)"|sk-[A-Za-z0-9_-]{20,}/u;
+/**
+ * Copies every Executor's thread rollouts from a stopped service's state directory into `destination`, under the home's name, and
+ * returns their paths there. Only files named as rollouts are copied, from Executor homes only, so nothing else of a home, such as
+ * its login copy, can follow. A rollout that holds a credential pattern is withheld and reported instead.
+ */
+export function keepExecutorRollouts(stateDirectory: string, destination: string): { kept: string[]; withheld: string[] } {
+  const runtimes = join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory), kept: string[] = [], withheld: string[] = [];
+  if (!existsSync(runtimes)) return { kept, withheld };
+  for (const home of readdirSync(runtimes).filter((name) => EXECUTOR_RUNTIME_HOME.test(name)).sort()) {
+    const codexHome = join(runtimes, home, "codex-home");
+    for (const sessions of ["archived_sessions", "sessions"]) {
+      if (!existsSync(join(codexHome, sessions))) continue;
+      const rollouts = readdirSync(join(codexHome, sessions), { withFileTypes: true, recursive: true })
+        .filter((entry) => entry.isFile() && /^rollout-.*\.jsonl$/u.test(entry.name)).map((entry) => join(entry.parentPath, entry.name)).sort();
+      for (const rollout of rollouts) {
+        const relative = join(home, rollout.slice(codexHome.length + 1));
+        if (CREDENTIAL.test(readFileSync(rollout, "utf8"))) { withheld.push(relative); continue; }
+        mkdirSync(dirname(join(destination, relative)), { recursive: true });
+        copyFileSync(rollout, join(destination, relative));
+        kept.push(relative);
+      }
+    }
+  }
+  return { kept, withheld };
 }
 
 const RESTING = ["proposed", "waiting", "completed", "partially_failed", "partially_unassigned", "failed", "cancelled"];
@@ -140,9 +173,13 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
   // The service stops before the granted directory is copied, so no Executor still writes there.
   try { await running?.close(); } catch (error) { fail(error); }
   try {
-    const { record, files } = runRecord(state, { scenario: scenario.id, acceptance: scenario.acceptance, outcome: failed ? "failed" : "passed",
-      ...(failed ? { failure: failure instanceof Error ? failure.message : String(failure) } : {}), startedAt: startedAt.toISOString(), endedAt: new Date().toISOString(), messages });
     mkdirSync(join(recordDirectory, "deliverables"), { recursive: true });
+    // The service has stopped, so every released Executor home is down to its rollouts and no App Server still writes one.
+    const rollouts = keepExecutorRollouts(directory, join(recordDirectory, "executor-rollouts"));
+    if (rollouts.withheld.length) fail(new Error(`withheld ${rollouts.withheld.length} Executor rollout(s) that hold a credential pattern: ${rollouts.withheld.join(", ")}`));
+    const { record, files } = runRecord(state, { scenario: scenario.id, acceptance: scenario.acceptance, outcome: failed ? "failed" : "passed",
+      ...(failed ? { failure: failure instanceof Error ? failure.message : String(failure) } : {}), startedAt: startedAt.toISOString(), endedAt: new Date().toISOString(), messages,
+      executorRollouts: rollouts.kept.map((path) => `executor-rollouts/${path}`) });
     writeFileSync(join(recordDirectory, "run-record.json"), `${JSON.stringify(record, null, 2)}\n`);
     writeFileSync(join(recordDirectory, "service.log"), log);
     for (const { path, bytes } of files) writeFileSync(join(recordDirectory, path), bytes);

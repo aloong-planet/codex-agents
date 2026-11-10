@@ -14,7 +14,7 @@ import { atRest, realModelDispatch, realModelScenario, type ScenarioRun, type Te
 //
 // Assertions are structural: who decided what, which team leads, what was posted under which identity and in which order, which
 // files reached the group. What the model wrote is judged from each scenario's run record, which is written also when the
-// scenario fails. A failure here is a finding about the model's decision or the product, not a reason to loosen the assertion.
+// scenario fails and keeps each Executor's thread rollouts. A failure here is a finding about the model's decision or the product, not a reason to loosen the assertion.
 //
 // Not covered here:
 // - Whether a deliverable's content meets its criterion (missing facts marked, sources named, no claim that tests ran): the

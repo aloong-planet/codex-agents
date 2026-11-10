@@ -27,7 +27,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // validation and effects. The Coordinator's and Team Leaders' real runtime construction is driven by the case that sets
 // WORKFLOW_FIXTURE_COORDINATION_RUNTIME, where the fixture App Server answers their turns with the same injected outputs.
 // Gaps:
-// - A live run is still needed for real model semantics and for the default Team Leader runtimes outside that seam.
+// - Real model semantics, and the default Team Leader runtimes outside that seam, are not driven here. The opt-in real-model suite
+//   (agent-dispatch-real-model.test.ts) drives them for single-turn requests; the rest still needs a live run.
 // - The upgrade case covers the stored states the pre-05 fixture mode can produce. A state reached only in production, such as
 //   an old request whose team was later removed from the local configuration, keeps the existing authorization fencing,
 //   which channel-startup's "fails closed for an unavailable assignee" cases drive; no case here builds it.
@@ -36,15 +37,16 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
-// - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
-//   the fixture injects both.
+// - Whether a real Team Leader divides work sensibly is judged from the real-model suite's run records. Which Assignments it marks
+//   affected by a supplement still needs a live run. The fixture injects both.
 // - Main records an Executor's memory capture with its Assignment's frozen sender. Fixture mode's curators record only the account
 //   and the turns, so no case observes that sender. Retest condition: a fixture curator that records each turn's source sender.
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
-// - Whether a real Team Leader marks sensible dependencies, and whether its closing names the Assignments left not started and
-//   the retry order, needs a live run; the fixture injects the plan and the closing. The host's own fallback closing is unit-tested.
+// - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
+//   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
+//   closing is unit-tested.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -386,6 +388,8 @@ it("builds the Coordinator's and the Team Leader's runtimes from their resolved 
 
 // The real-model seam (agent-dispatch Testing Decisions). This case never reaches a model: the Codex executable is a command that
 // only fails and the Codex home holds a synthetic login, so it shows which path the Coordinator's turn takes, not what a model decides.
+// Gap: a Team Leader's or an Executor's turn follows a Coordinator turn that succeeded, which no default run can produce, so their
+// paths under the seam are reached only by the opt-in suite (agent-dispatch-real-model.test.ts).
 it("takes the Coordinator's turn to its real runtime with the Codex home's login under the real-model seam, and records it, ignoring an injected decision", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-codex-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;

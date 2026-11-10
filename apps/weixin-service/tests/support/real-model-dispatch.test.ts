@@ -1,14 +1,17 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { processWaitLimitMs } from "./process-wait.js";
 import type { State } from "./real-main.js";
-import { atRest, realModelScenario, runRecord } from "./real-model-dispatch.js";
+import { atRest, keepExecutorRollouts, realModelScenario, runRecord } from "./real-model-dispatch.js";
+import { seedExecutorHome } from "./runtime-home.js";
 
 // The real-model suite's own entry point, checked without a model: the Codex executable is a command that only fails and the Codex
 // home holds a synthetic login. A broken record or a leftover root would otherwise show only after a real-model run was spent.
-// Gap: that the process group's kill stops an App Server main left behind needs an App Server, which no default run starts.
+// Gaps, both of which need an Executor that only a real run produces:
+// - that the process group's kill stops an App Server main left behind;
+// - that a scenario fails when one of its own Executor rollouts is withheld (the withholding itself is checked on seeded homes).
 const SYNTHETIC_LOGIN = '{"OPENAI_API_KEY":"sk-synthetic"}';
 const FALLBACK = "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。";
 const created: string[] = [];
@@ -16,8 +19,10 @@ afterEach(() => { for (const directory of created.splice(0)) rmSync(directory, {
 function temporary(prefix: string) { const directory = mkdtempSync(join(tmpdir(), prefix)); created.push(directory); return directory; }
 /** The scenario roots the entry point makes under the system's temporary directory. */
 const scenarioRoots = () => readdirSync(tmpdir()).filter((name) => name.startsWith("real-model-scenario-")).sort();
+/** Every file under `directory`, as sorted relative paths. */
 function listing(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true, recursive: true }).map((entry) => join(entry.parentPath, entry.name).slice(directory.length + 1)).sort();
+  return readdirSync(directory, { withFileTypes: true, recursive: true }).filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name).slice(directory.length + 1)).sort();
 }
 function noModel() {
   const codexHome = temporary("real-model-entry-codex-");
@@ -44,6 +49,7 @@ const reported = {
   },
 } as unknown as State;
 const context: Parameters<typeof runRecord>[1] = { scenario: "out-of-role-mention", acceptance: ["agent-dispatch::REQ-004"], outcome: "passed", startedAt: "2026-11-11T01:00:00.000Z",
+  executorRollouts: ["executor-rollouts/dispatch-aa/sessions/2026/11/11/rollout-2026-11-11T01-00-30-thread-one.jsonl"],
   endedAt: "2026-11-11T01:01:00.000Z", messages: [{ messageId: "om_one", senderId: "ou_owner", text: "帮我规划一日游", mention: "jack" }] };
 
 it("puts every identity's posts in the order the group received them, and keeps each delivered file under its sender's name inside the record", () => {
@@ -78,6 +84,26 @@ it.each([
   expect(atRest(state, "om_other")).toBe(false);
 });
 
+it("keeps only the thread rollouts of Executor homes, byte for byte, and withholds one that holds a credential pattern", () => {
+  const state = temporary("real-model-entry-state-"), kept = temporary("real-model-entry-rollouts-");
+  const runtimes = join(state, "group-model-runtimes"), first = `dispatch-${"a".repeat(64)}`, second = `dispatch-${"b".repeat(64)}`;
+  // Homes as an App Server leaves them after a turn, login copy included; compaction has not run on them.
+  const [active] = seedExecutorHome(join(runtimes, first), [{ threadId: "thread-one" }]);
+  const [archived, leaking] = seedExecutorHome(join(runtimes, second), [{ threadId: "thread-two", archived: true }, { threadId: "thread-three" }]);
+  appendFileSync(join(runtimes, second, leaking!), '{"access_token":"not-a-real-token"}\n');
+  // The Coordinator's and a Team Leader's homes hold rollouts too; they are not Executor homes.
+  seedExecutorHome(join(runtimes, "dispatch-coordinator"), [{ threadId: "thread-sam" }]);
+  seedExecutorHome(join(runtimes, `dispatch-leader-${"c".repeat(64)}`), [{ threadId: "thread-leader" }]);
+  const inRecord = (home: string, rollout: string) => `${home}/${rollout.slice("codex-home/".length)}`;
+  expect(keepExecutorRollouts(state, kept)).toEqual({ kept: [inRecord(first, active!), inRecord(second, archived!)], withheld: [inRecord(second, leaking!)] });
+  expect(listing(kept)).toEqual([inRecord(first, active!), inRecord(second, archived!)]);
+  expect(readFileSync(join(kept, inRecord(first, active!)))).toEqual(readFileSync(join(runtimes, first, active!)));
+});
+
+it("keeps no rollout when the state directory has no runtime", () => {
+  expect(keepExecutorRollouts(temporary("real-model-entry-state-"), temporary("real-model-entry-rollouts-"))).toEqual({ kept: [], withheld: [] });
+});
+
 it("writes a scenario's run record, service log and granted directory, and leaves no temporary root or login behind", async () => {
   const records = temporary("real-model-entry-records-"), before = scenarioRoots();
   const directory = await realModelScenario({ id: "entry-self-test", acceptance: ["agent-dispatch::REQ-001"], files: { "project/sample.txt": "x\n" }, records, env: noModel() }, async (run) => {
@@ -89,7 +115,7 @@ it("writes a scenario's run record, service log and granted directory, and leave
   expect(record).toMatchObject({ scenario: "entry-self-test", acceptance: ["agent-dispatch::REQ-001"], outcome: "passed", requests: [],
     messages: [{ messageId: "om_entry_self_test", senderId: "ou_owner", text: "帮我整理闲鱼商品描述" }],
     posts: [{ identity: "sam", chatId: "oc_alpha", message: FALLBACK, acceptedAt: expect.any(Number) }],
-    notices: [{ state: "accepted" }], deliverables: [],
+    notices: [{ state: "accepted" }], deliverables: [], executorRollouts: [],
     turns: [{ role: "coordinator", turn: "classify", messageId: "om_entry_self_test", error: "isolated_runtime_catalog_unavailable" }] });
   expect(record).not.toHaveProperty("failure");
   // The record names the model of every account, the dispatch account among them.
