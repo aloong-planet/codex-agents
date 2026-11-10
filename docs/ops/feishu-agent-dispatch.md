@@ -68,7 +68,7 @@ Sam's application must not be one a team uses. If a start after re-pairing stops
 
 Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team gets its Feishu application in one of two ways, chosen as 接入方式 and saved with the team. Either way the secret is stored in the registry and never shown.
 
-**扫码一键创建.** Saving the team with this choice shows a QR code. Scan it in Feishu and confirm on the phone: Feishu creates a new application, and the service takes its App ID and secret for the team. The code is valid for the time Feishu gives it, about ten minutes, and for one scan; 「刷新二维码」 requests a new one. The application's name is prefilled with the leader's name and its description with the team's name.
+**扫码一键创建.** Saving the team with this choice shows a QR code. Scan it in Feishu and confirm on the phone: Feishu creates a new application, and the service takes its App ID and secret for the team. The code is valid for the time Feishu gives it, about ten minutes, and for one scan. 「刷新二维码」 shows a new one; the earlier code stays valid at Feishu until it runs out, and whichever code is confirmed first gives the team its application. The application's name is prefilled with the leader's name and its description with the team's name.
 
 The created application asks for the bot capability and five permissions. This is what the tenant's admin sees when reviewing it:
 
@@ -86,7 +86,10 @@ Not yet verified on a real tenant: whether Feishu's application-management APIs 
 
 A team that already has an application can be saved as 扫码一键创建 too. It keeps working with its application until the scan. The created application then replaces it, and the team onboards again in its groups.
 
-If the owner confirms on the phone in the moment a code is replaced or QR creation is ended, Feishu creates an application that the service does not use and whose secret it does not keep. The audit file `console-audit.jsonl` in the state directory then has a `team_application_qr_failed` entry with that application's `appId`. Look for such entries after onboarding, and remove the application in the Feishu developer console.
+Feishu creates the application the moment a code is confirmed on the phone, whatever the page shows by then. Two kinds of `team_application_qr_failed` entry in the audit file `console-audit.jsonl` in the state directory therefore need a look in the Feishu developer console. Check for them after onboarding:
+
+- **An entry with an `appId`.** A scan created that application, and the team does not use it; the service did not keep its secret. The `reason` says why: `abandoned` when the code was confirmed after the team already had its application or had been saved as 已有应用，手动填写, `unusable` when no team may use that application, `failed` when the service could not store it. Remove the application in the Feishu developer console.
+- **An entry with the reason `connection_lost` or `interrupted`.** A code was waiting when the connection to Feishu dropped, or when the service stopped; `interrupted` is written at the next start, for the code the page showed. A code that 「刷新二维码」 had replaced, or whose team had been saved as 已有应用，手动填写, leaves no entry when the service stops while it is still valid. The service cannot learn whether such a code was confirmed afterwards. If it was, Feishu has an application that the service does not know, and the page's 「不会创建重复的应用」 does not hold. Before scanning a new code, look in the Feishu developer console for an application with the Team Leader's name. Remove it there, or save the team as 已有应用，手动填写 with its App ID and App Secret.
 
 **已有应用，手动填写.** The App ID and App Secret of an application created in the Feishu developer console are entered on the page. It needs `im:message:send_as_bot` and `im:resource`, a published version and an enabled bot.
 
