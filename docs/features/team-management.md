@@ -37,7 +37,7 @@ The owner wants to decide, from the console and without a restart, which Agent T
 - The owner chooses the dispatch groups on the page, among the Feishu groups the service already allows; each is listed by name with its chat ID.
   - Without dispatch, the page shows 「尚未配置派单群」 with this form instead of the team list. With dispatch, 「派单群设置」 opens it in a drawer.
   - A save applies after the service restarts, and the page says so. Until then the form shows 运行中的服务 beside 已保存，重启后, and a strip 「派单群设置已保存，重启服务后生效。」 with 「查看派单群设置」 stays above the team list. Saving with no group checked turns dispatch off at the restart; the teams stay for a later re-enable.
-  - A save is refused with 「无法保存」 while 飞书配对向导 is using the channel configuration, when the configuration changed after the page loaded it (with 「重新载入」), or when it unchecks a group that still has unfinished dispatch requests, which it lists.
+  - A save is refused with 「无法保存」 while 飞书配对向导 is using the channel configuration, when the configuration changed after the page loaded it (with 「重新载入」), or when it unchecks a group that still has unfinished dispatch requests, which it lists, each linked to its record on the team overview.
   - After the restart, Sam dispatches in exactly the saved groups. With no team yet, Sam answers alone there.
 - Without Feishu paired, the page shows only 「尚未配置派单群」 and says to stop the service and run `pnpm feishu:pair` first.
 - 「MCP 管理」 leads to the MCP management page, whose 「返回团队管理」 leads back.

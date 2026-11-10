@@ -16,6 +16,8 @@ export function createChannelStatusServer(
     response.setHeader("Cache-Control", "no-store");
     const host = request.headers.host ?? "";
     if (!/^(127\.0\.0\.1|localhost):\d+$/.test(host)) { response.writeHead(403); response.end('{"error":"forbidden"}'); return; }
+    // The console's home is the team overview; a login link lands on "/" (agent-console Implementation Decisions: console home).
+    if (request.method === "GET" && request.url === "/") { response.writeHead(302, { location: "/console" }); response.end(); return; }
     if (request.method === "GET" && request.url === "/api/state") {
       response.end(JSON.stringify(state())); return;
     }

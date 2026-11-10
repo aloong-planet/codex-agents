@@ -17,7 +17,7 @@ import { DemoService, type ChannelSnapshot, type WeixinChannel } from "../src/de
 import { createDemoServer } from "../src/http-server.js";
 import { McpCatalog } from "../src/mcp-catalog.js";
 import { startAuthorizationServer, startHttpTestServer } from "./fixtures/mcp-http-test-server.js";
-import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 
 const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
 const WAIT = { timeout: 10_000, interval: 50 };
@@ -48,6 +48,8 @@ afterEach(async () => {
 
 async function start(variant: "demo" | "status") {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-api-"));
+  // The last step, after the catalog closed: a case leaves no server program running.
+  cleanup.push(() => expect(stopRunningPrograms(work), "server programs still running after the catalog closed").toEqual([]));
   cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
   const state = path.join(work, "state");
   const home = path.join(work, "home");

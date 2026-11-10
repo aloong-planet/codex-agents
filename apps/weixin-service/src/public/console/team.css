@@ -80,4 +80,6 @@
 .atm-dc-pending[hidden]{display:none}
 .atm-link{border:0;background:transparent;padding:0;color:var(--acv-brand);font-size:11px;text-align:left}
 .atm-link:hover{text-decoration:underline}
+/* An unfinished request in the dispatch-group refusal links to its record on the team overview. */
+a.atm-link{text-decoration:none}
 @media(max-width:899px){.atm-a{grid-template-columns:1fr;grid-template-rows:200px minmax(0,1fr)}}

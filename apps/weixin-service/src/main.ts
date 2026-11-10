@@ -93,6 +93,7 @@ import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resol
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { ConsoleAudit } from "./console-audit.js";
+import { ConsoleOverview } from "./console-overview.js";
 import { createConsoleRoutes } from "./console-routes.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { NewsArchive } from "./news-archive.js";
@@ -1276,7 +1277,23 @@ const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit
 const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigurationPath, running: feishuConfiguration?.dispatch?.groupChatIds ?? [],
   unfinished: () => unfinishedRequestsByGroup(agentDispatch?.getState().jobs ?? [], (accountId, target) => feishuConfiguration!.owner.deliveryTarget(accountId, target)),
   names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}), audit: consoleAudit });
-const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings });
+// The team overview's read projection over the running service's dispatch records; Penny contributes only its state (agent-console::REQ-003).
+const consoleOverview = new ConsoleOverview({ storageRoot: consoleStateDirectory,
+  ...(agentDispatch && teamManagement ? { records: () => agentDispatch.records(), teams: teamManagement } : {}),
+  groups: () => feishuConfiguration?.dispatch?.groupChatIds ?? [],
+  names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}),
+  chatIdOf: (accountId, target) => feishuConfiguration?.owner.deliveryTarget(accountId, target),
+  owner: (senderId) => Boolean(feishuConfiguration?.owner.accepts({ ...feishuConfiguration.owner.conversationAddress(), senderId, conversationType: "private" })),
+  penny: () => ({ configured: pennyConfigured, ready: penny?.state().ready === true }),
+  // A dispatch group's memory is the account its Coordinator recalls (agent-console::US-005/AC-04).
+  ...(feishuConfiguration ? { groupMemory: (chatId: string) => {
+    const address = feishuConfiguration.owner.groupAddress(chatId);
+    if (!address) throw new Error("group_unbound");
+    return accountMemory.readAccount(feishuConfiguration.owner.memoryScope(address.accountId, address.target));
+  } } : {}),
+});
+const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings,
+  overview: consoleOverview, access: consoleAccess });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),

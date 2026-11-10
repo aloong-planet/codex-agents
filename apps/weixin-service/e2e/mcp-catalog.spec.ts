@@ -51,7 +51,7 @@ test("registers a local program only after confirming its exact command", async 
   writeTools(files.tools, [LOOKUP]);
   await page.goto(`${fixtureServer.url}/console/mcp`);
 
-  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveText(["团队管理", "MCP 管理"]);
+  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveText(["团队总览", "团队管理", "MCP 管理"]);
   await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("MCP 管理");
   await expect(page.getByRole("button", { name: "添加服务器" })).toBeVisible();
   await expect(page.locator(".amc-actions").getByRole("link", { name: "返回团队管理" })).toHaveAttribute("href", "/console/teams");
@@ -76,7 +76,7 @@ test("registers a local program only after confirming its exact command", async 
   const line = [process.execPath, ...testServerArgs(files)].join(" ");
   await fillLocalProgram(page, "local", testServerArgs(files), `SECRET_TOKEN=${SECRET_SENTINEL}`);
   await expect(page.locator("#amc-launch")).toHaveText(line);
-  await page.locator(".acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await page.locator("#amc-drawer .acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await testInfo.attach("confirmation-card", { body: await page.screenshot(), contentType: "image/png" });
   await page.locator("#amc-close").click();
   await expect(page.locator("#amc-drawer")).toBeHidden();
@@ -204,7 +204,7 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   await expect(page.locator("#amc-launch")).toHaveText([process.execPath, ...testServerArgs(second)].join(" "));
   await expect(page.locator("#amc-grant")).toContainText("登记后还要在团队管理里绑定到能力档，执行者才能使用；绑定时会再次确认。");
   await expect(page.locator("#amc-grant")).not.toContainText("已绑定到");
-  await page.locator(".acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await page.locator("#amc-drawer .acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await testInfo.attach("command-change-card", { body: await page.screenshot(), contentType: "image/png" });
   await page.getByRole("button", { name: "确认并保存" }).click();
   await expect(page.locator("#amc-note")).toHaveText("已保存：新事务使用新配置。");

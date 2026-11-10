@@ -31,7 +31,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { McpCallRefused, McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
 import { freePort, startAuthorizationServer, startHttpTestServer, startRecordingServer, type AuthorizationServer, type HttpTestServerOptions, type RedirectRule } from "./fixtures/mcp-http-test-server.js";
-import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, runningPrograms, starts, stopRunningPrograms, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 
 const LOCAL_NPX_PACKAGE = path.join(path.dirname(new URL(import.meta.url).pathname), "fixtures", "mcp-local-npx-package");
 
@@ -171,6 +171,35 @@ describe("connections held by the host", () => {
     fs.rmSync(files.failFlag);
     await connected(catalog, "flaky");
     expect(starts(files).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("closing waits until a program that a reconnection replaced has stopped", async () => {
+    const { work, open } = setup();
+    const catalog = open();
+    cleanup.push(() => void stopRunningPrograms(work));
+    const files = testServerFiles(work);
+    register(catalog, input("replaced", files));
+    await connected(catalog, "replaced");
+    // The new program fails at once, so closing has nothing else to wait for than the replaced one, which keeps
+    // running after its input ends until it is signalled.
+    const replaced = starts(files)[0]!.pid;
+    fs.writeFileSync(files.failFlag, "");
+    catalog.reconnect("replaced");
+    expect(runningPrograms(work)).toContain(replaced);
+
+    await catalog.close();
+    expect(runningPrograms(work)).toEqual([]);
+  });
+
+  it("closing stops a program that is still connecting", async () => {
+    const { work, open } = setup();
+    const catalog = open();
+    cleanup.push(() => void stopRunningPrograms(work));
+    register(catalog, input("starting", testServerFiles(work)));
+    expect(runningPrograms(work)).toHaveLength(1);
+
+    await catalog.close();
+    expect(runningPrograms(work)).toEqual([]);
   });
 });
 
