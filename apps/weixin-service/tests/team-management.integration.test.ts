@@ -396,9 +396,44 @@ it("refuses to uncheck a dispatch group that has an unfinished request, and list
     expect(form.running).toEqual(["oc_alpha"]);
     expect(await running.send("/api/teams/dispatch-groups", { groups: [], basedOn: form.basedOn })).toEqual({ status: 409, body: { error: "无法保存",
       refusal: { kind: "unfinished", groups: [{ chatId: "oc_alpha", requests: [{ summary: "安排周末出行", status: "proposed" }] }] } } });
+    expect(await running.send("/api/teams/dispatch-groups", { groups: ["oc_alpha", "oc_unlisted"], basedOn: form.basedOn }))
+      .toEqual({ status: 400, body: { error: "无法保存", refusal: { kind: "invalid" } } });
     expect(readFileSync(join(directory, "channel.json")).equals(before)).toBe(true);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+// agent-dispatch failure-mode row: a request admitted in a group after the owner saved it unchecked, before the restart.
+it("does not continue requests admitted in a group unchecked on the page before the restart, and posts nothing more there", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-groups-unchecked-"));
+  let running: Running | undefined;
+  try {
+    const configuration = config("feishu");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify({ ...configuration, feishu: { ...configuration.feishu,
+      groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+      dispatch: { groupChatIds: ["oc_alpha", "oc_beta"], agents: [{ id: "sam" }, { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } }));
+    running = await start(directory);
+    // oc_alpha has no request yet, so the save that leaves it out is accepted.
+    const form = await running.get<{ basedOn: string }>("/api/teams/dispatch-groups");
+    await running.post("/api/teams/dispatch-groups", { groups: ["oc_beta"], basedOn: form.basedOn });
+    // Then two requests reach Bill in oc_alpha: the first holds at its start message, the second queues behind it.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_unchecked_first", "帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
+    await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1);
+    await running.post("/api/fixture/inbound", groupMessage("om_unchecked_second", "再帮我订一家餐厅", decision("bill", "订餐厅")));
+    const before = await running.until((state) => state.agentDispatch?.jobs.map(({ status }) => status).join() === "running,queued");
+    await running.crash(); running = undefined;
+    running = await start(directory);
+    const after = await running.until((state) => state.agentDispatch?.jobs.every(({ status }) => !["queued", "running"].includes(status)) === true);
+    console.log(JSON.stringify({ kind: "dispatch_groups_unchecked_restart", commands: ["帮我规划周末一日行程", "再帮我订一家餐厅"],
+      before: before.agentDispatch, after: after.agentDispatch, outboxes: after.agentFixtureOutboxes, sam: after.fixtureTextOutbox }));
+    // In admission order: the request that was running, then the one queued behind it.
+    expect(after.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["cancelled", "cancelled"]);
+    // In a dispatch group the same crash makes Bill post 「接单通知未确认发送…」 at the restart (agent-dispatch.integration.test.ts);
+    // here neither Bill nor Sam posts anything more.
+    expect({ bill: after.agentFixtureOutboxes?.bill?.text, sam: after.fixtureTextOutbox }).toEqual({ bill: [], sam: [] });
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
 
 it("answers the team API and the dispatch-group form without Feishu: not configured, and Feishu not paired", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-no-feishu-"));

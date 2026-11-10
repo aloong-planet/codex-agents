@@ -245,7 +245,9 @@
 
   /** The reasons of a refused save, in the order the save bar lists them (agent-console::US-009/AC-04). */
   function dcReasons(refusal) {
-    if (refusal.kind === "locked") return [esc("飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。")];
+    if (refusal.kind === "locked") {
+      return [`${esc("飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。")}<br>${esc("如果没有配对命令在运行，这个锁文件可能是配对中途退出留下的：")}<code class="atm-empty-path">${esc(refusal.lockPath)}</code>${esc("确认没有配对命令运行后删除它，再保存。")}`];
+    }
     if (refusal.kind === "changed") return [esc("渠道配置文件在页面载入后被修改过；为避免覆盖，本次保存没有生效。")];
     if (refusal.kind === "unfinished") {
       return refusal.groups.map(({ chatId, requests }) => `${esc(`${dcName(chatId)}还有 ${requests.length} 项未结束的派单事务，结束后才能取消勾选：`)}<ul class="atm-dc-busy">${requests.map(({ summary, status }) => `<li>${esc(summary)}<small>${esc(DC_STATE[status] ?? status)}</small></li>`).join("")}</ul>`);

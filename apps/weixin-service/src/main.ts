@@ -82,7 +82,7 @@ import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } fr
 import { TeamManagement } from "./team-management.js";
 import { TeamAnnouncements } from "./team-announcements.js";
 import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
-import { DispatchGroupSettings, type DispatchGroupRequest } from "./dispatch-group-settings.js";
+import { DispatchGroupSettings, unfinishedRequestsByGroup } from "./dispatch-group-settings.js";
 import { GroupNames } from "./group-names.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
@@ -1257,16 +1257,8 @@ const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audi
 // The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
 const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
 // The dispatch-group form writes the channel configuration file this service loaded; a save applies at the next start (agent-console::US-009).
-const UNFINISHED_DISPATCH = new Set(["proposed", "queued", "running", "waiting"]);
 const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigurationPath, running: feishuConfiguration?.dispatch?.groupChatIds ?? [],
-  unfinished: () => {
-    const byGroup: Record<string, DispatchGroupRequest[]> = {};
-    for (const job of agentDispatch?.getState().jobs ?? []) {
-      const chatId = UNFINISHED_DISPATCH.has(job.status) ? feishuConfiguration!.owner.deliveryTarget(job.accountId, job.target) : undefined;
-      if (chatId) (byGroup[chatId] ??= []).push({ summary: job.summary, status: job.status as DispatchGroupRequest["status"] });
-    }
-    return byGroup;
-  },
+  unfinished: () => unfinishedRequestsByGroup(agentDispatch?.getState().jobs ?? [], (accountId, target) => feishuConfiguration!.owner.deliveryTarget(accountId, target)),
   names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}), audit: consoleAudit });
 const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(

@@ -19,6 +19,22 @@ export type DispatchGroupsView = Readonly<{ feishu: false }> | Readonly<{
   running: readonly string[];
 }>;
 
+const UNFINISHED: ReadonlySet<string> = new Set(["proposed", "queued", "running", "waiting"]);
+
+/**
+ * The dispatch requests that block unchecking their group: those proposed, queued, running or waiting, by chat ID, in the order
+ * given (agent-console::US-009/AC-04). A request whose conversation is no group, such as a private chat, is left out.
+ */
+export function unfinishedRequestsByGroup(jobs: ReadonlyArray<Readonly<{ summary: string; status: string; accountId: string; target: string }>>,
+  chatIdOf: (accountId: string, target: string) => string | undefined): Record<string, DispatchGroupRequest[]> {
+  const byGroup: Record<string, DispatchGroupRequest[]> = {};
+  for (const job of jobs) {
+    const chatId = UNFINISHED.has(job.status) ? chatIdOf(job.accountId, job.target) : undefined;
+    if (chatId) (byGroup[chatId] ??= []).push({ summary: job.summary, status: job.status as DispatchGroupRequest["status"] });
+  }
+  return byGroup;
+}
+
 type Refusal =
   | Readonly<{ kind: "locked"; lockPath: string }>
   | Readonly<{ kind: "changed" }>

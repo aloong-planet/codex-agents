@@ -240,7 +240,7 @@ test.describe("with Feishu paired and dispatch not enabled", () => {
     await dcGroup(page, "银河护卫队").check();
     writeFileSync(`${channelFile(fixtureServer)}.pairing-lock`, "", { mode: 0o600 });
     await page.getByRole("button", { name: "保存", exact: true }).click();
-    await expect(page.locator(".atm-save-err")).toHaveText("无法保存飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。");
+    await expect(page.locator(".atm-save-err")).toHaveText(`无法保存飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。如果没有配对命令在运行，这个锁文件可能是配对中途退出留下的：${channelFile(fixtureServer)}.pairing-lock确认没有配对命令运行后删除它，再保存。`);
     await testInfo.attach("dispatch-groups-locked", { body: await page.screenshot(), contentType: "image/png" });
     rmSync(`${channelFile(fixtureServer)}.pairing-lock`);
     const edited = readChannel(fixtureServer);
@@ -258,25 +258,30 @@ test.describe("with Feishu paired and dispatch not enabled", () => {
 test.describe("with Feishu dispatch, choosing its groups", () => {
   test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
 
-  test("opens the form in the 派单群设置 drawer, refuses to uncheck a group with an unfinished request, and keeps a strip until the restart", async ({ page, fixtureServer }, testInfo) => {
-    // A proposal in 银河护卫队 waits for its author, so that group cannot be unchecked.
-    await post(fixtureServer, "/api/fixture/inbound", { event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-      message: { message_id: "om_dc_proposal", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
-        content: JSON.stringify({ text: "周末可能想去附近玩玩" }), mentions: [] } },
-      dispatchDecision: { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" } });
+  test("opens the form in the 派单群设置 drawer, saves no group, refuses to uncheck a group with an unfinished request, and keeps a strip until the restart", async ({ page, fixtureServer }, testInfo) => {
     await page.goto("/console/teams");
+    await expect(page.getByRole("button", { name: "派单群设置" })).toBeVisible();
     await expect(page.locator("#atm-dc-pending")).toBeHidden();
     await page.getByRole("button", { name: "派单群设置" }).click();
     const drawer = page.locator("#atm-dc-drawer");
     await expect(drawer).toBeVisible();
     await expect(dcGroup(drawer, "银河护卫队")).toBeChecked();
     await expect(dcGroup(drawer, "产品讨论组")).toBeChecked();
+    // No group checked turns dispatch off at the restart.
     await dcGroup(drawer, "银河护卫队").uncheck();
+    await dcGroup(drawer, "产品讨论组").uncheck();
+    await drawer.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(drawer.locator(".atm-dc-compare")).toHaveText("运行中的服务银河护卫队、产品讨论组已保存，重启后不启用派单");
+    expect(readChannel(fixtureServer).feishu.dispatch).toBeUndefined();
+    // A proposal in 银河护卫队 then waits for its author, so that group cannot stay unchecked.
+    await post(fixtureServer, "/api/fixture/inbound", { event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+      message: { message_id: "om_dc_proposal", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+        content: JSON.stringify({ text: "周末可能想去附近玩玩" }), mentions: [] } },
+      dispatchDecision: { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" } });
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 1 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认");
     await testInfo.attach("dispatch-groups-unfinished", { body: await page.screenshot(), contentType: "image/png" });
     await dcGroup(drawer, "银河护卫队").check();
-    await dcGroup(drawer, "产品讨论组").uncheck();
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".acf-savebar")).toContainText("已保存，重启服务后生效");
     await expect(drawer.locator(".atm-dc-compare")).toHaveText("运行中的服务银河护卫队、产品讨论组已保存，重启后银河护卫队");

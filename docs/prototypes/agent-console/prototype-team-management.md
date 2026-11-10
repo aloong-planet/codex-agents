@@ -37,7 +37,7 @@ The owner chose this layout: the team list on the left, and the selected team's 
 - **Without Feishu dispatch.** The 团队管理 entry stays in the sidebar. The page shows the panel 「尚未配置派单群」, with no list, editor or "新增团队".
   - Feishu paired, dispatch not enabled: the panel holds the dispatch-group form (below).
   - Feishu not paired: 「飞书尚未接入本机服务：请先停止服务，在终端运行 pnpm feishu:pair 完成飞书配对，再回到这里选择派单群。」 Pairing stays in the terminal.
-- **Dispatch groups (ticket 30).** The dispatch-group form and its refusals are drawn ahead of their build in ticket 30; until then the built page shows text with the configuration file's path in the 未配置 state.
+- **Dispatch groups.** The dispatch-group form and its refusals:
   - The form lists the Feishu groups in the channel's group allowlist, each with a checkbox, by group name, with its chat ID beneath; a group whose name was not read shows its chat ID and 「未取到群名，显示群 ID」.
   - It opens in the 未配置 panel, and with dispatch configured from 「派单群设置」 in the page header, in the right drawer.
   - Saving writes the local channel configuration and shows 「已保存，重启服务后生效」. The form then compares 「运行中的服务」 with 「已保存，重启后」, and with dispatch configured a status strip above the team list says the saved change takes effect after a restart, with 「查看派单群设置」.

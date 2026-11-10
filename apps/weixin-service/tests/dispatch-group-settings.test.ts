@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DispatchGroupRefusal, DispatchGroupSettings, type DispatchGroupRequest } from "../src/dispatch-group-settings.js";
+import { DispatchGroupRefusal, DispatchGroupSettings, unfinishedRequestsByGroup, type DispatchGroupRequest } from "../src/dispatch-group-settings.js";
 
 // The console's dispatch-group form at its public interface, on real files in a private temporary directory
 // (agent-console::US-009, Implementation Decisions: dispatch groups). The running dispatch's unfinished requests, group names and
@@ -101,6 +101,28 @@ describe("dispatch-group settings", () => {
     expect(readFileSync(state.file).equals(bytes)).toBe(true);
     expect(existsSync(state.lock)).toBe(false);
     await expect(settings.save({ groups: ["oc_alpha", "oc_beta"], basedOn }, BROWSER)).resolves.toMatchObject({ saved: ["oc_alpha", "oc_beta"], running: ["oc_alpha"] });
+  });
+
+  it("refuses a save the startup validation would refuse, leaving the file, the lock and the directory as they were", async () => {
+    const state = stateWith(document({ groupChatIds: ["oc_alpha"] }));
+    const { settings } = settingsOn(state.file);
+    const { basedOn } = await settings.view() as { basedOn: string };
+    const bytes = readFileSync(state.file);
+    for (const groups of [["oc_unlisted"], "oc_alpha", ["oc_alpha", "oc_alpha"]]) {
+      await expect(settings.save({ groups, basedOn }, BROWSER)).rejects.toEqual(new DispatchGroupRefusal({ kind: "invalid" }));
+    }
+    expect(readFileSync(state.file).equals(bytes)).toBe(true);
+    expect(readdirSync(state.directory)).toEqual(["channel.json"]);
+  });
+
+  it("counts only proposed, queued, running and waiting requests as unfinished, under their group's chat ID", () => {
+    const chatIds: Record<string, string> = { "feishu.alpha": "oc_alpha", "feishu.beta": "oc_beta" };
+    const job = (summary: string, status: string, target = "feishu.alpha") => ({ summary, status, accountId: "cli_0123456789abcdef", target });
+    expect(unfinishedRequestsByGroup([job("提议", "proposed"), job("排队", "queued", "feishu.beta"), job("完成", "completed"), job("处理中", "running"),
+      job("部分失败", "partially_failed"), job("等待", "waiting", "feishu.beta"), job("失败", "failed"), job("已取消", "cancelled"), job("私聊", "running", "feishu.private")],
+    (_, target) => chatIds[target])).toEqual({
+      oc_alpha: [{ summary: "提议", status: "proposed" }, { summary: "处理中", status: "running" }],
+      oc_beta: [{ summary: "排队", status: "queued" }, { summary: "等待", status: "waiting" }] });
   });
 
   it("audits each save with the groups before and after and the browser, and never returns or audits a secret", async () => {
