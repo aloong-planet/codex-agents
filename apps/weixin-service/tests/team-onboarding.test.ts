@@ -3,7 +3,9 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { gunzipSync } from "node:zlib";
+import * as lark from "@larksuiteoapi/node-sdk";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { fetchRequest, FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform, TeamOnboarding, type PlatformRequest } from "../src/team-onboarding.js";
 import { TeamRegistry, type TeamEdit } from "../src/team-registry.js";
@@ -213,6 +215,56 @@ describe("the Feishu HTTP platform", () => {
     const { platform: http } = platform(answers as Record<string, Answer>);
     expect(await http.addBot("oc_alpha", DAISY_APP, SAM)).toBe(expected);
   });
+
+  // Steps 2 and 3 of QR creation. Request and response bodies follow the official pages read on 2026-11-11
+  // (~/research/codex-weixin-agent-team/feishu-onboarding-api-shapes.md): application-v7 ability, config and publish.
+  const APP = `https://open.feishu.cn/open-apis/application/v7/applications/${DAISY_APP}`;
+  const accepted = { body: { code: 0, msg: "success", data: {} } };
+  const daisyApplication = { appId: DAISY_APP, appSecret: "daisy-secret" };
+
+  it("enables the bot capability and adds the permissions, as the application itself", async () => {
+    const { platform: http, requests } = platform({ [TOKEN]: token("t-daisy"), [`${APP}/ability`]: accepted, [`${APP}/config`]: accepted });
+    expect(await http.configureApplication(daisyApplication)).toBe("done");
+    expect(requests).toEqual([
+      { method: "POST", url: TOKEN, body: { app_id: DAISY_APP, app_secret: "daisy-secret" } },
+      { method: "PATCH", url: `${APP}/ability`, authorization: "t-daisy", body: { bot: { enable: true, allow_invited_to_group_by_other_app_switch_open: true } } },
+      { method: "PATCH", url: `${APP}/config`, authorization: "t-daisy", body: { scope: { add_scopes: [
+        { scope_name: "im:message:send_as_bot", token_type: "tenant" }, { scope_name: "im:resource", token_type: "tenant" },
+        { scope_name: "im:chat:readonly", token_type: "tenant" }, { scope_name: "application:application:patch", token_type: "tenant" },
+        { scope_name: "application:bot.basic_info:read", token_type: "tenant" }] } } }]);
+  });
+
+  it.each([
+    ["the capability change refused during a review (210020)", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: { status: 400, body: { code: 210020, msg: "Unable to update configurations, as the app is currently under review." } } }, "under_review"],
+    ["the permissions refused during a review (210040)", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: accepted, [`${APP}/config`]: { status: 403, body: { code: 210040, msg: "Unable to update configurations, as the app is currently under review." } } }, "under_review"],
+    ["no permission to change the configuration (210017)", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: { status: 403, body: { code: 210017, msg: "The current user has no permission to modify the app configurations" } } }, "refused"],
+    ["a permission refused after the capability was accepted (210041)", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: accepted, [`${APP}/config`]: { status: 400, body: { code: 210041, msg: "The scope that parameter indicated needs robot ability to be enable first." } } }, "refused"],
+    ["a token refused for an application not enabled", { [TOKEN]: { status: 400, body: { code: 20069, msg: "The specified app is not enabled" } } }, "refused"],
+    ["no connection", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: { fail: true } }, "unreachable"],
+    ["a reply that is not JSON", { [TOKEN]: token("t-daisy"), [`${APP}/ability`]: accepted, [`${APP}/config`]: { status: 502 } }, "unreachable"],
+  ] as const)("reads %s when configuring a created application", async (_case, answers, expected) => {
+    const { platform: http } = platform(answers as Record<string, Answer>);
+    expect(await http.configureApplication(daisyApplication)).toBe(expected);
+  });
+
+  it("submits a release with the bot as the default capability, as the application itself", async () => {
+    const { platform: http, requests } = platform({ [TOKEN]: token("t-daisy"),
+      [`${APP}/publish`]: { body: { code: 0, msg: "success", data: { version_id: "oav_d317f090b7258ad0372aa53963cda70d", version: "1.0.0" } } } });
+    expect(await http.publishApplication(daisyApplication)).toBe("submitted");
+    expect(requests[1]).toEqual({ method: "POST", url: `${APP}/publish`, authorization: "t-daisy", body: { mobile_default_ability: "bot", pc_default_ability: "bot",
+      remark: "团队负责人机器人：在派单群里以自己的身份发言。", changelog: "开启机器人能力，申请发送消息、上传文件和读取群信息的权限。" } });
+  });
+
+  it.each([
+    ["a release already under review (210302)", { [TOKEN]: token("t-daisy"), [`${APP}/publish`]: { status: 400, body: { code: 210302, msg: "Unable to submit the release request, as the app is currently under review." } } }, "submitted"],
+    ["an application the release API does not support (210001)", { [TOKEN]: token("t-daisy"), [`${APP}/publish`]: { status: 400, body: { code: 210001, msg: "As the app was not created in our developer console, it cannot be released using this API." } } }, "refused"],
+    ["a token refused for an application not enabled", { [TOKEN]: { status: 400, body: { code: 20069, msg: "The specified app is not enabled" } } }, "refused"],
+    ["no connection", { [TOKEN]: token("t-daisy"), [`${APP}/publish`]: { fail: true } }, "unreachable"],
+    ["a reply that is not JSON", { [TOKEN]: token("t-daisy"), [`${APP}/publish`]: { status: 502 } }, "unreachable"],
+  ] as const)("reads %s when releasing a created application", async (_case, answers, expected) => {
+    const { platform: http } = platform(answers as Record<string, Answer>);
+    expect(await http.publishApplication(daisyApplication)).toBe(expected);
+  });
 });
 
 // The transport every real platform call goes through: what it sends, and how it reads a reply that is or is not JSON.
@@ -238,5 +290,77 @@ describe("the platform's HTTP transport", () => {
         { method: "POST", url: "/members", authorization: "Bearer t-sam", type: "application/json; charset=utf-8", body: JSON.stringify({ id_list: [DAISY_APP] }) },
         { method: "GET", url: "/gateway", authorization: undefined, type: undefined, body: "" }]);
     } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  });
+});
+
+// QR creation (team-management::US-002/AC-01, AC-04) through the pinned SDK's own registration flow; only the SDK's HTTP instance
+// is replaced, so the link the QR code carries and the polling are the SDK's. The answers carry the fields the pinned SDK reads
+// (the RFC 8628 device-flow names in its registration source), not a captured reply: no registration is started against Feishu.
+describe("creating an application by QR code (step 1)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  const REGISTRATION = "https://accounts.feishu.cn/oauth/v1/app/registration";
+  const CREATED = { client_id: "cli_9f8e7d6c5b4a3210", client_secret: "created-secret", user_info: { open_id: "ou_owner", tenant_brand: "feishu" } };
+  type Poll = Record<string, unknown> | Error | "never";
+  /** The registration endpoint: `begin` answers with a link (or fails), then each poll takes the next answer; the last one repeats. */
+  function registration(polls: Poll[], begin: Record<string, unknown> | Error | "never" = { verification_uri_complete: "https://accounts.feishu.cn/oauth/v1/app/confirm?user_code=WXYZ-1234",
+    device_code: "device-code-1", interval: 0, expires_in: 600 }) {
+    const requests: Array<Record<string, string>> = [];
+    vi.spyOn(lark.defaultHttpInstance, "post").mockImplementation(async (url, data) => {
+      const form = Object.fromEntries(new URLSearchParams(String(data)));
+      requests.push({ url: String(url), ...form });
+      const answer = form.action === "begin" ? begin : polls.length > 1 ? polls.shift()! : polls[0]!;
+      if (answer === "never") return new Promise<never>(() => {});
+      if (answer instanceof Error) throw answer;
+      return answer as never;
+    });
+    return requests;
+  }
+  const PRESET = { name: "Daisy", description: "设计团队" };
+
+  it("shows a link that only creates a new application, and returns its credentials once the owner confirms", async () => {
+    const requests = registration([{ error: "authorization_pending" }, CREATED]);
+    const creation = await new FeishuHttpOnboardingPlatform().createApplication(PRESET, new AbortController().signal);
+    if (typeof creation === "string") throw new Error(`expected a link, got ${creation}`);
+    const link = new URL(creation.url);
+    // createOnly hides "select an existing application" on the scan page (US-002/AC-01).
+    expect([link.origin + link.pathname, link.searchParams.get("user_code"), link.searchParams.get("createOnly"), link.searchParams.get("name"), link.searchParams.get("desc"), creation.expiresInSeconds])
+      .toEqual(["https://accounts.feishu.cn/oauth/v1/app/confirm", "WXYZ-1234", "true", "Daisy", "设计团队", 600]);
+    // The minimal template plus what a Team Leader application needs; the SDK packs it as gzip in URL-safe base64.
+    const addons = JSON.parse(gunzipSync(Buffer.from(link.searchParams.get("addons")!.replace(/-/g, "+").replace(/_/g, "/"), "base64")).toString("utf8"));
+    expect(addons).toEqual({ preset: false, scopes: { tenant: ["im:message:send_as_bot", "im:resource", "im:chat:readonly", "application:application:patch", "application:bot.basic_info:read"] } });
+    expect(await creation.result).toEqual({ appId: "cli_9f8e7d6c5b4a3210", appSecret: "created-secret" });
+    expect(requests.map(({ url, action, device_code }) => [url, action, device_code])).toEqual([
+      [REGISTRATION, "begin", undefined], [REGISTRATION, "poll", "device-code-1"], [REGISTRATION, "poll", "device-code-1"]]);
+  });
+
+  it.each([
+    ["the code ran out", { error: "expired_token", error_description: "expired" }, "expired"],
+    ["the owner declined on the phone", { error: "access_denied", error_description: "denied" }, "denied"],
+    ["the connection dropped while waiting", new Error("socket hang up"), "unreachable"],
+    ["the platform answered another refusal", { error: "invalid_request", error_description: "bad device code" }, "failed"],
+  ] as const)("creates no application when %s", async (_case, poll, expected) => {
+    registration([poll]);
+    const creation = await new FeishuHttpOnboardingPlatform().createApplication(PRESET, new AbortController().signal);
+    if (typeof creation === "string") throw new Error(`expected a link, got ${creation}`);
+    expect(await creation.result).toBe(expected);
+  });
+
+  it("stops waiting for the scan when the wait is cancelled", async () => {
+    const requests = registration(["never"]);
+    const controller = new AbortController();
+    const creation = await new FeishuHttpOnboardingPlatform().createApplication(PRESET, controller.signal);
+    if (typeof creation === "string") throw new Error(`expected a link, got ${creation}`);
+    controller.abort();
+    expect(await creation.result).toBe("cancelled");
+    expect(requests.filter(({ action }) => action === "poll")).toHaveLength(1);
+  });
+
+  it.each([
+    ["cannot be reached", new Error("getaddrinfo ENOTFOUND accounts.feishu.cn")],
+    ["answers without a link", { error: "invalid_request" }],
+    ["does not answer in time", "never"],
+  ] as const)("gives no link when the platform %s", async (_case, begin) => {
+    registration([CREATED], begin);
+    expect(await new FeishuHttpOnboardingPlatform(undefined, { linkTimeoutMs: 50 }).createApplication(PRESET, new AbortController().signal)).toBe("unreachable");
   });
 });
