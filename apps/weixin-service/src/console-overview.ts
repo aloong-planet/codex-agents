@@ -4,14 +4,19 @@ import type { DispatchAssignment, DispatchJob } from "./agent-dispatch-types.js"
 import type { TeamDefinitions } from "./team-registry.js";
 
 /** What a group post was, from its place in the request: its start, a decision, the Coordinator's placement, a failure and so on. */
-export type PostKind = "receipt" | "cross_team" | "decision" | "pending" | "failure" | "interrupted" | "closing";
-/** The delivery of a request's report to its group: none yet, or the state of its latest closing (agent-console::US-004/AC-05). */
+export type PostKind = "receipt" | "cross_team" | "decision" | "pending" | "failure" | "interrupted" | "closing" | "cancelled";
+/**
+ * The delivery of a request's report to its group (agent-console::US-004/AC-05): none yet, or the state of its report post — the
+ * lead's closing, a cancellation reply or a pending choice — or of the latest resend of it after a refusal.
+ */
 export type ReportDelivery = "none" | DispatchPost["state"];
 export type TeamCounts = { running: number; waiting: number; history: number };
 
 /** One request as the team overview and its records show it. Every text is shown as plain text (agent-console::REQ-005/AC-04). */
 export type OverviewRequest = {
   id: string;
+  /** The ID as the page shows it (displayId). */
+  label: string;
   /** The group whose conversation the request belongs to. */
   chatId: string;
   title: string;
@@ -23,8 +28,10 @@ export type OverviewRequest = {
   receivedAt: number;
   result: string | null;
   message: { text: string; source: "text" | "voice" | "media"; attachments: string[] };
-  assignments: Array<{ id: string; teamId: string; executor: string; profile: string; title: string; brief: string; status: DispatchAssignment["status"];
-    result: string | null; crossTeam: boolean }>;
+  assignments: Array<{ id: string; label: string; teamId: string; executor: string; profile: string; title: string; brief: string;
+    status: DispatchAssignment["status"]; result: string | null; crossTeam: boolean }>;
+  /** The teams other than the lead that hold an Assignment or were placed a part, in order. */
+  crossTeams: string[];
   /** Parts the lead asked other teams to take, with the team the Coordinator placed each with, or null when no team took it. */
   parts: Array<{ title: string; teamId: string | null }>;
   posts: Array<{ agentId: string; kind: PostKind | null; text: string; state: DispatchPost["state"]; acceptedAt: number | null }>;
@@ -37,8 +44,12 @@ export type OverviewView = {
   /** Every agent a group or a record names: the Coordinator, the current teams and teams only older requests used. */
   agents: Record<string, { name: string; teamName: string }>;
   coordinator: { id: string; responsibility: string } | null;
-  /** The current teams; `groups` are those they are bound to, and `counts` their requests per group (agent-console::US-003/AC-02). */
-  teams: Array<{ id: string; responsibility: string; groups: string[]; counts: Record<string, TeamCounts> }>;
+  /**
+   * The current teams; `groups` are those they are bound to, `counts` their requests per group (agent-console::US-003/AC-02) and
+   * `frames` the requests under their card per group, each with the team's running and waiting Assignments (US-003/AC-03, AC-04).
+   */
+  teams: Array<{ id: string; responsibility: string; groups: string[]; counts: Record<string, TeamCounts>;
+    frames: Record<string, Array<{ request: string; assignments: string[] }>> }>;
   requests: OverviewRequest[];
   /** Penny's state only; nothing of its ledger reaches the console (agent-console::REQ-003). */
   penny: { configured: boolean; ready: boolean };
@@ -77,7 +88,7 @@ export type GroupMemoryView = Readonly<{ readable: false }> | Readonly<{
 }>;
 
 const KINDS: Record<string, PostKind> = { receipt: "receipt", "cross-team": "cross_team", decision: "decision", pending: "pending", failure: "failure",
-  interrupted: "interrupted", closing: "closing", result: "closing" };
+  interrupted: "interrupted", closing: "closing", result: "closing", cancelled: "cancelled" };
 const ACTIVE = new Set<string>(["queued", "running", "waiting"]);
 
 /**
@@ -112,8 +123,10 @@ export class ConsoleOverview {
     return { dispatch: true, ...base, agents, coordinator: { id: definitions.coordinator.id, responsibility: definitions.coordinator.responsibility },
       teams: definitions.teams.map((team) => {
         const bound = team.bindings.filter(({ chatId, state }) => state !== "removed" && groups.includes(chatId)).map(({ chatId }) => chatId);
+        const inGroup = (chatId: string) => requests.filter((request) => request.chatId === chatId);
         return { id: team.id, responsibility: team.responsibility, groups: bound,
-          counts: Object.fromEntries(bound.map((chatId) => [chatId, counts(requests.filter((request) => request.chatId === chatId), team.id)])) };
+          counts: Object.fromEntries(bound.map((chatId) => [chatId, counts(inGroup(chatId), team.id)])),
+          frames: Object.fromEntries(bound.map((chatId) => [chatId, frames(inGroup(chatId), team.id)])) };
       }),
       requests };
   }
@@ -139,21 +152,50 @@ export class ConsoleOverview {
   }
 }
 
+/**
+ * A request or Assignment ID as the page shows it. Request IDs are long keys that no group post shows: the first eight characters
+ * stand for one, and an Assignment (`<request>:assignment:<attempt>:<n>`) is `<prefix>-<n>`, or `<prefix>-<attempt>.<n>` when a
+ * later attempt created it. A short ID shows whole.
+ */
+export function displayId(id: string): string {
+  const [request = "", kind, attempt, number] = id.split(":");
+  const prefix = request.length > 12 ? request.slice(0, 8) : request;
+  if (kind !== "assignment" || attempt === undefined || number === undefined) return prefix;
+  return `${prefix}-${attempt === "0" ? number : `${attempt}.${number}`}`;
+}
+
 function project(job: DispatchJob, chatId: string, assignments: readonly DispatchAssignment[], posts: readonly DispatchPost[], owner: boolean): OverviewRequest {
   const prefix = `${job.id}:`;
-  const kindOf = (id: string) => id.startsWith(prefix) ? KINDS[id.slice(prefix.length).split(":")[0]!] ?? null : null;
-  // The request's own report is its lead's closing (or, before Assignments existed, its result), including a retried send of it.
-  const report = new RegExp(`^${escape(job.id)}:(closing|result):\\d+(:retry:.+)?$`);
-  const last = posts.filter(({ id }) => report.test(id)).at(-1);
+  // A post's kind is the segment after its request's ID, or after the message key of a reply the request did not start (a cancellation).
+  const kindOf = (id: string) => {
+    const base = id.split(":retry:")[0]!;
+    return KINDS[(base.startsWith(prefix) ? base.slice(prefix.length) : base.slice(base.indexOf(":") + 1)).split(":")[0]!] ?? null;
+  };
+  // The request's report is the post its dispatch record names, read as a resend after a refusal reads it, with any resends of it.
+  const reportId = job.reportId ?? `${job.id}:result:${job.attempt}`;
+  const last = posts.filter(({ id }) => id === reportId || id.startsWith(`${reportId}:retry:`)).at(-1);
+  const crossTeams = [...new Set([...assignments.map(({ teamId }) => teamId), ...(job.parts ?? []).flatMap(({ teamId }) => teamId ? [teamId] : [])])]
+    .filter((teamId) => teamId !== job.agentId);
   return {
-    id: job.id, chatId, title: job.summary, lead: job.agentId, requester: owner ? "owner" : "member", status: job.status, delivery: last ? last.state : "none",
+    id: job.id, label: displayId(job.id), chatId, title: job.summary, lead: job.agentId, requester: owner ? "owner" : "member", status: job.status,
+    delivery: last ? last.state : "none",
     receivedAt: job.event.receivedAt, result: job.result ?? null,
     message: { text: job.event.text, source: job.event.source, attachments: (job.event.attachments ?? []).map(({ fileName }) => fileName) },
-    assignments: assignments.map((assignment) => ({ id: assignment.id, teamId: assignment.teamId, executor: assignment.executor, profile: assignment.profileName,
-      title: assignment.title, brief: assignment.brief, status: assignment.status, result: assignment.result ?? null, crossTeam: assignment.teamId !== job.agentId })),
+    assignments: assignments.map((assignment) => ({ id: assignment.id, label: displayId(assignment.id), teamId: assignment.teamId, executor: assignment.executor,
+      profile: assignment.profileName, title: assignment.title, brief: assignment.brief, status: assignment.status, result: assignment.result ?? null,
+      crossTeam: assignment.teamId !== job.agentId })),
+    crossTeams,
     parts: (job.parts ?? []).map(({ title, teamId }) => ({ title, teamId })),
     posts: posts.map(({ id, agentId, text, state, acceptedAt }) => ({ agentId, kind: kindOf(id), text, state, acceptedAt })),
   };
+}
+
+/** The frames under a Team Leader's card: each request of the group in which the team has a running or waiting Assignment. */
+function frames(requests: readonly OverviewRequest[], teamId: string): Array<{ request: string; assignments: string[] }> {
+  return requests.flatMap((request) => {
+    const shown = request.assignments.filter((assignment) => assignment.teamId === teamId && (assignment.status === "running" || assignment.status === "waiting"));
+    return shown.length ? [{ request: request.id, assignments: shown.map(({ id }) => id) }] : [];
+  });
 }
 
 /**
@@ -174,4 +216,3 @@ function counts(requests: readonly OverviewRequest[], teamId: string): TeamCount
   return result;
 }
 
-const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
