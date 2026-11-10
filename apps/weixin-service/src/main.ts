@@ -82,6 +82,8 @@ import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } fr
 import { TeamManagement } from "./team-management.js";
 import { TeamAnnouncements } from "./team-announcements.js";
 import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
+import { DispatchGroupSettings, type DispatchGroupRequest } from "./dispatch-group-settings.js";
+import { GroupNames } from "./group-names.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement } from "./fixture-team-leader.js";
@@ -217,6 +219,10 @@ const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
 const fixtureOnboarding = fixtureMode ? new FixtureOnboardingPlatform() : undefined;
 if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixtureOnboarding.configure(JSON.parse(process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING));
+const onboardingPlatform = fixtureOnboarding ?? new FeishuHttpOnboardingPlatform();
+// Group names read with Sam's application, shared by team management and the dispatch-group form, which also shows them without dispatch.
+const pairedFeishu = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
+const groupNames = pairedFeishu ? new GroupNames(onboardingPlatform, pairedFeishu.connection) : undefined;
 let teamManagement: TeamManagement | undefined;
 // Set once the dispatch applications exist; a roster change before that has nothing to start.
 let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () => {};
@@ -234,7 +240,7 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
   try {
     registry.importLocalConfiguration(local, { executorHostTools: workflowToolCatalog.memberIds(), coordinatorAppId: entry.connection.appId });
     const management = new TeamManagement({ registry, coordinator: entry.connection,
-      platform: fixtureOnboarding ?? new FeishuHttpOnboardingPlatform(),
+      platform: onboardingPlatform, ...(groupNames ? { groupNames } : {}),
       announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
       audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(),
       moduleScopes: () => ["notes", "local-media"].flatMap((moduleId) => {
@@ -1250,8 +1256,19 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
 const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
 // The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
 const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
-const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}),
-  dispatchSetup: { configurationPath: channelConfigurationPath, feishu: Boolean(channelConfiguration?.entries.some((entry) => entry.channel === "feishu")) } });
+// The dispatch-group form writes the channel configuration file this service loaded; a save applies at the next start (agent-console::US-009).
+const UNFINISHED_DISPATCH = new Set(["proposed", "queued", "running", "waiting"]);
+const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigurationPath, running: feishuConfiguration?.dispatch?.groupChatIds ?? [],
+  unfinished: () => {
+    const byGroup: Record<string, DispatchGroupRequest[]> = {};
+    for (const job of agentDispatch?.getState().jobs ?? []) {
+      const chatId = UNFINISHED_DISPATCH.has(job.status) ? feishuConfiguration!.owner.deliveryTarget(job.accountId, job.target) : undefined;
+      if (chatId) (byGroup[chatId] ??= []).push({ summary: job.summary, status: job.status as DispatchGroupRequest["status"] });
+    }
+    return byGroup;
+  },
+  names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}), audit: consoleAudit });
+const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),

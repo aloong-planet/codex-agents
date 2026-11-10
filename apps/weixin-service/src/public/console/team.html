@@ -12,8 +12,8 @@
 <main class="acv2-main">
 <div class="acv2-heading"><div class="acv-tip-row"><h1>团队管理</h1><span data-console-tip="定义团队并绑定到群。
 · 保存后新事务使用新配置，进行中的事务保持开始时的配置。
-· 收回能力（取消勾选工具）立即生效，进行中的执行者下一次调用就会被拒绝。"></span></div><div class="atm-heading-actions"><a class="acv2-button" href="/console/mcp">MCP 管理</a><button class="acv2-button acv2-primary" type="button" id="atm-new" hidden>新增团队</button></div></div>
-<div class="acv2-workspace"><div class="atm-view" id="atm-view"></div></div>
+· 收回能力（取消勾选工具）立即生效，进行中的执行者下一次调用就会被拒绝。"></span></div><div class="atm-heading-actions"><button class="acv2-button" type="button" id="atm-dc-open" data-dc-open hidden>派单群设置</button><a class="acv2-button" href="/console/mcp">MCP 管理</a><button class="acv2-button acv2-primary" type="button" id="atm-new" hidden>新增团队</button></div></div>
+<div class="acv2-workspace"><div class="atm-view" id="atm-view"></div><aside class="acv2-drawer" id="atm-dc-drawer" aria-label="派单群设置" hidden><div class="acv2-drawer-head"><div><div class="acv2-eyebrow">飞书派单</div><h2>派单群设置</h2></div><div class="acv2-drawer-actions"><button class="acv3-icon-close" type="button" data-dc-close aria-label="关闭抽屉"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></div></div><div class="acv2-drawer-scroll"><div id="atm-dc-body"></div></div></aside><div class="acv2-mask" data-dc-close></div></div>
 </main></div>
 <script src="/console/console-shell.js"></script>
 <script src="/console/team.js"></script>

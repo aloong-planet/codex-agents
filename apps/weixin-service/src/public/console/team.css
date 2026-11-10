@@ -59,7 +59,25 @@
 .acf-savebar[data-state="error"] .acf-row-actions{margin-top:0}
 .atm-save-err{flex:1;min-width:220px;color:var(--acv-error);font-size:11px;line-height:1.7}
 .atm-save-err ul{margin:2px 0 0;padding-left:18px}
-/* Without Feishu dispatch: where dispatch is enabled, with the configuration file's path on its own line. */
+/* Without Feishu paired: the pairing command on its own line. */
 .acv2-empty .atm-empty-body{max-width:460px;margin:0 auto;text-align:left}
 .atm-empty-path{display:block;margin:6px 0;padding:6px 8px;border-radius:5px;background:var(--acv-soft);font:10px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--acv-ink);overflow-wrap:anywhere}
+/* Dispatch groups (agent-console::US-009): the form in the 未配置 panel or the drawer, the running/saved comparison, refused
+   requests, and the strip above the team list while a saved change waits for a restart. */
+.atm-dc-wrap{max-width:520px;margin:0 auto;padding:0 16px 20px}
+.atm-dc-intro{margin:14px 0 0;font-size:11px;line-height:1.7;color:var(--acv-muted)}
+.atm-dc-groups{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.atm-dc-group{padding:7px 9px;border:1px solid var(--acv-line);border-radius:7px}
+.atm-dc-group small{display:block;font-size:10px;color:var(--acv-muted);font-family:ui-monospace,SFMono-Regular,monospace}
+.atm-dc-group code{font:11px/1.5 ui-monospace,SFMono-Regular,monospace}
+.atm-dc-compare{margin:12px 0 0;display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 12px;padding:9px 11px;border:1px solid var(--acv-warning);border-radius:8px;font-size:11px}
+.atm-dc-compare dt{color:var(--acv-muted)}
+.atm-dc-compare dd{margin:0;color:var(--acv-ink);overflow-wrap:anywhere}
+.atm-dc-busy{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-direction:column;gap:3px}
+.atm-dc-busy small{color:var(--acv-muted);font-size:10px;margin-left:6px}
+.atm-dc-pending{flex:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border:1px solid var(--acv-warning);border-radius:10px;background:var(--acv-paper);font-size:11px;color:var(--acv-ink)}
+/* The strip is in the markup while nothing waits for a restart; its display rule must not override the hidden attribute. */
+.atm-dc-pending[hidden]{display:none}
+.atm-link{border:0;background:transparent;padding:0;color:var(--acv-brand);font-size:11px;text-align:left}
+.atm-link:hover{text-decoration:underline}
 @media(max-width:899px){.atm-a{grid-template-columns:1fr;grid-template-rows:200px minmax(0,1fr)}}
