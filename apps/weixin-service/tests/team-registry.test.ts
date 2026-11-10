@@ -500,6 +500,23 @@ describe("QR creation of a team's application", () => {
     } finally { registry.close(); }
   });
 
+  // Two pages hold the team (team-management failure modes: "Two browser tabs edit the same team"). The 接入方式 is one of the
+  // team's editable fields: a page that still shows the old one must reload before it can end, or start, a QR creation.
+  it.each([
+    ["chose QR creation", "existing", "qr", "existing", { status: "waiting", at: 200 }],
+    ["chose an existing application", "qr", "existing", "qr", undefined],
+  ] as const)("refuses a save from a page that loaded the team before another page %s", (_case, first, second, stale, creation) => {
+    const { registry, seeded: seededVersion } = seeded();
+    try {
+      const edit = editOf(seededVersion.definitions, "bill");
+      const loaded = registry.saveTeam({ ...edit, method: first }, { basedOn: 1, at: 100 }).version.version;
+      registry.saveTeam({ ...edit, method: second }, { basedOn: loaded, at: 200 });
+      const before = registry.current();
+      expect(() => registry.saveTeam({ ...edit, method: stale, responsibility: "另一页的修改" }, { basedOn: loaded, at: 300 })).toThrow(/^team_registry_version_stale$/);
+      expect([registry.current(), registry.creation("bill")]).toEqual([before, creation]);
+    } finally { registry.close(); }
+  });
+
   it.each([
     ["a malformed App ID", { appId: "cli_not-an-app", appSecret: "created-secret-SENTINEL" }, {}],
     ["another team's application", { appId: "cli_3333333333333333", appSecret: "created-secret-SENTINEL" }, {}],
@@ -554,7 +571,11 @@ describe("QR creation of a team's application", () => {
     try {
       expect([registry.creation("bill"), registry.creation("alice")]).toEqual([{ status: "action", reason: "interrupted", at: 100 }, { status: "done", appId: CREATED.appId, at: 300 }]);
       expect(registry.testMessages(BILL_APP)).toEqual({ oc_alpha: { status: "unknown", at: 310 }, oc_beta: { status: "accepted", at: 311 } });
+      // The open that interrupted a wait names its team, so that the start can audit it; a later open has nothing to name.
+      expect(registry.interruptedCreations).toEqual(["bill"]);
     } finally { registry.close(); }
+    const later = new TeamRegistry(path);
+    try { expect([later.interruptedCreations, later.creation("bill")?.status]).toEqual([[], "action"]); } finally { later.close(); }
   });
 
   it("keeps the outcomes of configuration, release and test messages per application, and forgets them with it", () => {

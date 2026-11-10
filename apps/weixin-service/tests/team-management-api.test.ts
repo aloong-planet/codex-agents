@@ -29,19 +29,26 @@ const SECRET_SENTINEL = "api-secret-SENTINEL-41c9";
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step(); });
 
-async function start(options: { now?: () => number } = {}) {
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "team-api-"));
-  cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
+/**
+ * Starts the service's team management on a new state directory, or on `work`, the directory of an earlier start that was
+ * stopped, as a restart does. `stop` ends this start; whatever is still running when the case ends is stopped then.
+ */
+async function start({ work: earlier, ...options }: { now?: () => number; reservedApplications?: () => Record<string, string>; work?: string } = {}) {
+  const work = earlier ?? fs.mkdtempSync(path.join(os.tmpdir(), "team-api-"));
+  if (!earlier) cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
+  const steps: Array<() => Promise<void> | void> = [];
+  const stop = async () => { for (const step of steps.splice(0).reverse()) await step(); };
+  cleanup.push(stop);
   const state = path.join(work, "state");
   const home = path.join(work, "home");
-  fs.mkdirSync(home);
+  fs.mkdirSync(home, { recursive: true });
   const audit = new ConsoleAudit({ directory: state });
   const access = new ConsoleAccess({ directory: state, audit });
   const catalog = new McpCatalog({ stateDirectory: state, homeDirectory: home, audit, retryMs: 60_000, refreshMs: 0 });
-  cleanup.push(() => catalog.close());
+  steps.push(() => catalog.close());
   const registry = new TeamRegistry(path.join(state, "team-registry.sqlite"));
   const announcements = new TeamAnnouncements(path.join(state, "team-announcements.sqlite"));
-  cleanup.push(() => { registry.close(); announcements.close(); });
+  steps.push(() => { registry.close(); announcements.close(); });
   const parsed = parseChannelStartupConfiguration({ channel: "feishu",
     owner: { memoryAccountId: "owner-memory", bindings: [{ channel: "feishu", accountId: SAM.appId, target: "oc_private", senderId: "ou_owner" }] },
     taskScope: { accountId: "owner-memory", target: "oc_private" },
@@ -55,10 +62,11 @@ async function start(options: { now?: () => number } = {}) {
   platform.configure({ chats: { oc_alpha: { name: "银河护卫队" } } });
   const teams = new TeamManagement({ registry, coordinator: SAM, platform, announcements, audit, catalogToolIds: PRODUCTION_TOOL_IDS,
     moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => ({}), rosterChanged: () => {}, report: () => {}, ...options });
+  steps.push(() => teams.close());
   const server: Server = createChannelStatusServer(() => ({}), undefined, access, createConsoleRoutes({ catalog, teams }));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
-  cleanup.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  steps.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("missing address");
   const origin = `http://127.0.0.1:${address.port}`;
@@ -79,7 +87,7 @@ async function start(options: { now?: () => number } = {}) {
     return { status: response.status, type: response.headers.get("content-type"), text };
   };
   const auditEntries = () => fs.readFileSync(path.join(state, AUDIT_FILE), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { request, fetched, bodies, auditEntries, state, platform, teams };
+  return { request, fetched, bodies, auditEntries, state, work, platform, teams, stop };
 }
 
 const daisy = { teamName: "设计团队", responsibility: "视觉方案", groups: ["oc_alpha"], leader: { name: "Daisy", appId: "cli_dddddddddddddddd", instructions: "" },
@@ -250,8 +258,8 @@ describe("QR creation through the team management API", () => {
       ["team_application_created", "service", undefined]]);
   });
 
-  it("ends a team's QR creation when it is saved as an existing application", async () => {
-    const { request, fetched, auditEntries, platform } = await start();
+  it("ends a team's QR creation when it is saved as an existing application, and names an application its code creates afterwards as unused", async () => {
+    const { request, fetched, bodies, auditEntries, platform } = await start();
     const first = (await request("/api/teams")).body;
     const teamId = (await request("/api/teams/save", { basedOn: first.version, team: qrDaisy })).body.teamId as string;
     await teamWhen(request, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
@@ -261,10 +269,60 @@ describe("QR creation through the team management API", () => {
     expect(saved.status).toBe(200);
     const team = (saved.body.view.teams as Team[]).find(({ id }) => id === teamId)!;
     expect([team.method, team.creation, team.leader.appId, (await fetched(`/api/teams/qr?team=${teamId}`)).status]).toEqual(["existing", undefined, "cli_dddddddddddddddd", 404]);
-    // The code no longer waits for a scan.
-    expect(() => platform.configure({ scan: "confirmed" })).toThrow("fixture_onboarding_no_creation_waiting");
+    // The code is still valid at Feishu. The owner confirms it on the phone: the team keeps the application it was saved with.
+    platform.configure({ scan: "confirmed" });
+    const unused = await vi.waitFor(() => {
+      const entry = auditEntries().find(({ team: audited, event }) => audited === teamId && event === "team_application_qr_failed");
+      expect(entry).toBeDefined();
+      return entry!;
+    }, { timeout: 5000, interval: 20 });
+    expect([unused.by, unused.reason, unused.appId]).toEqual(["service", "abandoned", CREATED_APP]);
+    const after = ((await request("/api/teams")).body.teams as Team[]).find(({ id }) => id === teamId)!;
+    expect([after.method, after.creation, after.leader.appId]).toEqual(["existing", undefined, "cli_dddddddddddddddd"]);
+    for (const body of bodies) expect(body).not.toContain(CREATED_SECRET);
+    expect(JSON.stringify(auditEntries())).not.toContain(CREATED_SECRET);
     expect(auditEntries().filter(({ team: audited, event }) => audited === teamId && event === "team_changed").map(({ changed, method }) => [changed, method]))
       .toEqual([[["created"], "qr"], [["leader.appId", "method"], "existing"]]);
+  });
+
+  // Owner decision D2 (2026-11-11): the scan replaces the application a team already has, and the audit names both.
+  it("audits the application a scan replaced", async () => {
+    const { request, auditEntries, platform } = await start();
+    const first = (await request("/api/teams")).body;
+    expect((await request("/api/teams/save", { basedOn: first.version, team: { ...unchangedBill(first), method: "qr" } })).status).toBe(200);
+    await teamWhen(request, "bill", ({ creation }) => typeof creation?.codeExpiresAt === "number");
+    platform.configure({ scan: "confirmed" });
+    await teamWhen(request, "bill", ({ creation }) => creation?.status === "done");
+    expect(auditEntries().filter(({ event }) => event === "team_application_created").map(({ team, by, appId, replaced }) => [team, by, appId, replaced]))
+      .toEqual([["bill", "service", CREATED_APP, "cli_2222222222222222"]]);
+  });
+
+  // An application reserved outside the registry, as Penny's is (ADR-0025), never becomes a team's, even when a scan created it.
+  it("does not give a team a created application that is reserved, and audits it as unused", async () => {
+    const { request, auditEntries, platform } = await start({ reservedApplications: () => ({ [CREATED_APP]: "该飞书应用已用于 Penny，不能用于团队" }) });
+    const first = (await request("/api/teams")).body;
+    const teamId = (await request("/api/teams/save", { basedOn: first.version, team: qrDaisy })).body.teamId as string;
+    await teamWhen(request, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
+    platform.configure({ scan: "confirmed" });
+    const refused = await teamWhen(request, teamId, ({ creation }) => creation?.status === "action");
+    expect([refused.creation, refused.leader.appId, refused.secretStored]).toEqual([{ status: "action", reason: "unusable" }, "", false]);
+    expect(auditEntries().filter(({ team, event }) => team === teamId && event === "team_application_qr_failed").map(({ by, reason, appId }) => [by, reason, appId]))
+      .toEqual([["service", "unusable", CREATED_APP]]);
+  });
+
+  // A code's wait ends with the process. Whether the owner confirmed it afterwards cannot be learned, so the start that finds
+  // it says so in the audit (team-registry.test.ts: only the store's next open names the team).
+  it("audits, at the next start, a code that waited when the service stopped", async () => {
+    const before = await start();
+    const first = (await before.request("/api/teams")).body;
+    const teamId = (await before.request("/api/teams/save", { basedOn: first.version, team: qrDaisy })).body.teamId as string;
+    await teamWhen(before.request, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
+    await before.stop();
+    const restarted = await start({ work: before.work });
+    await restarted.teams.resume();
+    expect(((await restarted.request("/api/teams")).body.teams as Team[]).find(({ id }) => id === teamId)!.creation).toEqual({ status: "action", reason: "interrupted" });
+    expect(restarted.auditEntries().filter(({ team, event }) => team === teamId && event === "team_application_qr_failed").map(({ by, reason, appId }) => [by, reason, appId]))
+      .toEqual([["service", "interrupted", undefined]]);
   });
 
   // Step 6 (owner decision of 2026-11-11): the team's own application posts one message to each group it accepts work in, only

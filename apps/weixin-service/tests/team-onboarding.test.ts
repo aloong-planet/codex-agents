@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { gunzipSync } from "node:zlib";
 import * as lark from "@larksuiteoapi/node-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -167,10 +168,10 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
     const onboarding = new TeamOnboarding(registry, platform, SAM, () => 1_000, { creationEnded: (end) => { ends.push(end); waiting?.(); }, reserved: () => reserved });
     const daisyId = opened?.teamId ?? registry.current()!.definitions.teams.find(({ teamName }) => teamName === "设计团队")!.id;
     return { registry, path: opened?.path ?? path!, platform, onboarding, ends, teamId: daisyId,
-      /** Ends the code that waits for its scan, and resolves once the creation has ended. */
-      scan: async (answer: "confirmed" | "expired" | "denied" | "failed" | "unreachable") => {
+      /** Ends the code the page shows, or the nth code the platform gave, and resolves once that has been reported. */
+      scan: async (answer: "confirmed" | "expired" | "denied" | "failed" | "unreachable", code?: number) => {
         const ended = new Promise<void>((resolve) => { waiting = resolve; });
-        platform.configure({ scan: answer });
+        platform.configure({ scan: answer, ...(code === undefined ? {} : { code }) });
         await ended;
       } };
   }
@@ -193,8 +194,9 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
       await scan("confirmed");
       expect([ends, registry.creation(teamId), onboarding.creationLink(teamId), team(registry, teamId).leader.appId, registry.secret(CREATED_APP)])
         .toEqual([[{ teamId, created: CREATED_APP }], { status: "done", appId: CREATED_APP, at: 1_000 }, undefined, CREATED_APP, "fixture-created-secret-1"]);
-      // The scan is over: asking again shows no new code and changes nothing.
+      // The scan is over: asking again shows no new code and changes nothing. Nor is a code asked for a team that does not exist.
       await onboarding.requestCreation(teamId);
+      await onboarding.requestCreation("team-unknown");
       expect([onboarding.creationLink(teamId), registry.creation(teamId)?.status, platform.calls.length]).toEqual([undefined, "done", 1]);
     } finally { registry.close(); }
   });
@@ -214,32 +216,56 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
     } finally { registry.close(); }
   });
 
-  it("records that no code was obtained when the platform cannot be reached", async () => {
-    const { registry, platform, onboarding, ends, teamId } = qrOnboarding();
+  class BrokenPlatform extends FixtureOnboardingPlatform {
+    override async createApplication(): Promise<never> { throw new Error("socket hang up"); }
+  }
+  it.each([
+    ["cannot be reached", () => { const platform = new FixtureOnboardingPlatform(); platform.configure({ link: "unreachable" }); return platform; }],
+    ["fails the request", () => new BrokenPlatform()],
+  ] as const)("records that no code was obtained when the platform %s", async (_case, platform) => {
+    const { registry, onboarding, ends, teamId } = qrOnboarding(undefined, platform());
     try {
-      platform.configure({ link: "unreachable" });
       await onboarding.requestCreation(teamId);
       expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)]).toEqual([[{ teamId, failed: "unreachable" }], { status: "action", reason: "unreachable", at: 1_000 }, undefined]);
     } finally { registry.close(); }
   });
 
-  it("replaces a code that waits for its scan with a new one, without recording the old one as failed", async () => {
-    const { registry, platform, onboarding, ends, teamId, scan } = qrOnboarding();
+  // 刷新二维码 while a code waits. Feishu keeps the old code valid, so whichever the owner confirms first gives the team its
+  // application; the other one, confirmed afterwards, created an application the team does not use.
+  it.each([
+    ["the new code", 2, 1],
+    ["the code it replaced", 1, 2],
+  ] as const)("shows a new code in place of one that waits, and gives the team the application of %s when that is confirmed first", async (_case, first, second) => {
+    const { registry, onboarding, ends, teamId, scan } = qrOnboarding();
     try {
       await onboarding.requestCreation(teamId);
       await onboarding.requestCreation(teamId);
-      expect([ends, registry.creation(teamId)?.status, onboarding.creationLink(teamId)?.url, platform.calls.length])
-        .toEqual([[], "waiting", "https://accounts.feishu.cn/fixture/registration?create=2", 2]);
-      // Only the new code is left to scan, and its application is attached once.
-      await scan("confirmed");
-      expect([ends, team(registry, teamId).leader.appId]).toEqual([[{ teamId, created: CREATED_APP }], CREATED_APP]);
-      expect(() => platform.configure({ scan: "confirmed" })).toThrow("fixture_onboarding_no_creation_waiting");
+      expect([ends, registry.creation(teamId)?.status, onboarding.creationLink(teamId)?.url]).toEqual([[], "waiting", "https://accounts.feishu.cn/fixture/registration?create=2"]);
+      await scan("confirmed", first);
+      expect([ends, team(registry, teamId).leader.appId, registry.creation(teamId), onboarding.creationLink(teamId)])
+        .toEqual([[{ teamId, created: CREATED_APP }], CREATED_APP, { status: "done", appId: CREATED_APP, at: 1_000 }, undefined]);
+      await scan("confirmed", second);
+      expect([ends.slice(1), team(registry, teamId).leader.appId, registry.hasSecret("cli_c0de000000000002")])
+        .toEqual([[{ teamId, failed: "abandoned", unused: "cli_c0de000000000002" }], CREATED_APP, false]);
     } finally { registry.close(); }
   });
 
-  // 刷新二维码 pressed while the first code's link is still on its way: the first request ends as cancelled after the second
-  // one has its code, and must not take that code away.
-  it("lets a request that was replaced before its link arrived end without touching the new code", async () => {
+  // A replaced code that Feishu settles without an application says nothing about the team. Its lost connection is reported,
+  // because a later confirmation of that code can no longer be learned; the code the page shows is not touched.
+  it("says nothing when a replaced code runs out, and reports its lost connection without changing the code the page shows", async () => {
+    const { registry, platform, onboarding, ends, teamId, scan } = qrOnboarding();
+    try {
+      for (let code = 1; code <= 3; code++) await onboarding.requestCreation(teamId);
+      platform.configure({ scan: "expired", code: 1 });
+      await scan("unreachable", 2);
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)?.url])
+        .toEqual([[{ teamId, failed: "connection_lost" }], { status: "waiting", at: 1_000 }, "https://accounts.feishu.cn/fixture/registration?create=3"]);
+    } finally { registry.close(); }
+  });
+
+  // 刷新二维码 pressed while the first code's link is still on its way: nobody saw that code, so its request is aborted, and it
+  // must not take the second code away when it ends.
+  it("aborts a request that was replaced before its link arrived, without touching the new code", async () => {
     class SlowFirstLink extends FixtureOnboardingPlatform {
       release: () => void = () => {};
       private first = true;
@@ -256,42 +282,62 @@ describe("onboarding a team by QR creation (steps 1 to 5)", () => {
       await onboarding.requestCreation(teamId);
       platform.release();
       await replaced;
-      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)?.url]).toEqual([[], { status: "waiting", at: 1_000 }, "https://accounts.feishu.cn/fixture/registration?create=1"]);
+      // The aborted request never reached the platform: the only code it gave is the second request's.
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId)?.url, platform.calls.length])
+        .toEqual([[], { status: "waiting", at: 1_000 }, "https://accounts.feishu.cn/fixture/registration?create=1", 1]);
     } finally { registry.close(); }
   });
 
-  it.each([
-    ["the team leaves QR creation", (onboarding: TeamOnboarding, teamId: string) => onboarding.endCreation(teamId)],
-    ["the service stops", (onboarding: TeamOnboarding) => onboarding.close()],
-  ] as const)("ends the wait for the scan without an outcome when %s", async (_case, end) => {
+  it("stops listening to every code when the service stops, and records no outcome", async () => {
     const { registry, platform, onboarding, ends, teamId } = qrOnboarding();
     try {
       await onboarding.requestCreation(teamId);
-      end(onboarding, teamId);
-      expect(() => platform.configure({ scan: "confirmed" })).toThrow("fixture_onboarding_no_creation_waiting");
-      // Whatever the ended wait still reports has been delivered by the next turn of the event loop.
+      await onboarding.requestCreation(teamId);
+      onboarding.close();
+      for (const code of [1, 2]) expect(() => platform.configure({ scan: "confirmed", code })).toThrow("fixture_onboarding_no_creation_waiting");
+      // Whatever the ended waits still report has been delivered by the next turn of the event loop.
       await new Promise((resolve) => setImmediate(resolve));
       expect([ends, onboarding.creationLink(teamId), registry.creation(teamId)]).toEqual([[], undefined, { status: "waiting", at: 1_000 }]);
     } finally { registry.close(); }
   });
 
-  // An application the scan created in Feishu but that no team uses is named, so that the owner can remove it there.
-  it("reports an application created just as the wait ended, without giving it to the team", async () => {
-    class LateScan extends FixtureOnboardingPlatform {
-      confirm: () => void = () => {};
-      override async createApplication() {
-        return { url: "https://accounts.feishu.cn/fixture/registration?late", expiresInSeconds: 600,
-          result: new Promise<{ appId: string; appSecret: string }>((resolve) => { this.confirm = () => resolve({ appId: "cli_abcdefabcdefabcd", appSecret: "late-secret" }); }) };
-      }
-    }
-    const { registry, platform, onboarding, ends, teamId } = qrOnboarding(undefined, new LateScan());
+  // The scan created an application in Feishu, and the store refuses to keep it. The application is named, so that the owner
+  // can remove it in Feishu. The store is made to fail by real means: a trigger on the secrets table, and a closed database.
+  it("needs action and names the created application when it cannot be stored", async () => {
+    const { registry, path, onboarding, ends, teamId, scan } = qrOnboarding();
     try {
       await onboarding.requestCreation(teamId);
-      onboarding.endCreation(teamId);
-      platform.confirm();
-      await new Promise((resolve) => setImmediate(resolve));
-      expect([ends, team(registry, teamId).leader.appId, registry.hasSecret("cli_abcdefabcdefabcd")]).toEqual([[{ teamId, failed: "abandoned", unused: "cli_abcdefabcdefabcd" }], "", false]);
+      const store = new DatabaseSync(path);
+      try { store.exec("CREATE TRIGGER secret_refused BEFORE INSERT ON application_secret BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END"); } finally { store.close(); }
+      await scan("confirmed");
+      expect([ends, registry.creation(teamId), onboarding.creationLink(teamId), team(registry, teamId).leader.appId, registry.hasSecret(CREATED_APP)])
+        .toEqual([[{ teamId, failed: "failed", unused: CREATED_APP }], { status: "action", reason: "failed", at: 1_000 }, undefined, "", false]);
     } finally { registry.close(); }
+  });
+
+  it("names the created application when the store is unavailable, and leaves the creation for the next start to record as interrupted", async () => {
+    const { registry, path, onboarding, ends, teamId, scan } = qrOnboarding();
+    await onboarding.requestCreation(teamId);
+    registry.close();
+    await scan("confirmed");
+    expect([ends, onboarding.creationLink(teamId)]).toEqual([[{ teamId, failed: "failed", unused: CREATED_APP }], undefined]);
+    const reopened = new TeamRegistry(path);
+    try {
+      expect([reopened.creation(teamId), reopened.hasSecret(CREATED_APP)]).toEqual([{ status: "action", reason: "interrupted", at: 1_000 }, false]);
+    } finally { reopened.close(); }
+  });
+
+  // The store is unavailable when a code runs out: nothing can be recorded or reported, and nothing is left unhandled; the
+  // run fails on an unhandled rejection otherwise.
+  it("leaves a code whose end cannot be recorded for the next start to record as interrupted", async () => {
+    const { registry, path, platform, onboarding, ends, teamId } = qrOnboarding();
+    await onboarding.requestCreation(teamId);
+    registry.close();
+    platform.configure({ scan: "expired" });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect([ends, onboarding.creationLink(teamId)]).toEqual([[], undefined]);
+    const reopened = new TeamRegistry(path);
+    try { expect(reopened.creation(teamId)).toEqual({ status: "action", reason: "interrupted", at: 1_000 }); } finally { reopened.close(); }
   });
 
   it("does not give the team a created application that is reserved for another use, and reports it as unused", async () => {
@@ -545,8 +591,11 @@ describe("creating an application by QR code (step 1)", () => {
   afterEach(() => { vi.restoreAllMocks(); });
   const REGISTRATION = "https://accounts.feishu.cn/oauth/v1/app/registration";
   const CREATED = { client_id: "cli_9f8e7d6c5b4a3210", client_secret: "created-secret", user_info: { open_id: "ou_owner", tenant_brand: "feishu" } };
-  type Poll = Record<string, unknown> | Error | "never";
-  /** The registration endpoint: `begin` answers with a link (or fails), then each poll takes the next answer; the last one repeats. */
+  type Poll = Record<string, unknown> | Error | "never" | Promise<Record<string, unknown>>;
+  /**
+   * The registration endpoint: `begin` answers with a link (or fails), then each poll takes the next answer; the last one repeats.
+   * A promise is a poll still in flight, answered when the case resolves it.
+   */
   function registration(polls: Poll[], begin: Record<string, unknown> | Error | "never" = { verification_uri_complete: "https://accounts.feishu.cn/oauth/v1/app/confirm?user_code=WXYZ-1234",
     device_code: "device-code-1", interval: 0, expires_in: 600 }) {
     const requests: Array<Record<string, string>> = [];
@@ -607,5 +656,48 @@ describe("creating an application by QR code (step 1)", () => {
   ] as const)("gives no link when the platform %s", async (_case, begin) => {
     registration([CREATED], begin);
     expect(await new FeishuHttpOnboardingPlatform(undefined, { linkTimeoutMs: 50 }).createApplication(PRESET, new AbortController().signal)).toBe("unreachable");
+  });
+
+  // The owner confirms on the phone while the poll that will say so is in flight. Feishu creates the application whatever the
+  // service does next, and the SDK stops polling a wait that is aborted: so a code that was shown is listened to until Feishu
+  // settles it. These two cases drive the onboarding run with the real adapter, because only the SDK shows what an abort loses.
+  function waitingForScan(confirmation: Promise<Record<string, unknown>>) {
+    registration([confirmation, "never"]);
+    const { registry, teamId } = registryWithDaisy(null, { ...daisy, method: "qr", leader: { ...daisy.leader, appId: "" } });
+    const ends: CreationEnd[] = [];
+    let ended: () => void = () => {};
+    const onboarding = new TeamOnboarding(registry, new FeishuHttpOnboardingPlatform(), SAM, () => 1_000, { creationEnded: (end) => { ends.push(end); ended(); } });
+    /** Resolves when a code's end is reported. The limit only lets a case that reports nothing fail on its assertion instead of hanging. */
+    const settled = () => new Promise<void>((resolve) => { ended = resolve; setTimeout(resolve, 5_000).unref(); });
+    return { registry, teamId, ends, onboarding, settled };
+  }
+  const appOf = (registry: TeamRegistry, teamId: string) => registry.current()!.definitions.teams.find(({ id }) => id === teamId)!.leader.appId;
+
+  it("gives the team the application of a code that 刷新二维码 had replaced, when that code is the one confirmed", async () => {
+    let confirm: (answer: Record<string, unknown>) => void = () => {};
+    const { registry, teamId, ends, onboarding, settled } = waitingForScan(new Promise((resolve) => { confirm = resolve; }));
+    try {
+      await onboarding.requestCreation(teamId);
+      await onboarding.requestCreation(teamId);
+      const done = settled();
+      confirm(CREATED);
+      await done;
+      expect([ends, appOf(registry, teamId), registry.creation(teamId), onboarding.creationLink(teamId)])
+        .toEqual([[{ teamId, created: "cli_9f8e7d6c5b4a3210" }], "cli_9f8e7d6c5b4a3210", { status: "done", appId: "cli_9f8e7d6c5b4a3210", at: 1_000 }, undefined]);
+    } finally { onboarding.close(); registry.close(); }
+  });
+
+  it("names an application confirmed after the team was saved as an existing application as unused, and does not give it to the team", async () => {
+    let confirm: (answer: Record<string, unknown>) => void = () => {};
+    const { registry, teamId, ends, onboarding, settled } = waitingForScan(new Promise((resolve) => { confirm = resolve; }));
+    try {
+      await onboarding.requestCreation(teamId);
+      registry.saveTeam({ ...daisy, id: teamId, method: "existing", executorProfiles: [{ ...daisy.executorProfiles[0]!, id: "executor-1" }] }, { basedOn: registry.current()!.version, secret: "daisy-secret" });
+      onboarding.endCreation(teamId);
+      const done = settled();
+      confirm(CREATED);
+      await done;
+      expect([ends, appOf(registry, teamId), registry.hasSecret("cli_9f8e7d6c5b4a3210")]).toEqual([[{ teamId, failed: "abandoned", unused: "cli_9f8e7d6c5b4a3210" }], DAISY_APP, false]);
+    } finally { onboarding.close(); registry.close(); }
   });
 });

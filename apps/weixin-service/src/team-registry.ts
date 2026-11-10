@@ -36,7 +36,8 @@ export type TeamDefinition = Readonly<{
   teamName: string;
   /** The team's entry in the Coordinator's dispatch list and every Team Directory. */
   responsibility: string;
-  leader: Readonly<{ name: string; appId: string; profile: AgentProfile }>;
+  /** `method` is how the team gets its application; absent means an existing one, as for every imported team. */
+  leader: Readonly<{ name: string; appId: string; method?: OnboardingMethod; profile: AgentProfile }>;
   executorProfiles: readonly ExecutorProfile[];
   bindings: readonly TeamBinding[];
 }>;
@@ -99,6 +100,8 @@ const COORDINATOR_TEAM_NAME = "总协调";
  */
 export class TeamRegistry {
   private readonly database: DatabaseSync;
+  /** The teams whose QR code still waited for its scan when the store was last closed; opening it recorded those creations as interrupted. */
+  readonly interruptedCreations: readonly string[];
 
   constructor(databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
@@ -111,8 +114,9 @@ export class TeamRegistry {
       CREATE TABLE IF NOT EXISTS onboarding_outcome (app_id TEXT NOT NULL, step TEXT NOT NULL, chat_id TEXT NOT NULL, status TEXT NOT NULL,
         reason TEXT, at INTEGER NOT NULL, PRIMARY KEY (app_id, step, chat_id));
       CREATE TABLE IF NOT EXISTS application_creation (team_id TEXT PRIMARY KEY, status TEXT NOT NULL, reason TEXT, app_id TEXT, at INTEGER NOT NULL);
-      UPDATE application_creation SET status = 'action', reason = 'interrupted' WHERE status = 'waiting';
       UPDATE onboarding_outcome SET status = 'unknown' WHERE step = 'test' AND status = 'sending';`);
+    this.interruptedCreations = this.database.prepare("UPDATE application_creation SET status = 'action', reason = 'interrupted' WHERE status = 'waiting' RETURNING team_id")
+      .all().map(({ team_id }) => String(team_id));
   }
 
   /**
@@ -169,10 +173,11 @@ export class TeamRegistry {
    * `secret` is written beside the versions, never into one, and the application's credentials are then checked again
    * (ticket 11, decision D7).
    *
+   * The 接入方式 (`method`) is one of the team's editable fields, so a save from a page that loaded another one is stale.
    * In QR creation (`method: "qr"`) the application is the service's to set: the team keeps the one it has, whatever App ID
    * or secret the save carries, and an application attached since `basedOn` does not make the save stale. The save that first
-   * chooses QR creation starts one creation; a save as an existing application ends it. Either counts as a console save even
-   * when nothing else changed. Returns the saved version, the team's ID and whether a creation was started or ended.
+   * chooses QR creation starts one creation; a save as an existing application ends it. Returns the saved version, the
+   * team's ID and whether a creation was started or ended.
    */
   saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number }>):
     Readonly<{ version: DefinitionsVersion; teamId: string; creation?: "started" | "ended" }> {
@@ -208,7 +213,8 @@ export class TeamRegistry {
       let next = 1;
       const freshId = () => { while (ids.has(`executor-${next}`)) next++; ids.add(`executor-${next}`); return `executor-${next}`; };
       const team: TeamDefinition = { id: teamId, teamName: edit.teamName.trim(), responsibility: edit.responsibility.trim(),
-        leader: { name: edit.leader.name.trim(), appId, profile: { instructions: edit.leader.instructions, hostTools: existing?.leader.profile.hostTools ?? [] } },
+        leader: { name: edit.leader.name.trim(), appId, ...(qr ? { method: "qr" as const } : {}),
+          profile: { instructions: edit.leader.instructions, hostTools: existing?.leader.profile.hostTools ?? [] } },
         executorProfiles: edit.executorProfiles.map((profile) => ({ id: profile.id ?? freshId(), name: profile.name.trim(),
           noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)] })),
         bindings };
@@ -216,8 +222,7 @@ export class TeamRegistry {
       if (qr) {
         if (this.database.prepare("INSERT OR IGNORE INTO application_creation (team_id, status, at) VALUES (?, 'waiting', ?)").run(teamId, options.at ?? Date.now()).changes) creation = "started";
       } else if (this.database.prepare("DELETE FROM application_creation WHERE team_id = ?").run(teamId).changes) creation = "ended";
-      // A change of method alone still gets its own console version: until the console has saved, each start imports the local roster again.
-      this.append({ ...definitions, teams }, latest.version, "console", creation !== undefined);
+      this.append({ ...definitions, teams }, latest.version, "console");
       if (!qr && options.secret !== undefined && appId) {
         this.database.prepare("INSERT INTO application_secret (app_id, secret) VALUES (?, ?) ON CONFLICT(app_id) DO UPDATE SET secret = excluded.secret").run(appId, options.secret);
         this.database.prepare("DELETE FROM onboarding_outcome WHERE app_id = ? AND step = 'credentials'").run(appId);
@@ -261,8 +266,7 @@ export class TeamRegistry {
       const team = latest?.definitions.teams.find(({ id }) => id === teamId);
       if (!latest || !team || !state || state.status === "done") return;
       const { definitions } = latest;
-      const taken = created.appId === definitions.coordinator.appId || definitions.teams.some(({ id, leader }) => id !== teamId && leader.appId === created.appId);
-      if (!APPLICATION_ID.test(created.appId) || taken || Object.hasOwn(options.reserved ?? {}, created.appId)) {
+      if (applicationReasons(created.appId, teamId, definitions, options.reserved ?? {}).length) {
         this.recordCreation(teamId, { status: "action", reason: "unusable" }, options.at);
         return;
       }
@@ -407,10 +411,10 @@ export class TeamRegistry {
     this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (1, NULL, 'local_configuration', ?)").run(JSON.stringify(definitions));
   }
 
-  /** Appends a version unless it equals the latest; a save that changes nothing leaves the version as it is, unless `always`. */
-  private append(definitions: TeamDefinitions, latest: number, source: DefinitionsVersion["source"], always = false): void {
+  /** Appends a version unless it equals the latest; a save that changes nothing leaves the version as it is. */
+  private append(definitions: TeamDefinitions, latest: number, source: DefinitionsVersion["source"]): void {
     const serialized = JSON.stringify(definitions);
-    if (!always && this.database.prepare("SELECT definitions FROM definitions_version WHERE version = ?").get(latest)?.definitions === serialized) return;
+    if (this.database.prepare("SELECT definitions FROM definitions_version WHERE version = ?").get(latest)?.definitions === serialized) return;
     this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (?, ?, ?, ?)").run(latest + 1, latest, source, serialized);
   }
 
@@ -458,10 +462,11 @@ function representable({ coordinator, dispatchGroups, teams }: TeamDefinitions):
 
 /**
  * The parts of a team the console edits; binding states are the registry's own, so they are not compared. In QR creation the
- * application is not the console's either (`application` false).
+ * application is not the console's either (`application` false), while the choice of QR creation itself always is.
  */
 function editable(team: TeamDefinition, application: boolean) {
-  return { teamName: team.teamName, responsibility: team.responsibility, leader: { name: team.leader.name, ...(application ? { appId: team.leader.appId } : {}), instructions: team.leader.profile.instructions },
+  return { teamName: team.teamName, responsibility: team.responsibility,
+    leader: { name: team.leader.name, ...(application ? { appId: team.leader.appId } : {}), method: team.leader.method ?? "existing", instructions: team.leader.profile.instructions },
     profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools })),
     groups: team.bindings.filter(({ state }) => state !== "draining" && state !== "removed").map(({ chatId }) => chatId) };
 }
@@ -477,12 +482,23 @@ function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Rea
   const duplicate = names.find((name, index) => name && names.indexOf(name) !== index);
   if (duplicate) reasons.push(`两个能力档同名：「${duplicate}」`);
   const appId = edit.leader.appId.trim();
-  if (appId && !APPLICATION_ID.test(appId)) reasons.push(`App ID ${appId} 格式不正确，应为 cli_ 加 16 位十六进制字符`);
+  if (appId) reasons.push(...applicationReasons(appId, edit.id, definitions, reserved));
+  return reasons;
+}
+
+/**
+ * Why a team may not use an application (team-management::REQ-002): its App ID is malformed, the Coordinator or another team
+ * uses it, or it is reserved. Empty when the team may use it. A typed App ID and an application created by scan pass through
+ * this one check.
+ */
+function applicationReasons(appId: string, teamId: string | undefined, definitions: TeamDefinitions, reserved: Readonly<Record<string, string>>): string[] {
+  const reasons: string[] = [];
+  if (!APPLICATION_ID.test(appId)) reasons.push(`App ID ${appId} 格式不正确，应为 cli_ 加 16 位十六进制字符`);
   const user = appId === definitions.coordinator.appId ? definitions.coordinator.name
-    : definitions.teams.find(({ id, leader }) => id !== edit.id && leader.appId === appId)?.leader.name;
-  if (appId && user) reasons.push(`App ID ${appId} 已被 ${user} 使用，每个团队需要自己的飞书应用`);
+    : definitions.teams.find(({ id, leader }) => id !== teamId && leader.appId === appId)?.leader.name;
+  if (user) reasons.push(`App ID ${appId} 已被 ${user} 使用，每个团队需要自己的飞书应用`);
   // An application reserved outside the registry, such as Penny's private financial bot, never posts for a team (ADR-0025).
-  if (appId && Object.hasOwn(reserved, appId)) reasons.push(reserved[appId]!);
+  if (Object.hasOwn(reserved, appId)) reasons.push(reserved[appId]!);
   return reasons;
 }
 

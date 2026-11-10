@@ -67,11 +67,14 @@ export interface OnboardingPlatform {
 type Started = ReadonlyArray<Readonly<{ teamId: string; chatId: string }>>;
 
 /**
- * How a team's QR creation ended: the scan created `created`, which the team now uses in place of `replaced`; or the team got
- * no application, for `failed`. `unused` then names an application the scan did create in Feishu but that no team uses: the
- * owner confirmed just as the wait ended, or the application could not be attached. Its secret is not kept.
+ * What a QR code of a team led to: the scan created `created`, which the team now uses in place of `replaced`; or the team got
+ * no application from it, for `failed`. `unused` then names an application the scan did create in Feishu but that the team
+ * does not use: it was confirmed after the team had its application or had left QR creation, or it could not be attached.
+ * Its secret is not kept.
  */
 export type CreationEnd = Readonly<{ teamId: string } & ({ created: string; replaced?: string } | { failed: string; unused?: string })>;
+/** One QR code asked for on a team's behalf: how to end its wait, and its link once the platform gave it. */
+type Creation = { teamId: string; controller: AbortController; link?: Readonly<{ url: string; expiresAt: number }> };
 type OnboardingHooks = Readonly<{
   /** Called once a QR creation has ended, after the registry holds its outcome. */
   creationEnded?(end: CreationEnd): void;
@@ -81,8 +84,10 @@ type OnboardingHooks = Readonly<{
 
 /**
  * Runs a team's onboarding steps (team-management::US-002/AC-03).
- * - Step 1, QR creation: `requestCreation` shows a QR code; when the owner's scan has created the application, it becomes the
- *   team's. A code's wait lives in this process only.
+ * - Step 1, QR creation: `requestCreation` shows a QR code. The first code the owner confirms while the team still waits for
+ *   its application gives the team that application, whether it is the code the page shows or one a newer code replaced.
+ *   A code that was shown is listened to until Feishu settles it: Feishu creates the application at the confirmation whatever
+ *   this service does, so ending the wait early would only lose the answer. The waits live in this process only.
  * - Steps 2 and 3, for an application created that way: configure it and submit its release, then wait for the bot to be
  *   enabled. An enabled bot completes both steps whoever configured and released the application, so a refused automatic
  *   call can be made good by hand in the Feishu developer console.
@@ -96,8 +101,10 @@ type OnboardingHooks = Readonly<{
 export class TeamOnboarding {
   /** Runs one at a time, so that a save's run and a 重新检查 never add a bot twice or overwrite each other's outcome. */
   private queue: Promise<unknown> = Promise.resolve();
-  /** The QR creations in progress by team: how to end the wait, and the code's link once the platform gave it. */
-  private readonly creations = new Map<string, { controller: AbortController; link?: Readonly<{ url: string; expiresAt: number }> }>();
+  /** The code each team's page shows: still being fetched, or with its link. */
+  private readonly shown = new Map<string, Creation>();
+  /** Every code that was shown and that Feishu has not settled yet, whether a page still shows it or not. */
+  private readonly listening = new Set<Creation>();
 
   constructor(private readonly registry: Pick<TeamRegistry, "current" | "onboarding" | "recordOnboarding" | "settleOnboarding" | "secret" | "creation" | "recordCreation" | "attachCreatedApplication">,
     private readonly platform: OnboardingPlatform, private readonly coordinator: ApplicationCredentials, private readonly now: () => number = Date.now,
@@ -111,64 +118,98 @@ export class TeamOnboarding {
   }
 
   /**
-   * Asks for a new QR code for a team in QR creation, ending the wait of the code it showed before. Resolves once the new
-   * code's link is known or the request for it has failed. The scan ends later: `creationEnded` then reports the application
-   * it created, already attached to the team, or why there is none. Does nothing for a team that is not in QR creation or
-   * whose application has been created.
+   * Asks for a new QR code for a team in QR creation and shows it in place of the code the page showed before. Resolves once
+   * the new code's link is known or the request for it has failed. A scan ends later: `creationEnded` then reports the
+   * application it created, already attached to the team, or why the shown code gave none. Does nothing for a team that is
+   * not in QR creation or whose application has been created.
    */
   async requestCreation(teamId: string): Promise<void> {
     const team = this.registry.current()?.definitions.teams.find(({ id }) => id === teamId);
     if (!team || !this.registry.recordCreation(teamId, { status: "waiting" }, this.now())) return;
-    this.creations.get(teamId)?.controller.abort();
-    const creation: { controller: AbortController; link?: Readonly<{ url: string; expiresAt: number }> } = { controller: new AbortController() };
-    this.creations.set(teamId, creation);
-    // A newer request, or the end of QR creation, takes this one's place; whatever it still reports is then ignored.
-    const current = () => this.creations.get(teamId) === creation;
-    const failed = (reason: string) => {
-      this.creations.delete(teamId);
-      this.registry.recordCreation(teamId, { status: "action", reason }, this.now());
-      this.hooks.creationEnded?.({ teamId, failed: reason });
-    };
+    this.endCreation(teamId);
+    const creation: Creation = { teamId, controller: new AbortController() };
+    this.shown.set(teamId, creation);
     const answer = await this.platform.createApplication({ name: team.leader.name, description: team.teamName }, creation.controller.signal).catch(() => "unreachable" as const);
-    if (!current()) return;
-    if (typeof answer === "string") { failed(answer); return; }
+    // A newer request, or the end of QR creation, took this code off the page before its link arrived: it was aborted unseen.
+    if (this.shown.get(teamId) !== creation) return;
+    if (typeof answer === "string") { this.failed(creation, answer); return; }
     creation.link = { url: answer.url, expiresAt: this.now() + answer.expiresInSeconds * 1000 };
+    this.listening.add(creation);
     void answer.result.then((result) => {
-      // The wait was ended or replaced. A scan confirmed in that same moment still created an application: it is reported, not used.
-      if (!current()) {
-        if (typeof result !== "string") this.hooks.creationEnded?.({ teamId, failed: "abandoned", unused: result.appId });
-        return undefined;
+      this.listening.delete(creation);
+      if (typeof result !== "string") {
+        // A confirmed code is used up, whatever becomes of its application.
+        if (this.shown.get(teamId) === creation) this.shown.delete(teamId);
+        return this.attach(teamId, result);
       }
-      // Without a code the platform was never reached; once a code was shown, a lost connection is a scan that did not finish.
-      if (typeof result === "string") { failed(result === "unreachable" ? "connection_lost" : result); return undefined; }
-      this.creations.delete(teamId);
-      return this.attach(teamId, result);
-    }).catch(() => {
-      // The created application could not be stored. If this cannot be recorded either, the next start records the creation as interrupted.
-      try { failed("failed"); } catch { /* the registry is unavailable */ }
-    });
+      // `cancelled` is this service ending the wait at shutdown. Without a code the platform was never reached; once a code
+      // was shown, a lost connection is a scan that did not finish.
+      if (result !== "cancelled") this.failed(creation, result === "unreachable" ? "connection_lost" : result);
+      return undefined;
+    }).catch(() => { /* The outcome could not be recorded or reported; the next start records a creation that still waits as interrupted. */ });
   }
 
-  /** The link of the QR code a team's creation shows while it waits for the scan, with the time it runs out. */
-  creationLink(teamId: string): Readonly<{ url: string; expiresAt: number }> | undefined { return this.creations.get(teamId)?.link; }
+  /** The link of the QR code a team's page shows while it waits for the scan, with the time it runs out. */
+  creationLink(teamId: string): Readonly<{ url: string; expiresAt: number }> | undefined { return this.shown.get(teamId)?.link; }
 
-  /** Ends the wait of a team's QR code without recording an outcome, as when the team is saved as an existing application. */
+  /**
+   * Takes a team's QR code off its page without recording an outcome, as when a newer code replaces it or the team is saved
+   * as an existing application. A code whose link never arrived is aborted, because nobody saw it. A code that was shown
+   * stays listened to: its confirmation is still learned.
+   */
   endCreation(teamId: string): void {
-    const creation = this.creations.get(teamId);
-    this.creations.delete(teamId);
-    creation?.controller.abort();
+    const creation = this.shown.get(teamId);
+    this.shown.delete(teamId);
+    if (creation && !creation.link) creation.controller.abort();
   }
 
-  /** Ends every wait for a scan, as at shutdown; the registry turns them into interrupted creations at its next start. */
-  close(): void { for (const teamId of [...this.creations.keys()]) this.endCreation(teamId); }
+  /**
+   * Ends every wait for a scan, as at shutdown. A confirmation made afterwards cannot be learned; at its next start the
+   * registry records each creation that still waited as interrupted.
+   */
+  close(): void {
+    for (const teamId of [...this.shown.keys()]) this.endCreation(teamId);
+    for (const creation of this.listening) creation.controller.abort();
+    this.listening.clear();
+  }
 
-  /** Makes a created application the team's, between runs, so that no run sees the team change application under it. */
+  /**
+   * A code gave no application. For the code a team's page shows, the creation step records why. A code that is no longer
+   * shown says nothing about that step; only its lost connection is still reported, because whether that code is confirmed
+   * afterwards can then no longer be learned.
+   */
+  private failed(creation: Creation, reason: string): void {
+    const shown = this.shown.get(creation.teamId) === creation;
+    if (!shown && reason !== "connection_lost") return;
+    if (shown) {
+      this.shown.delete(creation.teamId);
+      this.registry.recordCreation(creation.teamId, { status: "action", reason }, this.now());
+    }
+    this.hooks.creationEnded?.({ teamId: creation.teamId, failed: reason });
+  }
+
+  /**
+   * Gives a created application to its team if the team still waits for one from a scan, between runs, so that no run sees
+   * the team change application under it. The code the page shows, being another one, then comes off the page. An
+   * application the team does not get is reported as unused: the team no longer waits for one, may not use this one, or it
+   * could not be stored.
+   */
   private attach(teamId: string, created: ApplicationCredentials): Promise<void> {
     const attaching = this.queue.then(() => {
-      const attached = this.registry.attachCreatedApplication(teamId, created, { at: this.now(), reserved: this.hooks.reserved?.() ?? {} });
-      const state = this.registry.creation(teamId);
-      this.hooks.creationEnded?.(attached ? { teamId, created: created.appId, ...(attached.replaced ? { replaced: attached.replaced } : {}) }
-        : { teamId, failed: state?.status === "action" ? state.reason : "abandoned", unused: created.appId });
+      let end: CreationEnd;
+      try {
+        const attached = this.registry.attachCreatedApplication(teamId, created, { at: this.now(), reserved: this.hooks.reserved?.() ?? {} });
+        if (attached) this.endCreation(teamId);
+        const state = this.registry.creation(teamId);
+        end = attached ? { teamId, created: created.appId, ...(attached.replaced ? { replaced: attached.replaced } : {}) }
+          : { teamId, failed: state?.status === "action" ? state.reason : "abandoned", unused: created.appId };
+      } catch {
+        this.endCreation(teamId);
+        end = { teamId, failed: "failed", unused: created.appId };
+        // If this cannot be recorded either, the next start records the creation as interrupted.
+        try { this.registry.recordCreation(teamId, { status: "action", reason: "failed" }, this.now()); } catch { /* the registry is unavailable */ }
+      }
+      this.hooks.creationEnded?.(end);
     });
     this.queue = attaching.catch(() => undefined);
     return attaching;
@@ -254,8 +295,12 @@ type FixtureSettings = Readonly<{
   applications?: Record<string, ApplicationCheck>; chats?: Record<string, FixtureChat>;
   /** Whether a QR creation gets its link. */
   link?: "ready" | "unreachable";
-  /** Ends the oldest QR creation that waits for its scan: the owner confirmed, or one of the failures. */
+  /**
+   * Ends a QR code that waits for its scan: the owner confirmed, or one of the failures. It ends the newest waiting code, the
+   * one a page shows, unless `code` names another: the nth code this platform gave, as its link says (`create=<n>`).
+   */
   scan?: "confirmed" | CreationFailure;
+  code?: number;
   configure?: Record<string, ConfigureAnswer>; publish?: Record<string, PublishAnswer>;
 }>;
 /**
@@ -263,6 +308,7 @@ type FixtureSettings = Readonly<{
  * application is enabled, its configuration and release are accepted, every add succeeds and the bot is then in the group;
  * `configure` changes the answers per application and per group. Every call is recorded, without any secret.
  * The nth application it creates is `cli_c0de` followed by n as 12 digits, with the secret `fixture-created-secret-<n>`.
+ * As at Feishu, a code waits until it is scanned, fails or its wait is aborted, whether a newer code was asked for or not.
  */
 export class FixtureOnboardingPlatform implements OnboardingPlatform {
   readonly calls: Array<Record<string, string>> = [];
@@ -271,7 +317,9 @@ export class FixtureOnboardingPlatform implements OnboardingPlatform {
   private link: "ready" | "unreachable" = "ready";
   private configured: Record<string, ConfigureAnswer> = {};
   private published: Record<string, PublishAnswer> = {};
-  private readonly waiting: Array<(result: ApplicationCredentials | CreationFailure) => void> = [];
+  /** The codes that wait for their scan, by their number. */
+  private readonly waiting = new Map<number, (result: ApplicationCredentials | CreationFailure) => void>();
+  private codes = 0;
   private created = 0;
 
   configure(settings: FixtureSettings): void {
@@ -281,7 +329,7 @@ export class FixtureOnboardingPlatform implements OnboardingPlatform {
     if (settings.configure) this.configured = { ...this.configured, ...settings.configure };
     if (settings.publish) this.published = { ...this.published, ...settings.publish };
     if (settings.scan) {
-      const finish = this.waiting.shift();
+      const finish = this.waiting.get(settings.code ?? Math.max(...this.waiting.keys()));
       if (!finish) throw new Error("fixture_onboarding_no_creation_waiting");
       if (settings.scan !== "confirmed") finish(settings.scan);
       else { this.created++; finish({ appId: `cli_c0de${String(this.created).padStart(12, "0")}`, appSecret: `fixture-created-secret-${this.created}` }); }
@@ -291,16 +339,13 @@ export class FixtureOnboardingPlatform implements OnboardingPlatform {
     this.calls.push({ call: "create", name: preset.name, description: preset.description });
     if (signal.aborted) return "cancelled";
     if (this.link === "unreachable") return "unreachable";
+    const code = ++this.codes;
     const result = new Promise<ApplicationCredentials | CreationFailure>((settle) => {
-      const finish = (value: ApplicationCredentials | CreationFailure) => {
-        const index = this.waiting.indexOf(finish);
-        if (index >= 0) this.waiting.splice(index, 1);
-        settle(value);
-      };
-      this.waiting.push(finish);
+      const finish = (value: ApplicationCredentials | CreationFailure) => { this.waiting.delete(code); settle(value); };
+      this.waiting.set(code, finish);
       signal.addEventListener("abort", () => finish("cancelled"), { once: true });
     });
-    return { url: `https://accounts.feishu.cn/fixture/registration?create=${this.calls.filter(({ call }) => call === "create").length}`, expiresInSeconds: 600, result };
+    return { url: `https://accounts.feishu.cn/fixture/registration?create=${code}`, expiresInSeconds: 600, result };
   }
   async configureApplication({ appId }: ApplicationCredentials): Promise<ConfigureAnswer> {
     this.calls.push({ call: "configure", appId });

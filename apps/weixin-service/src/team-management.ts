@@ -91,17 +91,22 @@ export class TeamManagement {
   /** Posts test messages through each team's own sending application. */
   deliverTestMessagesWith(send: TestMessageSend): void { this.sendTest = send; }
 
-  /** Resumes onboarding at startup without repeating finished steps. */
+  /**
+   * Resumes onboarding at startup without repeating finished steps. A QR code that waited when the service last stopped is
+   * audited once: whether it was confirmed since cannot be learned.
+   */
   async resume(): Promise<void> {
+    for (const team of this.options.registry.interruptedCreations) this.audit({}, { event: "team_application_qr_failed", team, reason: "interrupted" });
     this.announceJoins(await this.onboarding.resume());
   }
 
-  /** Ends every QR code's wait, as at shutdown. */
+  /** Stops listening to every QR code, as at shutdown. */
   close(): void { this.onboarding.close(); }
 
   /**
    * Saves one team from the console; returns the team's ID. Onboarding of its application continues in the background. The
-   * save that chooses QR creation asks for the team's first QR code; a save as an existing application ends a code's wait.
+   * save that chooses QR creation asks for the team's first QR code; a save as an existing application takes the code off
+   * the page.
    */
   saveTeam(input: unknown, options: Readonly<{ basedOn: unknown; actor: TeamActor }>): string {
     const { edit, secret } = parseTeamEdit(input, this.options.catalogToolIds);
@@ -214,7 +219,7 @@ export class TeamManagement {
         return { id: team.id, teamName: team.teamName, responsibility: team.responsibility,
           leader: { name: team.leader.name, appId: team.leader.appId, instructions: team.leader.profile.instructions },
           secretStored: Boolean(team.leader.appId) && this.options.registry.hasSecret(team.leader.appId),
-          method: creation ? "qr" as const : "existing" as const,
+          method: team.leader.method ?? "existing",
           ...(creation ? { creation: { status: creation.status, ...(creation.status === "action" ? { reason: creation.reason } : {}),
             ...(creation.status === "done" ? { appId: creation.appId } : {}), ...(creation.status === "waiting" && link ? { codeExpiresAt: link.expiresAt } : {}) } } : {}),
           ...(record.configure ? { configure: record.configure } : {}), ...(record.publish ? { publish: record.publish } : {}),
@@ -239,9 +244,9 @@ export class TeamManagement {
     catch (error) { this.options.report(`team_application_qr_failed: ${error instanceof Error ? error.message : "error"}`); }
   }
 
-  /** A QR creation ended: the created application now posts for the team, and its remaining steps run; or nothing was created. */
+  /** A QR code of a team was settled: the created application now posts for the team, and its remaining steps run; or the team got none from it. */
   private creationEnded(end: CreationEnd): void {
-    // An application the scan created but no team uses is named, so that the owner can remove it in Feishu.
+    // An application a scan created but the team does not use is named, so that the owner can remove it in Feishu.
     if ("failed" in end) { this.audit({}, { event: "team_application_qr_failed", team: end.teamId, reason: end.failed, ...(end.unused ? { appId: end.unused } : {}) }); return; }
     this.audit({}, { event: "team_application_created", team: end.teamId, appId: end.created, ...(end.replaced ? { replaced: end.replaced } : {}), version: this.current().version });
     this.refreshRoster();
