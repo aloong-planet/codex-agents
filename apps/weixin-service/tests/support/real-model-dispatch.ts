@@ -1,4 +1,4 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { EXECUTOR_RUNTIME_HOME } from "../../src/agent-dispatch-executor.js";
@@ -14,7 +14,8 @@ import { allowNotes, dispatchConfig, start, type State } from "./real-main.js";
  * Each scenario has its own service process, state directory and granted directory, all temporary and removed when it ends,
  * and leaves one run record, also when it fails: a failed scenario's record is its evidence. The record holds what a reviewer
  * needs to judge the run without repeating it. Of the runtime homes, where the login copies are, it keeps only the Executors'
- * thread rollouts.
+ * thread rollouts, with the account's identifiers replaced. Whatever holds a credential pattern is withheld from the record,
+ * named there, and fails the scenario.
  */
 export const realModelDispatch = process.env.DISPATCH_REAL_MODEL_TEST === "1";
 
@@ -24,11 +25,11 @@ const TEAMS = { alice: { name: "Alice", appId: "cli_aaaaaaaaaaaaaaaa" }, bill: {
 export type TeamId = keyof typeof TEAMS;
 
 export type ScenarioMessage = { messageId: string; senderId: string; text: string; mention?: TeamId };
-type Post = { identity: string; chatId: string; message: string; acceptedAt: number };
-type Media = { chatId: string; kind: string; fileName: string; bytesBase64: string };
+export type GroupPost = { identity: string; chatId: string; message: string; acceptedAt: number };
+export type DeliveredFile = { identity: string; chatId: string; kind: string; fileName: string; bytesBase64: string };
 export type RunRecord = {
   scenario: string;
-  /** The acceptance items the scenario checks. */
+  /** The acceptance items the scenario's assertions check. */
   acceptance: string[];
   outcome: "passed" | "failed";
   failure?: string;
@@ -39,42 +40,55 @@ export type RunRecord = {
   messages: ScenarioMessage[];
   /** The Dispatch Requests with their Assignments, as the service reports them. */
   requests: unknown[];
-  /** Every turn of the Coordinator, the Team Leaders and the Executors: decisions, plans with their Briefs, results and closings. */
+  /** Every turn of the Coordinator, the Team Leaders and the Executors: inputs, decisions, plans with their Briefs, results and closings. */
   turns: DispatchTurnRecord[];
   /** Every post the group received, in the order received, under the identity that sent it. */
-  posts: Post[];
+  posts: GroupPost[];
   /** The delivery state of every post the service tried to send. */
   notices: unknown[];
   /** Every file or image the group received, saved beside the record. */
   deliverables: Array<{ identity: string; chatId: string; kind: string; fileName: string; savedAs: string }>;
   /** Each Executor's thread rollouts, saved beside the record: its whole turn, with the tool calls and web searches it made. */
   executorRollouts: string[];
+  /** What was left out because it held a credential pattern or an account identifier that could not be replaced. Any entry fails the scenario. */
+  withheld: string[];
 };
 
-/** The run record of a scenario, from the state the service reports, and the delivered files to save with it. */
-export function runRecord(state: State | undefined, context: Pick<RunRecord, "scenario" | "acceptance" | "outcome" | "failure" | "startedAt" | "endedAt" | "messages" | "executorRollouts">):
-  { record: RunRecord; files: Array<{ path: string; bytes: Buffer }> } {
-  const identities = [[COORDINATOR, { text: state?.feishuFixtureTextOutbox ?? [], media: state?.feishuFixtureMediaOutbox ?? [] }] as const,
-    ...Object.entries(state?.agentFixtureOutboxes ?? {})];
-  const posts = identities.flatMap(([identity, { text }]) => (text as Array<Omit<Post, "identity">>).map(({ chatId, message, acceptedAt }) => ({ identity, chatId, message, acceptedAt })))
+/** What the fixture platform accepted from each identity that posts in the group: the Coordinator, then every Team Leader. */
+function outboxes(state: State | undefined): Array<readonly [string, { text: unknown[]; media: unknown[] }]> {
+  return [[COORDINATOR, { text: state?.feishuFixtureTextOutbox ?? [], media: state?.feishuFixtureMediaOutbox ?? [] }], ...Object.entries(state?.agentFixtureOutboxes ?? {})];
+}
+/** Every post the group received, in the order received, under the identity that sent it. */
+export function groupPosts(state: State | undefined): GroupPost[] {
+  return outboxes(state).flatMap(([identity, { text }]) => (text as Array<Omit<GroupPost, "identity">>).map(({ chatId, message, acceptedAt }) => ({ identity, chatId, message, acceptedAt })))
     .sort((left, right) => left.acceptedAt - right.acceptedAt);
-  const files: Array<{ path: string; bytes: Buffer }> = [];
-  const deliverables = identities.flatMap(([identity, { media }]) => (media as Media[]).map(({ chatId, kind, fileName, bytesBase64 }) => {
-    const savedAs = `deliverables/${files.length + 1}-${identity}-${basename(fileName)}`;
-    files.push({ path: savedAs, bytes: Buffer.from(bytesBase64, "base64") });
-    return { identity, chatId, kind, fileName, savedAs };
-  }));
-  return { files, record: { ...context,
-    models: (state?.codex?.models?.accounts ?? []).map(({ accountId, resolved }) => ({ accountId, ...resolved })),
-    requests: state?.agentDispatch?.jobs ?? [], turns: state?.fixtureDispatchTurns ?? [], posts, notices: state?.agentDispatch?.notices ?? [], deliverables } };
+}
+/** Every file or image the group received, under the identity that sent it. */
+export function deliveredFiles(state: State | undefined): DeliveredFile[] {
+  return outboxes(state).flatMap(([identity, { media }]) => (media as Array<Omit<DeliveredFile, "identity">>).map(({ chatId, kind, fileName, bytesBase64 }) => ({ identity, chatId, kind, fileName, bytesBase64 })));
 }
 
-/** What a login copy holds, and what a model credential looks like; a rollout that matches is never copied. */
-const CREDENTIAL = /"(?:access_token|refresh_token|id_token)"|sk-[A-Za-z0-9_-]{20,}/u;
+/**
+ * What must never reach a record, wherever a text quotes it: the token fields of a login file, whose quotes are escaped once per
+ * level of JSON nesting; a signed token; an API key. A key has a digit and a capital, which ordinary hyphenated words do not.
+ */
+const CREDENTIALS = [/\\*"(?:access_token|refresh_token|id_token)\\*"/u,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
+  /(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]*[0-9])(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]{20,}/u];
+export function holdsCredential(text: string): boolean { return CREDENTIALS.some((pattern) => pattern.test(text)); }
+
+const REDACTED = "<redacted>", WITHHELD = "<withheld: credential pattern>";
+/** The logged-in account's identifiers, which the App Server writes into a rollout's first line. */
+const ACCOUNT_IDENTIFIER = /("creator_(?:account|user)_id"\s*:\s*")[^"\\]*"/gu;
+/** Such a field, in any quoting, whose value is neither the marker nor null: one the replacement could not reach. */
+const UNREDACTED_IDENTIFIER = /\\*"creator_(?:account|user)_id\\*"\s*:\s*(?!"<redacted>"|null)/u;
+
 /**
  * Copies every Executor's thread rollouts from a stopped service's state directory into `destination`, under the home's name, and
  * returns their paths there. Only files named as rollouts are copied, from Executor homes only, so nothing else of a home, such as
- * its login copy, can follow. A rollout that holds a credential pattern is withheld and reported instead.
+ * its login copy, can follow. A copy has the account's identifiers replaced by a marker and every other byte as it was. A rollout
+ * that holds a credential pattern, or an identifier the replacement could not reach, is not copied; it is returned as withheld
+ * with the reason.
  */
 export function keepExecutorRollouts(stateDirectory: string, destination: string): { kept: string[]; withheld: string[] } {
   const runtimes = join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchAgent.directory), kept: string[] = [], withheld: string[] = [];
@@ -86,15 +100,66 @@ export function keepExecutorRollouts(stateDirectory: string, destination: string
       const rollouts = readdirSync(join(codexHome, sessions), { withFileTypes: true, recursive: true })
         .filter((entry) => entry.isFile() && /^rollout-.*\.jsonl$/u.test(entry.name)).map((entry) => join(entry.parentPath, entry.name)).sort();
       for (const rollout of rollouts) {
-        const relative = join(home, rollout.slice(codexHome.length + 1));
-        if (CREDENTIAL.test(readFileSync(rollout, "utf8"))) { withheld.push(relative); continue; }
+        const relative = join(home, rollout.slice(codexHome.length + 1)), original = readFileSync(rollout, "utf8");
+        if (holdsCredential(original)) { withheld.push(`${relative} (credential pattern)`); continue; }
+        const copy = original.replace(ACCOUNT_IDENTIFIER, `$1${REDACTED}"`);
+        if (UNREDACTED_IDENTIFIER.test(copy)) { withheld.push(`${relative} (account identifier)`); continue; }
         mkdirSync(dirname(join(destination, relative)), { recursive: true });
-        copyFileSync(rollout, join(destination, relative));
+        writeFileSync(join(destination, relative), copy);
         kept.push(relative);
       }
     }
   }
   return { kept, withheld };
+}
+
+/**
+ * The run record of a scenario, from the state the service reports, and the delivered files to save with it. `failure` is the
+ * scenario's own; `withheld` names what was already left out. A recorded turn that holds a credential pattern, in the group
+ * memory or the discussion it was given for instance, keeps its place and loses its content, and is named as withheld too.
+ */
+export function runRecord(state: State | undefined, context: Pick<RunRecord, "scenario" | "acceptance" | "failure" | "startedAt" | "endedAt" | "messages" | "executorRollouts" | "withheld">):
+  { record: RunRecord; files: Array<{ path: string; bytes: Buffer }> } {
+  const withheld = [...context.withheld];
+  const turns = (state?.fixtureDispatchTurns ?? []).map((turn, index) => {
+    if (!holdsCredential(JSON.stringify(turn))) return turn;
+    withheld.push(`turn ${index + 1} (credential pattern)`);
+    return { ...turn, input: WITHHELD, ...(turn.output !== undefined ? { output: WITHHELD } : {}), ...(turn.error !== undefined ? { error: WITHHELD } : {}) };
+  });
+  const files: Array<{ path: string; bytes: Buffer }> = [];
+  const deliverables = deliveredFiles(state).map(({ identity, chatId, kind, fileName, bytesBase64 }) => {
+    // A file name is the sender's own choice, so only its last segment names the saved copy.
+    const savedAs = `deliverables/${files.length + 1}-${identity}-${basename(fileName)}`;
+    files.push({ path: savedAs, bytes: Buffer.from(bytesBase64, "base64") });
+    return { identity, chatId, kind, fileName, savedAs };
+  });
+  const failure = context.failure ?? (withheld.length ? `withheld from the record: ${withheld.join(", ")}` : undefined);
+  return { files, record: { scenario: context.scenario, acceptance: context.acceptance, outcome: failure === undefined ? "passed" : "failed", ...(failure !== undefined ? { failure } : {}),
+    startedAt: context.startedAt, endedAt: context.endedAt,
+    models: (state?.codex?.models?.accounts ?? []).map(({ accountId, resolved }) => ({ accountId, ...resolved })), messages: context.messages,
+    requests: state?.agentDispatch?.jobs ?? [], turns, posts: groupPosts(state), notices: state?.agentDispatch?.notices ?? [], deliverables,
+    executorRollouts: context.executorRollouts, withheld } };
+}
+
+/**
+ * Writes a scenario's record into `recordDirectory` once its service has stopped: the record itself, the service log, the delivered
+ * files, the granted directory and the Executors' rollouts. `failure` is the scenario's own, if it has one. Returns the failure the
+ * scenario ends with: its own, or else what had to be withheld from the record.
+ */
+export function saveRunRecord(run: { recordDirectory: string; stateDirectory: string; grantedDirectory: string; state: State | undefined; log: string; failure?: { error: unknown };
+  context: Pick<RunRecord, "scenario" | "acceptance" | "startedAt" | "messages"> }): { error: unknown } | undefined {
+  mkdirSync(join(run.recordDirectory, "deliverables"), { recursive: true });
+  // The service has stopped, so every released Executor home is down to its rollouts and no App Server still writes one.
+  const rollouts = keepExecutorRollouts(run.stateDirectory, join(run.recordDirectory, "executor-rollouts"));
+  const { record, files } = runRecord(run.state, { ...run.context, endedAt: new Date().toISOString(),
+    ...(run.failure ? { failure: run.failure.error instanceof Error ? run.failure.error.message : String(run.failure.error) } : {}),
+    executorRollouts: rollouts.kept.map((path) => `executor-rollouts/${path}`), withheld: rollouts.withheld.map((path) => `executor-rollouts/${path}`) });
+  writeFileSync(join(run.recordDirectory, "run-record.json"), `${JSON.stringify(record, null, 2)}\n`);
+  writeFileSync(join(run.recordDirectory, "service.log"), run.log);
+  for (const { path, bytes } of files) writeFileSync(join(run.recordDirectory, path), bytes);
+  if (existsSync(run.grantedDirectory)) cpSync(run.grantedDirectory, join(run.recordDirectory, "granted-directory"), { recursive: true });
+  console.info(`Dispatch real-model run record (${record.outcome}): ${run.recordDirectory}`);
+  return run.failure ?? (record.failure !== undefined ? { error: new Error(record.failure) } : undefined);
 }
 
 const RESTING = ["proposed", "waiting", "completed", "partially_failed", "partially_unassigned", "failed", "cancelled"];
@@ -131,8 +196,9 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
   const directory = mkdtempSync(join(tmpdir(), "real-model-scenario-state-")), business = mkdtempSync(join(tmpdir(), "real-model-scenario-files-"));
   const grantedDirectory = join(business, "demo-vault");
   const messages: ScenarioMessage[] = [];
-  let running: Awaited<ReturnType<typeof start>> | undefined, state: State | undefined, failure: unknown, failed = false;
-  const fail = (error: unknown) => { if (!failed) { failed = true; failure = error; } };
+  let running: Awaited<ReturnType<typeof start>> | undefined, state: State | undefined, failure: { error: unknown } | undefined;
+  // The first failure is the scenario's; later ones are consequences of it.
+  const fail = (error: unknown) => { failure ??= { error }; };
   try {
     mkdirSync(join(grantedDirectory, ".obsidian"), { recursive: true });
     for (const [relative, content] of Object.entries(scenario.files ?? {})) {
@@ -170,24 +236,15 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
   } catch (error) { fail(error); }
   try { state = await running?.state(); } catch (error) { fail(error); }
   const log = running?.output() ?? "";
-  // The service stops before the granted directory is copied, so no Executor still writes there.
+  // The service stops before the record is written, so no Executor still writes into the granted directory or its own home.
   try { await running?.close(); } catch (error) { fail(error); }
+  let ended = failure;
   try {
-    mkdirSync(join(recordDirectory, "deliverables"), { recursive: true });
-    // The service has stopped, so every released Executor home is down to its rollouts and no App Server still writes one.
-    const rollouts = keepExecutorRollouts(directory, join(recordDirectory, "executor-rollouts"));
-    if (rollouts.withheld.length) fail(new Error(`withheld ${rollouts.withheld.length} Executor rollout(s) that hold a credential pattern: ${rollouts.withheld.join(", ")}`));
-    const { record, files } = runRecord(state, { scenario: scenario.id, acceptance: scenario.acceptance, outcome: failed ? "failed" : "passed",
-      ...(failed ? { failure: failure instanceof Error ? failure.message : String(failure) } : {}), startedAt: startedAt.toISOString(), endedAt: new Date().toISOString(), messages,
-      executorRollouts: rollouts.kept.map((path) => `executor-rollouts/${path}`) });
-    writeFileSync(join(recordDirectory, "run-record.json"), `${JSON.stringify(record, null, 2)}\n`);
-    writeFileSync(join(recordDirectory, "service.log"), log);
-    for (const { path, bytes } of files) writeFileSync(join(recordDirectory, path), bytes);
-    cpSync(grantedDirectory, join(recordDirectory, "granted-directory"), { recursive: true });
-    console.info(`Dispatch real-model run record (${failed ? "failed" : "passed"}): ${recordDirectory}`);
-  } catch (error) { fail(error); }
+    ended = saveRunRecord({ recordDirectory, stateDirectory: directory, grantedDirectory, state, log, ...(failure ? { failure } : {}),
+      context: { scenario: scenario.id, acceptance: scenario.acceptance, startedAt: startedAt.toISOString(), messages } });
+  } catch (error) { ended ??= { error }; }
   rmSync(directory, { recursive: true, force: true });
   rmSync(business, { recursive: true, force: true });
-  if (failed) throw failure;
+  if (ended) throw ended.error;
   return recordDirectory;
 }

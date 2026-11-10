@@ -5,7 +5,7 @@ import type { LeaderPlan } from "../src/agent-dispatch-leader.js";
 import type { DispatchDecision, DispatchExecutionResult, PrerequisiteResult } from "../src/agent-dispatch-types.js";
 import type { DispatchTurnRecord } from "../src/fixture-dispatch-recorder.js";
 import type { State } from "./support/real-main.js";
-import { atRest, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
+import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
 
 // Dispatch on the real model (agent-dispatch Testing Decisions: real-model suite). Opt-in: `pnpm test:dispatch-real-model` sets
 // DISPATCH_REAL_MODEL_TEST=1; without it every scenario is skipped, so no default run and no CI run reaches a model. One scenario
@@ -14,12 +14,14 @@ import { atRest, realModelDispatch, realModelScenario, type ScenarioRun, type Te
 //
 // Assertions are structural: who decided what, which team leads, what was posted under which identity and in which order, which
 // files reached the group. What the model wrote is judged from each scenario's run record, which is written also when the
-// scenario fails and keeps each Executor's thread rollouts. A failure here is a finding about the model's decision or the product, not a reason to loosen the assertion.
+// scenario fails and keeps each Executor's thread rollouts. A failure here is a finding about the model's decision or the
+// product, not a reason to loosen the assertion.
 //
 // Not covered here:
 // - Whether a deliverable's content meets its criterion (missing facts marked, sources named, no claim that tests ran): the
 //   reviewed run record.
-// - Decision posts (agent-dispatch::US-003/AC-03): a plan may hold none, so no scenario requires one; the record shows those posted.
+// - Decision posts (agent-dispatch::US-003/AC-03): a plan may hold none, so no scenario checks for one and none lists the item.
+//   A record shows the decisions a plan held and the posts that carried them; a run without any gives no evidence for the item.
 // - A plan that passed only after its correction turn looks like one that passed at once: the correction stays inside the plan turn.
 // - The over-ceiling correction turn (agent-dispatch::REQ-011/AC-02), multi-turn controls and cross-team work (ticket 35).
 // - Application permissions, ingress and receipt in a real group: live acceptance.
@@ -66,13 +68,10 @@ test("takes the discount off the price", () => { assert.equal(applyDiscount(100,
 
 type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
 type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
-type Text = { chatId: string; message: string; acceptedAt: number };
 const turns = (state: State, turn: DispatchTurnRecord["turn"]) => (state.fixtureDispatchTurns ?? []).filter((item) => item.turn === turn);
-const textsBy = (state: State, identity: "sam" | TeamId) => (identity === "sam" ? state.feishuFixtureTextOutbox ?? [] : state.agentFixtureOutboxes?.[identity]?.text ?? []) as Text[];
-/** Every post the group received, in the order received, with the identity that sent it. */
-const posts = (state: State) => (["sam", "alice", "bill", "jack"] as const).flatMap((identity) => textsBy(state, identity).map((post) => ({ identity, ...post })))
-  .sort((left, right) => left.acceptedAt - right.acceptedAt);
-const filesBy = (state: State, identity: TeamId) => (state.agentFixtureOutboxes?.[identity]?.media ?? []) as Array<{ chatId: string; fileName: string }>;
+// The group's posts and files are read as the run record reads them, so what a scenario asserts is what its record shows.
+const posts = groupPosts;
+const textsBy = (state: State, identity: "sam" | TeamId) => groupPosts(state).filter((post) => post.identity === identity);
 
 /** The Coordinator's decision on a message, which its turn must have produced without failing. */
 function decisionOn(state: State, messageId: string): DispatchDecision {
@@ -103,10 +102,9 @@ async function deliversUnderItsTeam(run: ScenarioRun, messageId: string, text: s
   expect(new Set(request.assignments.map(({ executor }) => executor)).size).toBe(request.assignments.length);
   expect(request.status).toBe("completed");
   // agent-dispatch::REQ-006: the deliverable reached the originating group as a file, under the team's Team Leader and no other identity.
-  expect(filesBy(state, team).length).toBeGreaterThanOrEqual(1);
-  for (const file of filesBy(state, team)) expect(file.chatId).toBe(GROUP);
-  for (const other of (["alice", "bill", "jack"] as const).filter((id) => id !== team)) expect(filesBy(state, other)).toEqual([]);
-  expect(state.feishuFixtureMediaOutbox).toEqual([]);
+  const files = deliveredFiles(state);
+  expect(files.length).toBeGreaterThanOrEqual(1);
+  for (const file of files) expect({ identity: file.identity, chatId: file.chatId }).toEqual({ identity: team, chatId: GROUP });
   // agent-dispatch::US-003/AC-02: the closing is the group's last post, under the lead's identity, after the last Assignment ended.
   expect(state.agentDispatch!.notices).toContainEqual({ id: `${request.id}:closing:0`, state: "accepted" });
   const runs = turns(state, "run");
@@ -168,20 +166,21 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       expect(textsBy(state, "sam").map(({ message }) => message)).toEqual(["已将这项需求转派给 Bill。"]);
     }), DECISION_LIMIT_MS);
 
-  it("has Alice's team deliver a listing package for a commerce request", () => realModelScenario(
-    { id: "alice-listing-package", acceptance: ["agent-dispatch::US-001/AC-03", "agent-dispatch::REQ-006/AC-01", "agent-dispatch::REQ-011/AC-01", "agent-dispatch::US-003/AC-02", "agent-dispatch::US-003/AC-03"] },
-    async (run) => {
-      // Battery condition and the shipping city are left out on purpose: the reviewed package must mark them as missing, not invent them.
-      await deliversUnderItsTeam(run, "om_real_alice", "帮我给要出手的 Kindle 准备一套上架材料：Kindle Paperwhite 5，8GB，黑色，2023 年 6 月在京东自营购买，屏幕无划痕、边框有轻微使用痕迹，功能正常，" +
+  it.each([
+    // Battery condition and the shipping city are left out on purpose: the reviewed package must mark them as missing, not invent them.
+    // The platform is left to the team, which invites a decision post; none is required.
+    { name: "has Alice's team deliver a listing package for a commerce request", id: "alice-listing-package", team: "alice", deliverable: "agent-dispatch::REQ-006/AC-01", messageId: "om_real_alice",
+      text: "帮我给要出手的 Kindle 准备一套上架材料：Kindle Paperwhite 5，8GB，黑色，2023 年 6 月在京东自营购买，屏幕无划痕、边框有轻微使用痕迹，功能正常，" +
         "带原装充电线、没有包装盒，想卖 550 元左右，不包邮。挂闲鱼还是淘宝你们团队定。要标题、描述、成色说明和买家常见问答，整理成一份文档保存好发到群里。" +
-        "有些信息我没写全，缺的先标待补充，不用等我确认。", "alice");
-    }), REQUEST_LIMIT_MS);
-
-  it("has Bill's team deliver a one-day itinerary for an everyday-life request", () => realModelScenario(
-    { id: "bill-itinerary", acceptance: ["agent-dispatch::US-001/AC-03", "agent-dispatch::REQ-006/AC-02", "agent-dispatch::REQ-011/AC-01", "agent-dispatch::US-003/AC-02"] }, async (run) => {
-      await deliversUnderItsTeam(run, "om_real_bill", `帮我规划 ${saturdayAhead()}南京一日游：两个大人，从南京南站出发，喜欢历史古迹和本地小吃，不想太赶，总预算 600 元以内。` +
-        "要交通、用餐、预算估算和备选方案，整理成一份行程文档保存好发到群里。", "bill");
-    }), REQUEST_LIMIT_MS);
+        "有些信息我没写全，缺的先标待补充，不用等我确认。" },
+    { name: "has Bill's team deliver a one-day itinerary for an everyday-life request", id: "bill-itinerary", team: "bill", deliverable: "agent-dispatch::REQ-006/AC-02", messageId: "om_real_bill",
+      text: `帮我规划 ${saturdayAhead()}南京一日游：两个大人，从南京南站出发，喜欢历史古迹和本地小吃，不想太赶，总预算 600 元以内。` +
+        "要交通、用餐、预算估算和备选方案，整理成一份行程文档保存好发到群里。" },
+  ] as const)("$name", async ({ id, team, deliverable, messageId, text }) => {
+    await realModelScenario({ id, acceptance: ["agent-dispatch::US-001/AC-03", deliverable, "agent-dispatch::REQ-011/AC-01", "agent-dispatch::US-003/AC-02"] }, async (run) => {
+      await deliversUnderItsTeam(run, messageId, text, team);
+    });
+  }, REQUEST_LIMIT_MS);
 
   it("has Jack's team deliver a patch for a TypeScript problem without changing the source", () => realModelScenario(
     { id: "jack-patch", acceptance: ["agent-dispatch::US-001/AC-03", "agent-dispatch::REQ-006/AC-03", "agent-dispatch::REQ-011/AC-01", "agent-dispatch::US-003/AC-02"], files: DISCOUNT_PROJECT }, async (run) => {

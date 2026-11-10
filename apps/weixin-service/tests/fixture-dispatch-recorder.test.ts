@@ -6,7 +6,8 @@ import { recordDispatchTurns } from "../src/fixture-dispatch-recorder.js";
 
 // The recorder at its own boundary: the three dispatch seams it wraps are substitutes that return literals.
 const event: InboundContent = { key: "feishu:om_one", accountId: "cli_sam", target: "feishu.group.oc_alpha", senderId: "ou_owner", conversationType: "group",
-  messageId: "om_one", source: "text", text: "整理商品文案", receivedAt: 1, mentionedAgentIds: ["alice"] };
+  messageId: "om_one", source: "text", text: "整理商品文案", receivedAt: 1, mentionedAgentIds: ["alice"],
+  discussion: [{ key: "feishu:om_zero", senderId: "ou_colleague", text: "那台 iPad 该挂出去了", receivedAt: 0 }] };
 const classification = { event, agents: [{ id: "sam", name: "Sam", responsibility: "协调" }, { id: "alice", name: "Alice", responsibility: "商品运营" }], requests: [], memory: "GROUP_MEMORY" };
 const decision = { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理商品文案", message: "" } as const;
 const leaderInput: LeaderTurnInput = { requestId: "feishu:om_one", leader: { id: "alice", name: "Alice", teamName: "运营团队", responsibility: "商品运营", instructions: "LEADER_INSTRUCTIONS" },
@@ -36,15 +37,23 @@ it("returns each turn's result unchanged and records the turns in the order they
   expect(await recorded.executor.run(job, assignment, new AbortController().signal, [{ position: 1, title: "调研", executor: "执行者 9", result: "调研结论" }])).toEqual(result);
   expect(await recorded.leader.close(leaderInput, closingView)).toBe("文案已整理好。");
   expect(recorded.turns()).toEqual([
+    // The Coordinator's whole input: the message with the discussion before it, the roster, the requester's requests, the group memory.
     { role: "coordinator", turn: "classify", messageId: "om_one", startedAt: 1, endedAt: 2, output: decision,
-      input: { text: "整理商品文案", mentionedAgentIds: ["alice"], agents: classification.agents, requests: [] } },
+      input: { event: expect.objectContaining({ text: "整理商品文案", mentionedAgentIds: ["alice"], discussion: [expect.objectContaining({ senderId: "ou_colleague", text: "那台 iPad 该挂出去了" })] }),
+        agents: [{ id: "sam", name: "Sam", responsibility: "协调" }, { id: "alice", name: "Alice", responsibility: "商品运营" }], requests: [], memory: "GROUP_MEMORY" } },
+    // A Team Leader's whole input: its instructions, its Brief, its presets, the Team Directory and its own memory.
     { role: "leader", turn: "plan", requestId: "feishu:om_one", teamId: "alice", startedAt: 3, endedAt: 4, output: plan,
-      input: { brief: leaderInput.brief, profiles: leaderInput.profiles } },
+      input: { leader: expect.objectContaining({ id: "alice", instructions: "LEADER_INSTRUCTIONS" }), brief: { message: "整理商品文案", summary: "整理商品文案" },
+        profiles: [{ id: "executor-1", name: "能力档 1" }], directory: [{ name: "运营团队", responsibility: "商品运营" }], memory: "LEADER_MEMORY", existing: 0 } },
     { role: "executor", turn: "run", requestId: "feishu:om_one", teamId: "alice", startedAt: 5, endedAt: 6, output: result,
       input: { assignmentId: assignment.id, executor: "执行者 1", profileId: "executor-1", title: "撰写文案", brief: "九成新，128G", attempt: 0,
         prerequisites: [{ position: 1, title: "调研", executor: "执行者 9", result: "调研结论" }] } },
-    { role: "leader", turn: "close", requestId: "feishu:om_one", teamId: "alice", startedAt: 7, endedAt: 8, output: "文案已整理好。", input: { assignments: closingView } },
+    { role: "leader", turn: "close", requestId: "feishu:om_one", teamId: "alice", startedAt: 7, endedAt: 8, output: "文案已整理好。",
+      input: expect.objectContaining({ assignments: closingView, memory: "LEADER_MEMORY", directory: [{ name: "运营团队", responsibility: "商品运营" }] }) },
   ]);
+  // Session keys and fixture routing are not part of what a turn is given.
+  expect(JSON.stringify(recorded.turns())).not.toContain("fixtureMessageId");
+  expect(JSON.stringify(recorded.turns())).not.toContain("bindingHash");
 });
 
 it("records the cross-team and supplement turns with the parts and the Assignments they were shown", async () => {
@@ -53,11 +62,15 @@ it("records the cross-team and supplement turns with the parts and the Assignmen
   const lead = { id: "alice", name: "Alice", responsibility: "商品运营" };
   await recorded.classifier.assign({ requestId: job.id, coordinator: "Sam", message: "商品 D 上架", summary: "商品 D 上架", lead, parts, teams, fixtureMessageId: "om_one" });
   const shown = [{ position: 1, executor: "执行者 1", profileName: "能力档 1", title: "撰写文案", status: "completed", dependsOn: [] }];
-  await recorded.leader.supplement(leaderInput, shown, "改成淘宝", 1);
+  // What the Coordinator relays about cross-team work is part of a Team Leader's input when there is any.
+  const relay = { parts: [{ title: "自动上架脚本", team: "技术团队", report: "脚本已写好" }] };
+  await recorded.leader.supplement({ ...leaderInput, relay }, shown, "改成淘宝", 1);
   expect(recorded.turns()).toEqual([
-    { role: "coordinator", turn: "assign", requestId: "feishu:om_one", startedAt: 1, endedAt: 2, input: { lead, parts, teams }, output: [{ part: 1, agentId: "jack", summary: "写脚本" }] },
-    { role: "leader", turn: "supplement", requestId: "feishu:om_one", teamId: "alice", startedAt: 3, endedAt: 4, input: { brief: leaderInput.brief, assignments: shown, supplement: "改成淘宝" },
-      output: { affected: [1], assignments: [], decisions: [], parts: [], help: [] } },
+    { role: "coordinator", turn: "assign", requestId: "feishu:om_one", startedAt: 1, endedAt: 2, output: [{ part: 1, agentId: "jack", summary: "写脚本" }],
+      input: { coordinator: "Sam", message: "商品 D 上架", summary: "商品 D 上架", lead, parts, teams } },
+    { role: "leader", turn: "supplement", requestId: "feishu:om_one", teamId: "alice", startedAt: 3, endedAt: 4, output: { affected: [1], assignments: [], decisions: [], parts: [], help: [] },
+      input: expect.objectContaining({ brief: { message: "整理商品文案", summary: "整理商品文案" }, assignments: shown, supplement: "改成淘宝", total: 1, memory: "LEADER_MEMORY",
+        relay: { parts: [{ title: "自动上架脚本", team: "技术团队", report: "脚本已写好" }] } }) },
   ]);
 });
 

@@ -1,9 +1,15 @@
-import type { TeamLeader } from "./agent-dispatch-leader.js";
+import type { LeaderTurnInput, TeamLeader } from "./agent-dispatch-leader.js";
 import type { DispatchClassifier, DispatchExecutor } from "./agent-dispatch-types.js";
 
 /**
- * One turn of the Coordinator, a Team Leader or an Executor: what it was given, what it returned or why it failed, and when it
- * started and ended. A classification names its message; every other turn names its request. A turn still running has no end.
+ * One turn of the Coordinator, a Team Leader or an Executor: the input the dispatch engine gave it, what it returned or why it
+ * failed, and when it started and ended. A classification names its message; every other turn names its request. A turn still
+ * running has no end.
+ *
+ * The Coordinator's and a Team Leader's inputs are whole: the message with the discussion before it, the roster, the requests
+ * and the group memory; the Team Leader's instructions, Brief, presets, Team Directory and own memory. Session keys and fixture
+ * routing are left out, since no turn is given them. An Executor's input here is its Assignment and its prerequisites' results;
+ * the triggering message, its profile's instructions and its memory are added inside its turn, and its thread rollout shows them.
  */
 export type DispatchTurnRecord = {
   role: "coordinator" | "leader" | "executor";
@@ -44,21 +50,22 @@ export function recordDispatchTurns(seams: { classifier: DispatchClassifier; lea
     } finally { record.endedAt = now(); }
   };
   const { classifier, leader, executor } = seams;
+  // What a Team Leader's turn is given, whatever its phase.
+  const given = ({ leader: self, profiles, brief, directory, memory, relay }: LeaderTurnInput) => ({ leader: self, profiles, brief, directory, memory, ...(relay ? { relay } : {}) });
   return {
     classifier: {
-      classify: (input) => recorded({ role: "coordinator", turn: "classify", messageId: input.event.messageId,
-        input: { text: input.event.text, mentionedAgentIds: input.event.mentionedAgentIds ?? [], agents: input.agents, requests: input.requests } }, () => classifier.classify(input)),
-      assign: (input) => recorded({ role: "coordinator", turn: "assign", requestId: input.requestId, input: { lead: input.lead, parts: input.parts, teams: input.teams } },
-        () => classifier.assign(input)),
+      classify: (input) => recorded({ role: "coordinator", turn: "classify", messageId: input.event.messageId, input }, () => classifier.classify(input)),
+      assign: (input) => recorded({ role: "coordinator", turn: "assign", requestId: input.requestId,
+        input: { coordinator: input.coordinator, message: input.message, summary: input.summary, lead: input.lead, parts: input.parts, teams: input.teams } }, () => classifier.assign(input)),
       close: () => classifier.close?.(),
     },
     leader: {
       plan: (input, existing) => recorded({ role: "leader", turn: "plan", requestId: input.requestId, teamId: input.leader.id,
-        input: { brief: input.brief, profiles: input.profiles, ...(input.relay ? { relay: input.relay } : {}) } }, () => leader.plan(input, existing)),
+        input: { ...given(input), ...(existing !== undefined ? { existing } : {}) } }, () => leader.plan(input, existing)),
       supplement: (input, assignments, supplement, total) => recorded({ role: "leader", turn: "supplement", requestId: input.requestId, teamId: input.leader.id,
-        input: { brief: input.brief, assignments, supplement, ...(input.relay ? { relay: input.relay } : {}) } }, () => leader.supplement(input, assignments, supplement, total)),
+        input: { ...given(input), assignments, supplement, ...(total !== undefined ? { total } : {}) } }, () => leader.supplement(input, assignments, supplement, total)),
       close: (input, assignments) => recorded({ role: "leader", turn: "close", requestId: input.requestId, teamId: input.leader.id,
-        input: { assignments, ...(input.relay ? { relay: input.relay } : {}) } }, () => leader.close(input, assignments)),
+        input: { ...given(input), assignments } }, () => leader.close(input, assignments)),
       dispose: () => leader.dispose?.(),
     },
     executor: {
