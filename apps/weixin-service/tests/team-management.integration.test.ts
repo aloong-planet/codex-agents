@@ -461,3 +461,97 @@ it("refuses a team on Penny's application, read from Penny's configuration", asy
     expect(refused).toEqual({ status: 400, body: { error: "无法保存", reasons: ["该飞书应用已用于 Penny，不能用于团队"] } });
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+// QR creation through real main (team-management::US-002/AC-01, AC-03; CON-001). The fake platform's scan is ended through the
+// fixture ingress; its first created application is cli_c0de000000000001 with the secret fixture-created-secret-1.
+// Coverage gap: main ends a waiting code at shutdown so that the SDK's polling does not keep the process alive. The fake platform
+// polls nothing, so no case here fails without that call; team-onboarding.test.ts covers the wait being ended, and a waiting code
+// on a real tenant at shutdown is live acceptance.
+const CREATED_APP = "cli_c0de000000000001";
+const CREATED_SECRET = "fixture-created-secret";
+type QrTeam = TeamView & { method: string; secretStored: boolean; creation?: { status: string; reason?: string; appId?: string; codeExpiresAt?: number };
+  configure?: { status: string }; publish?: { status: string; reason?: string }; credentials?: { status: string }; tests: Record<string, { status: string }> };
+const qrDaisy = () => daisy({ method: "qr", secret: undefined, leader: { name: "Daisy", appId: "", instructions: "只做视觉方案" } });
+async function qrTeamUntil(running: Running, teamId: string, predicate: (team: QrTeam) => boolean): Promise<QrTeam> {
+  const view = await viewUntil(running, (current) => { const found = team(current, teamId) as QrTeam | undefined; return found !== undefined && predicate(found); });
+  return team(view, teamId) as QrTeam;
+}
+
+it("creates a team's application by QR code while the service runs: after the review it joins, works and sends its test message with the created application, whose secret stays in the registry", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-qr-creation-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    // The created application's release awaits the admin's review.
+    running = await start(directory, { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ applications: { [CREATED_APP]: "not_enabled" } }) });
+    const { teamId } = await running.post<{ teamId: string }>("/api/teams/save", { basedOn: (await running.get<View>("/api/teams")).version, team: qrDaisy() });
+    const waiting = await qrTeamUntil(running, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
+    expect([waiting.method, waiting.creation?.status, waiting.leader.appId, waiting.secretStored]).toEqual(["qr", "waiting", "", false]);
+    await running.post("/api/fixture/inbound", { onboardingControl: { scan: "confirmed" } });
+    const review = await qrTeamUntil(running, teamId, ({ publish }) => publish !== undefined);
+    expect({ creation: review.creation, appId: review.leader.appId, secretStored: review.secretStored, configure: review.configure?.status, publish: review.publish?.status, binding: review.bindings[0]?.state })
+      .toEqual({ creation: { status: "done", appId: CREATED_APP }, appId: CREATED_APP, secretStored: true, configure: "done", publish: "review", binding: "onboarding" });
+    expect(announcements(await running.state())).toEqual([]);
+    // The admin approved; 重新检查 finishes the steps, and Sam announces the team.
+    await running.post("/api/fixture/inbound", { onboardingControl: { applications: { [CREATED_APP]: "enabled" } } });
+    await running.post("/api/teams/recheck", { teamId });
+    const joined = await running.until((state) => announcements(state).length === 1);
+    expect(announcements(joined)).toEqual(["Daisy（设计团队）已加入本群，负责：视觉方案"]);
+    // Work routed to the team is posted by the created application, which main started with the secret the scan returned.
+    await running.post("/api/fixture/inbound", groupMessage("om_qr_work", "帮我设计商品主图", decision(teamId, "设计商品主图")));
+    const worked = await running.until((state) => state.agentFixtureOutboxes?.[teamId]?.text.length === 2);
+    expect(worked.agentFixtureOutboxes?.[teamId]?.text.map(({ chatId, message }) => [chatId, message])[0])
+      .toEqual(["oc_alpha", "我安排视觉执行者 1（视觉方案）处理：设计商品主图。完成后会在本群汇报。"]);
+    // Step 6: the confirmed test message leaves through the same application.
+    expect((await running.send("/api/teams/test-message", { teamId })).status).toBe(400);
+    await running.post("/api/teams/test-message", { teamId, confirmed: true });
+    const tested = await running.until((state) => state.agentFixtureOutboxes?.[teamId]?.text.length === 3);
+    expect(tested.agentFixtureOutboxes?.[teamId]?.text.at(-1)).toMatchObject({ chatId: "oc_alpha", message: "这是 Daisy（设计团队）的测试消息，用来确认可以在本群发言。" });
+    const done = await qrTeamUntil(running, teamId, ({ tests }) => tests.oc_alpha !== undefined);
+    expect({ steps: [done.creation?.status, done.configure?.status, done.publish?.status, done.credentials?.status, done.bindings[0]?.join?.status, done.tests.oc_alpha?.status], binding: done.bindings[0]?.state })
+      .toEqual({ steps: ["done", "done", "done", "done", "done", "accepted"], binding: "accepting" });
+    console.log(JSON.stringify({ kind: "team_qr_creation", commands: ["save 设计团队 (扫码一键创建)", "scan confirmed", "重新检查", "帮我设计商品主图", "发送测试消息 (confirmed)"],
+      announcements: announcements(tested), jobs: tested.agentDispatch, outbox: tested.agentFixtureOutboxes?.[teamId], onboarding: tested.fixtureOnboardingCalls, team: done }));
+    // team-management::CON-001: the secret the scan returned is in no response, not in the service output, and in no state file but the registry.
+    expect(JSON.stringify([await running.get("/api/teams"), tested])).not.toContain(CREATED_SECRET);
+    await running.close(); const output = running.output(); running = undefined;
+    expect(output).not.toContain(CREATED_SECRET);
+    const files = readdirSync(directory, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile());
+    const holding = files.filter((entry) => readFileSync(join(entry.parentPath, entry.name)).includes(CREATED_SECRET)).map((entry) => entry.name);
+    expect(files.length).toBeGreaterThan(5);
+    expect(holding.every((name) => name.startsWith("team-registry.sqlite")) && holding.length > 0, holding.join(", ")).toBe(true);
+    const audit = readFileSync(join(directory, "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>).filter(({ team: audited }) => audited === teamId);
+    expect(audit.map(({ event }) => event).filter((event) => ["team_application_qr_requested", "team_application_created", "team_test_message_sent"].includes(String(event))))
+      .toEqual(["team_application_qr_requested", "team_application_created", "team_test_message_sent"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 45000);
+
+// team-management failure modes: "Service restarts during a drain or onboarding … no step reruns without its recorded outcome".
+it("after a restart, asks for a new code in place of the one that waited, and checks a release awaiting review without submitting it again", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-qr-restart-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const { teamId } = await running.post<{ teamId: string }>("/api/teams/save", { basedOn: (await running.get<View>("/api/teams")).version, team: qrDaisy() });
+    await qrTeamUntil(running, teamId, ({ creation }) => typeof creation?.codeExpiresAt === "number");
+    await running.close();
+    // The code's wait ended with the process: the creation needs a new code, asked for by the owner.
+    const review = { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ applications: { [CREATED_APP]: "not_enabled" } }) };
+    running = await start(directory, review);
+    expect((await qrTeamUntil(running, teamId, () => true)).creation).toEqual({ status: "action", reason: "interrupted" });
+    await running.post("/api/teams/qr", { teamId });
+    await running.post("/api/fixture/inbound", { onboardingControl: { scan: "confirmed" } });
+    expect((await qrTeamUntil(running, teamId, ({ publish }) => publish !== undefined)).publish).toMatchObject({ status: "review", reason: "submitted" });
+    const before = (await running.state()).fixtureOnboardingCalls!.map(({ call }) => call);
+    expect(before).toEqual(expect.arrayContaining(["create", "configure", "publish", "check"]));
+    await running.close();
+    // The admin approved while the service was down: startup resumes with the check alone, then joins the group.
+    running = await start(directory);
+    const done = await qrTeamUntil(running, teamId, ({ bindings }) => bindings[0]?.state === "accepting");
+    expect([done.configure?.status, done.publish?.status, done.credentials?.status, done.leader.appId]).toEqual(["done", "done", "done", CREATED_APP]);
+    const resumed = (await running.state()).fixtureOnboardingCalls!.filter(({ call }) => call !== "chat_name").map(({ call, appId, chatId }) => [call, chatId ?? appId]);
+    expect(resumed).toEqual([["check", CREATED_APP], ["add", "oc_alpha"], ["in_chat", "oc_alpha"]]);
+    console.log(JSON.stringify({ kind: "team_qr_restart", commands: ["save 设计团队 (扫码一键创建)", "restart", "刷新二维码", "scan confirmed", "restart"], beforeRestart: before, afterRestart: resumed, team: done }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
