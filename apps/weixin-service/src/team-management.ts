@@ -218,7 +218,7 @@ export class TeamManagement {
           ...(creation ? { creation: { status: creation.status, ...(creation.status === "action" ? { reason: creation.reason } : {}),
             ...(creation.status === "done" ? { appId: creation.appId } : {}), ...(creation.status === "waiting" && link ? { codeExpiresAt: link.expiresAt } : {}) } } : {}),
           ...(record.configure ? { configure: record.configure } : {}), ...(record.publish ? { publish: record.publish } : {}),
-          tests: team.leader.appId ? { ...this.options.registry.testMessages(team.leader.appId) } : {},
+          tests: team.leader.appId ? { ...this.options.registry.testMessages(team.leader.appId) } : {}, testMessage: testText(team),
           ...(record.credentials ? { credentials: record.credentials } : {}),
           bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}) })),
           profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => {
@@ -331,8 +331,8 @@ export type TeamsView = Readonly<{
     creation?: { status: "waiting" | "action" | "done"; reason?: string; appId?: string; codeExpiresAt?: number };
     /** Steps 2 and 3 of the application the team uses, when QR creation made it. */
     configure?: OnboardingOutcome; publish?: OnboardingOutcome;
-    /** Step 6: the latest test message of the team's application in each group it sent one to. */
-    tests: Record<string, TestMessageOutcome>;
+    /** Step 6: the latest test message of the team's application in each group it sent one to, and the text a new one would carry. */
+    tests: Record<string, TestMessageOutcome>; testMessage: string;
     credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome }>;
     profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[] }>;
     activeAssignments: number;

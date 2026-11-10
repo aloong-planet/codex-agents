@@ -1,7 +1,7 @@
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { test } from "./fixtures.js";
@@ -10,8 +10,9 @@ import { test } from "./fixtures.js";
 // onboarding platform. The rules are covered by tests/team-registry.test.ts and tests/team-onboarding.test.ts, the API by
 // tests/team-management-api.test.ts and the running service by tests/team-management.integration.test.ts; these journeys
 // check that the page, the API and the service are wired together.
-// Not built in this ticket (decision D1), so not driven here: QR creation and the test message, MCP binding, skills, and team
-// deletion with its removal panel.
+// QR creation runs against the fake platform, whose scan the journeys end through the fixture route: no Feishu tenant is called,
+// and whether Feishu accepts the automatic configuration and release of a QR-created application stays live acceptance.
+// Not built yet (decision D1), so not driven here: MCP binding, skills, and team deletion with its removal panel.
 const SAM_APP = "cli_0123456789abcdef";
 const SECRET_SENTINEL = "page-secret-SENTINEL-7d21";
 const LONG = { timeout: 15_000 };
@@ -82,8 +83,11 @@ test.describe("with Feishu dispatch", () => {
     await expect(page.locator(".atm-list-item[aria-pressed=true] strong")).toHaveText("新团队 · 待命名");
     await field(page, "负责人名称").fill("Daisy");
     await field(page, "团队名称").fill("设计团队");
+    // A new team starts in QR creation; this one enters an existing application, whose progress starts at the credential check.
+    await editor(page).getByRole("button", { name: "已有应用，手动填写" }).click();
+    await expect(editor(page).locator(".atm-onboard > li > div")).toHaveText([/^校验凭证并读取机器人信息/, /^加入所绑定的群/, /^发送测试消息/]);
     await field(page, "App ID").fill("cli_dddddddddddddddd");
-    await editor(page).getByRole("button", { name: "填写" }).click();
+    await editor(page).getByRole("button", { name: "填写", exact: true }).click();
     await editor(page).getByLabel("App Secret", { exact: true }).fill(SECRET_SENTINEL);
     await field(page, "职责").fill("视觉方案");
     await groupRow(page, "银河护卫队").getByRole("checkbox").check();
@@ -150,9 +154,10 @@ test.describe("with Feishu dispatch", () => {
     await expect(field(page, "App ID")).toBeDisabled();
     await expect(editor(page).locator(".acf-secret")).toHaveText("已保存 · 不显示");
     await expect(editor(page).locator(".acf-secret button")).toHaveCount(0);
-    await expect(editor(page).locator(".atm-onboard > li > .acv2-badge")).toHaveText(["已完成", "已完成"]);
+    await expect(editor(page).locator(".atm-mode")).toHaveText("接入方式：已有应用，手动填写");
+    await expect(editor(page).locator(".atm-onboard > li > .acv2-badge")).toHaveText(["已完成", "已完成", "已完成"]);
     await expect(editor(page).locator(".atm-joins li")).toHaveText([/银河护卫队.*已完成/, /产品讨论组.*已完成/]);
-    await expect(editor(page).getByRole("button", { name: "重新检查" })).toHaveCount(0);
+    await expect(editor(page).locator("[data-onboarding] button")).toHaveCount(0);
     await expect(editor(page)).toContainText("Sam 不执行具体事务，没有执行者能力档。");
     await expect(editor(page).locator("[data-group]")).toHaveCount(2);
     for (const box of await editor(page).locator("[data-group]").all()) {
@@ -198,8 +203,9 @@ test.describe("with Feishu dispatch", () => {
   test("removes a team from a group where it takes work: it stops at once, Sam announces the departure and the preview drops it", async ({ page }, testInfo) => {
     await page.goto("/console/teams");
     await listItem(page, "Alice · 运营团队").click();
-    // Imported from the local configuration, Alice takes work in both groups without recorded checks: both steps show done.
-    await expect(editor(page).locator(".atm-onboard > li > .acv2-badge")).toHaveText(["已完成", "已完成"]);
+    // Imported from the local configuration, Alice takes work in both groups without recorded checks: both steps show done, and
+    // no test message was sent yet.
+    await expect(editor(page).locator(".atm-onboard > li > .acv2-badge")).toHaveText(["已完成", "已完成", "未开始"]);
     await expect(editor(page).locator(".atm-joins li")).toHaveText([/银河护卫队.*机器人已在群里。.*已完成/, /产品讨论组.*机器人已在群里。.*已完成/]);
     await groupRow(page, "产品讨论组").getByRole("checkbox").uncheck();
     await expect(groupRow(page, "产品讨论组")).toContainText("保存后移除");
@@ -210,6 +216,171 @@ test.describe("with Feishu dispatch", () => {
       .toHaveText(/Sam 的公告：「Alice（运营团队）已离开本群，不再接新的事务；进行中的事务会做完。」 · 飞书已接收/, LONG);
     await expect(editor(page).locator(".atm-roster-preview")).toContainText("产品讨论组：Sam 可分派给 Bill、Jack");
     await testInfo.attach("group-removal", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  // QR creation (team-management::US-002/AC-01, AC-03, AC-04). The fake platform creates cli_c0de000000000001 when its scan is confirmed.
+  const CREATED_APP = "cli_c0de000000000001";
+  const steps = (page: Page) => editor(page).locator(".atm-onboard > li");
+  const badges = (page: Page) => editor(page).locator(".atm-onboard > li > .acv2-badge");
+  const qr = (page: Page) => editor(page).locator(".atm-qr");
+  /** Saves a new team in QR creation, bound to 银河护卫队, and waits for its code. */
+  async function saveQrTeam(page: Page) {
+    await page.goto("/console/teams");
+    await page.getByRole("button", { name: "新增团队" }).click();
+    await field(page, "负责人名称").fill("Daisy");
+    await field(page, "团队名称").fill("设计团队");
+    await groupRow(page, "银河护卫队").getByRole("checkbox").check();
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(qr(page).locator("img")).toBeVisible(LONG);
+  }
+  /** A screenshot with the onboarding block at the top of the editor, so that the code and its steps are in the picture. */
+  async function onboardingShot(page: Page, testInfo: TestInfo, name: string) {
+    await editor(page).locator(".atm-mode").evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await testInfo.attach(name, { body: await page.screenshot(), contentType: "image/png" });
+  }
+  /** The code is a drawn image, not a broken one. */
+  const codeDrawn = (page: Page) => qr(page).locator("img").evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth > 0);
+
+  test("creates a new team's application by QR code: the code appears after the save, the scan fills in the App ID, and the steps follow the review", async ({ page, fixtureServer }, testInfo) => {
+    // The created application's release will await the admin's review.
+    await onboarding(fixtureServer, { applications: { [CREATED_APP]: "not_enabled" } });
+    await page.goto("/console/teams");
+    await page.getByRole("button", { name: "新增团队" }).click();
+    // A new team starts in QR creation; nothing is asked of Feishu before the team is saved.
+    await expect(editor(page).locator(".acf-seg button[aria-pressed=true]")).toHaveText("扫码一键创建");
+    await expect(qr(page)).toHaveText("保存后显示保存团队后，这里显示二维码；用飞书扫码即可创建应用。");
+    await expect(steps(page).locator("> div")).toHaveText([/^扫码创建应用/, /^配置权限与机器人能力/, /^发布版本/, /^校验凭证并读取机器人信息/, /^加入所绑定的群/, /^发送测试消息/]);
+    await expect(badges(page)).toHaveText(["未开始", "未开始", "未开始", "未开始", "未开始", "未开始"]);
+    await expect(editor(page).locator("[data-onboarding] .acf-row-actions")).toHaveCount(0);
+    await onboardingShot(page, testInfo, "qr-before-save");
+
+    await field(page, "负责人名称").fill("Daisy");
+    await field(page, "团队名称").fill("设计团队");
+    await groupRow(page, "银河护卫队").getByRole("checkbox").check();
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(qr(page).locator("img")).toBeVisible(LONG);
+    expect(await codeDrawn(page)).toBe(true);
+    await expect(qr(page).locator("p")).toHaveText("用飞书扫码，在手机上确认创建。创建完成后，App ID 与 App Secret 自动回填，你不需要复制任何凭证。");
+    await expect(qr(page).getByRole("button", { name: "刷新二维码" })).not.toHaveClass(/acv2-primary/);
+    await expect(badges(page)).toHaveText(["进行中", "未开始", "未开始", "未开始", "未开始", "未开始"]);
+    await onboardingShot(page, testInfo, "qr-waiting-for-scan");
+
+    // The scan, while the owner is editing another field: the QR block still follows the service.
+    await field(page, "职责").fill("视觉方案");
+    await onboarding(fixtureServer, { scan: "confirmed" });
+    await expect(editor(page).locator(".atm-created")).toHaveText(`已创建应用 ${CREATED_APP}凭证已自动保存，不显示`, LONG);
+    await expect(badges(page)).toHaveText(["已完成", "已完成", "等待审核", "未开始", "未开始", "未开始"], LONG);
+    await expect(steps(page).nth(2)).toContainText("已提交发布，等待企业管理员审核。审核通过后点「重新检查」。");
+    await expect(field(page, "职责")).toHaveValue("视觉方案");
+    await expect(editor(page).getByRole("button", { name: "发送测试消息…" })).toHaveCount(0);
+    await onboardingShot(page, testInfo, "qr-awaiting-review");
+    // A save made with the page's older copy of the team keeps the created application.
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator("#atm-savebar")).toContainText("已保存：新事务使用新配置");
+    await expect(editor(page).locator(".atm-created")).toContainText(CREATED_APP);
+
+    // The admin approved.
+    await onboarding(fixtureServer, { applications: { [CREATED_APP]: "enabled" } });
+    await editor(page).getByRole("button", { name: "重新检查" }).click();
+    await expect(badges(page)).toHaveText(["已完成", "已完成", "已完成", "已完成", "已完成", "未开始"], LONG);
+    await expect(listItem(page, "Daisy · 设计团队")).toContainText("正常接单");
+    await expect(editor(page).getByRole("button", { name: "发送测试消息…" })).toBeVisible();
+    // team-management::CON-001: the secret the scan returned is nowhere in the page.
+    expect(await page.content()).not.toContain("fixture-created-secret");
+    await onboardingShot(page, testInfo, "qr-done");
+  });
+
+  test("shows a code that ran out as needing action, offers a new one, and says when Feishu gives none", async ({ page, fixtureServer }, testInfo) => {
+    await saveQrTeam(page);
+    const first = await qr(page).locator("img").getAttribute("src");
+    await onboarding(fixtureServer, { scan: "expired" });
+    await expect(qr(page)).toHaveText("二维码已过期这个二维码已过期，或扫码没有完成。刷新后重新扫码即可，不会创建重复的应用。刷新二维码", LONG);
+    await expect(qr(page).getByRole("button", { name: "刷新二维码" })).toHaveClass(/acv2-primary/);
+    await expect(steps(page).first()).toHaveAttribute("data-state", "blocked");
+    await expect(steps(page).first()).toContainText("二维码已过期，或扫码没有完成。请刷新二维码后重新扫码。");
+    await expect(badges(page).first()).toHaveText("需处理");
+    await onboardingShot(page, testInfo, "qr-expired");
+
+    await onboarding(fixtureServer, { link: "unreachable" });
+    await qr(page).getByRole("button", { name: "刷新二维码" }).click();
+    await expect(qr(page)).toHaveText("未取得二维码暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」再试。刷新二维码", LONG);
+    await expect(steps(page).first()).toContainText("暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」。");
+    await onboardingShot(page, testInfo, "qr-unreachable");
+
+    await onboarding(fixtureServer, { link: "ready" });
+    await qr(page).getByRole("button", { name: "刷新二维码" }).click();
+    await expect(qr(page).locator("img")).toBeVisible(LONG);
+    expect(await codeDrawn(page)).toBe(true);
+    expect(await qr(page).locator("img").getAttribute("src")).not.toBe(first);
+    await expect(badges(page).first()).toHaveText("进行中");
+  });
+
+  // Owner decision of 2026-11-11: a team that has an application may be saved as QR creation; it keeps working until the scan.
+  test("lets a team with an application switch to QR creation: it keeps taking work until the scan, then onboards again with the created application", async ({ page, fixtureServer }, testInfo) => {
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    const segment = (name: string) => editor(page).locator(".acf-seg").getByRole("button", { name });
+    await expect(segment("已有应用，手动填写")).toHaveAttribute("aria-pressed", "true");
+    // The chosen segment keeps its background under the pointer, and differs from a segment that is only hovered.
+    const background = (name: string) => segment(name).evaluate((button) => getComputedStyle(button).backgroundColor);
+    await segment("已有应用，手动填写").hover();
+    const chosen = await background("已有应用，手动填写");
+    await segment("扫码一键创建").hover();
+    expect([chosen, await background("已有应用，手动填写"), await background("扫码一键创建")]).toEqual(["rgb(228, 239, 234)", "rgb(228, 239, 234)", "rgb(238, 240, 235)"]);
+
+    await segment("扫码一键创建").click();
+    await expect(qr(page)).toHaveText("保存后显示保存团队后，这里显示二维码；用飞书扫码即可创建应用。扫码创建的新应用会替换现在的应用 cli_bbbbbbbbbbbbbbbb，替换后团队在各群重新接入。");
+    await expect(badges(page)).toHaveText(["未开始", "未开始", "未开始", "未开始", "未开始", "未开始"]);
+    await onboardingShot(page, testInfo, "qr-replacement-before-save");
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(qr(page).locator("img")).toBeVisible(LONG);
+    // Until the scan Bill posts with the application it has.
+    await expect(listItem(page, "Bill · 生活团队")).toContainText("正常接单");
+    await expect(editor(page).locator(".atm-roster-preview")).toContainText("银河护卫队：Sam 可分派给 Alice、Bill、Jack");
+
+    await onboarding(fixtureServer, { scan: "confirmed" });
+    await expect(editor(page).locator(".atm-created")).toContainText(CREATED_APP, LONG);
+    await expect(badges(page)).toHaveText(["已完成", "已完成", "已完成", "已完成", "已完成", "未开始"], LONG);
+    await expect(listItem(page, "Bill · 生活团队")).toContainText("正常接单", LONG);
+    // As an existing application it now shows the created App ID, with its secret stored.
+    await segment("已有应用，手动填写").click();
+    await expect(field(page, "App ID")).toHaveValue(CREATED_APP);
+    await expect(editor(page).locator(".acf-secret")).toHaveText(/已保存 · 不显示/);
+  });
+
+  // Step 6 (owner decision of 2026-11-11): sent by the team's own application, only from the confirmation.
+  test("sends the test message only from its confirmation, and shows each group's result", async ({ page, fixtureServer }, testInfo) => {
+    const billOutbox = async () => ((await (await fetch(`${fixtureServer.url}/api/state`, { headers: { cookie: fixtureServer.cookie } })).json()) as
+      { agentFixtureOutboxes: Record<string, { text: Array<{ chatId: string; message: string }> }> }).agentFixtureOutboxes.bill!.text.map(({ chatId, message: sent }) => [chatId, sent]);
+    const message = "这是 Bill（生活团队）的测试消息，用来确认可以在本群发言。";
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    await editor(page).getByRole("button", { name: "发送测试消息…" }).click();
+    const confirmation = editor(page).locator(".atm-test-confirm");
+    await expect(confirmation).toHaveText(`将以 Bill（生活团队）的机器人向银河护卫队、产品讨论组各发一条测试消息，群里的成员都会看到：「${message}」确认发送取消`);
+    await testInfo.attach("test-message-confirmation", { body: await page.screenshot(), contentType: "image/png" });
+    await confirmation.getByRole("button", { name: "取消" }).click();
+    await expect(confirmation).toHaveCount(0);
+    expect(await billOutbox()).toEqual([]);
+
+    // Feishu refuses the first send and accepts the second.
+    await post(fixtureServer, "/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["rejected", "accepted"] } });
+    await editor(page).getByRole("button", { name: "发送测试消息…" }).click();
+    await confirmation.getByRole("button", { name: "确认发送" }).click();
+    const results = steps(page).nth(2).locator(".atm-joins li");
+    await expect(results).toHaveText(["银河护卫队发送失败 · 不会自动重发需处理", "产品讨论组飞书已接收已完成"], LONG);
+    await expect(steps(page).nth(2)).toHaveAttribute("data-state", "blocked");
+    await expect(confirmation).toHaveCount(0);
+    expect(await billOutbox()).toEqual([["oc_beta", message]]);
+    await testInfo.attach("test-message-failed-in-one-group", { body: await page.screenshot(), contentType: "image/png" });
+
+    // The owner sends again: both groups accept, and each group shows its latest result.
+    await editor(page).getByRole("button", { name: "发送测试消息…" }).click();
+    await confirmation.getByRole("button", { name: "确认发送" }).click();
+    await expect(results).toHaveText(["银河护卫队飞书已接收已完成", "产品讨论组飞书已接收已完成"], LONG);
+    await expect(badges(page).nth(2)).toHaveText("已完成");
+    expect(await billOutbox()).toEqual([["oc_beta", message], ["oc_alpha", message], ["oc_beta", message]]);
+    await testInfo.attach("test-message-accepted", { body: await page.screenshot(), contentType: "image/png" });
   });
 });
 
