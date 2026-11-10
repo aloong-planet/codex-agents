@@ -59,7 +59,7 @@ The owner chose this layout: the team list on the left, and the selected team's 
 #### 1. Basic information and Feishu onboarding
 
 - **Fields.** Leader name and team name.
-- **Onboarding method.** A segmented control switches between QR one-click creation and an existing application. The choice is saved with the team.
+- **Onboarding method.** A segmented control switches between QR one-click creation and an existing application, with a 1px line in the page's line colour between its two segments. The choice is saved with the team.
 - **QR creation.**
   - A QR placeholder asks the owner to scan in Feishu and confirm. The scan creates a new agent application without selecting an existing one, and its credentials fill in automatically.
   - The code appears once the team is saved with QR creation chosen. Until then the placeholder says 「保存后显示」, the text says the code appears after saving, and step 1 is not started. A team that already has an application is also told that the scanned application replaces it and that the team then onboards again in its groups.

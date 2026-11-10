@@ -73,9 +73,11 @@ a.acv2-button{display:inline-flex;align-items:center;text-decoration:none;color:
 .acf-secret .acv2-button{margin-left:auto;min-height:24px;padding:2px 7px;font-size:10px}
 .acf-row-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 .acf-row-actions .acv2-button{min-height:28px;padding:3px 9px;font-size:11px}
-/* A segmented choice. The pressed rule follows the hover rule, so the chosen segment keeps its background under the pointer. */
+/* A segmented choice. The pressed rule follows the hover rule, so the chosen segment keeps its background under the pointer.
+   A line parts the segments, so a hovered segment beside the chosen one does not read as one block with it. */
 .acf-seg{display:inline-flex;border:1px solid var(--acv-line);border-radius:6px;overflow:hidden}
 .acf-seg button{border:0;background:var(--acv-paper);padding:6px 10px;font-size:11px;color:var(--acv-ink)}
+.acf-seg button+button{border-left:1px solid var(--acv-line)}
 .acf-seg button:hover{background:var(--acv-soft)}
 .acf-seg button[aria-pressed="true"]{background:var(--acv-selected);color:var(--acv-brand);font-weight:650}
 .acf-danger{border-color:var(--acv-error)}

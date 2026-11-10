@@ -327,6 +327,10 @@ test.describe("with Feishu dispatch", () => {
     const chosen = await background("已有应用，手动填写");
     await segment("扫码一键创建").hover();
     expect([chosen, await background("已有应用，手动填写"), await background("扫码一键创建")]).toEqual(["rgb(228, 239, 234)", "rgb(228, 239, 234)", "rgb(238, 240, 235)"]);
+    // A 1px line in the page's line colour (#e2e5df) parts the two segments, so the hovered one and the chosen one beside it
+    // do not read as one block (owner decision of 2026-11-11). The first segment has no line before it.
+    const leftBorder = (name: string) => segment(name).evaluate((button) => { const style = getComputedStyle(button); return `${style.borderLeftWidth} ${style.borderLeftStyle} ${style.borderLeftColor}`; });
+    expect([await leftBorder("扫码一键创建"), await leftBorder("已有应用，手动填写")]).toEqual([expect.stringMatching(/^0px /), "1px solid rgb(226, 229, 223)"]);
 
     await segment("扫码一键创建").click();
     await expect(qr(page)).toHaveText("保存后显示保存团队后，这里显示二维码；用飞书扫码即可创建应用。扫码创建的新应用会替换现在的应用 cli_bbbbbbbbbbbbbbbb，替换后团队在各群重新接入。");
