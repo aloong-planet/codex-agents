@@ -173,16 +173,30 @@ describe("connections held by the host", () => {
     expect(starts(files).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("closing stops every program it started, including one being replaced and one still connecting", async () => {
+  it("closing waits until a program that a reconnection replaced has stopped", async () => {
     const { work, open } = setup();
     const catalog = open();
     cleanup.push(() => void stopRunningPrograms(work));
-    register(catalog, input("replaced", testServerFiles(work, "replaced")));
+    const files = testServerFiles(work);
+    register(catalog, input("replaced", files));
     await connected(catalog, "replaced");
-    // The connected program is replaced while the new one is still connecting; another one is still connecting.
+    // The new program fails at once, so closing has nothing else to wait for than the replaced one, which keeps
+    // running after its input ends until it is signalled.
+    const replaced = starts(files)[0]!.pid;
+    fs.writeFileSync(files.failFlag, "");
     catalog.reconnect("replaced");
-    register(catalog, input("starting", testServerFiles(work, "starting")));
-    expect(runningPrograms(work)).toHaveLength(3);
+    expect(runningPrograms(work)).toContain(replaced);
+
+    await catalog.close();
+    expect(runningPrograms(work)).toEqual([]);
+  });
+
+  it("closing stops a program that is still connecting", async () => {
+    const { work, open } = setup();
+    const catalog = open();
+    cleanup.push(() => void stopRunningPrograms(work));
+    register(catalog, input("starting", testServerFiles(work)));
+    expect(runningPrograms(work)).toHaveLength(1);
 
     await catalog.close();
     expect(runningPrograms(work)).toEqual([]);
