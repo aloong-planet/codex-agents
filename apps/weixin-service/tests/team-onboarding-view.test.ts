@@ -1,7 +1,11 @@
 // What the 团队管理 page's onboarding block shows for a team (team-management::US-002/AC-01, AC-03, AC-04, AC-06 to AC-09), as the
 // page's own script decides it: src/public/console/team-onboarding-view.js, a classic script that publishes itself on globalThis
-// and is imported here for that effect. The expected texts are the ones the owner confirmed on the team management prototype.
-// That the page draws what these rules return, and sends what its buttons promise, is covered by e2e/team-management.spec.ts.
+// and is imported here for that effect.
+// Where the expected texts come from: the team management spec and the prototype the owner confirmed, except five that neither
+// holds. Those five are the page's wording as it was before QR creation, pinned here so that moving the rules did not change
+// it: the note for a missing App Secret, and the joining notes for a pending approval, a refused add, a bot that is not in the
+// group afterwards, and a group that has not been tried.
+// That the page draws what these rules return, as text, and sends what its buttons promise is covered by e2e/team-management.spec.ts.
 import { describe, expect, it } from "vitest";
 import "../src/public/console/team-onboarding-view.js";
 
