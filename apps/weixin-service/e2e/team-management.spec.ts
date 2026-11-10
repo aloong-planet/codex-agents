@@ -388,6 +388,34 @@ test.describe("with Feishu dispatch", () => {
   });
 });
 
+// agent-console::REQ-005/AC-04: a group's name comes from Feishu, where any member can rename the group, and a leader's and a
+// team's name are typed by the owner. The onboarding block draws them in its rows, their reasons and the test message's
+// confirmation; they must appear as the text they are, and never become page elements.
+test.describe("with names that hold markup", () => {
+  const MARK = '<img src=x onerror="window.__marked=1">';
+  test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: {
+    oc_alpha: { name: `${MARK}银河护卫队` }, oc_beta: { name: `<i>产品</i>讨论组`, add: "owner_only" } } }) } } });
+
+  test("draws group, leader and team names in the onboarding block as text", async ({ page, fixtureServer }) => {
+    const { version } = await (await fetch(`${fixtureServer.url}/api/teams`, { headers: { cookie: fixtureServer.cookie } })).json() as { version: number };
+    await post(fixtureServer, "/api/teams/save", { basedOn: version, team: { teamName: "<i>设计</i>团队", responsibility: "视觉方案", groups: ["oc_alpha", "oc_beta"],
+      leader: { name: `Daisy${MARK}`, appId: "cli_dddddddddddddddd", instructions: "" }, secret: "daisy-secret",
+      executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: ["files.read"] }] } });
+    await page.goto("/console/teams");
+    await listItem(page, "<i>设计</i>团队").click();
+    const block = editor(page).locator("[data-onboarding]");
+    // The group that lets only its owner and admins add members is named in its row and in the row's reason.
+    await expect(block.locator(".atm-joins li")).toHaveText([`${MARK}银河护卫队机器人已在群里。已完成`,
+      "<i>产品</i>讨论组<i>产品</i>讨论组只允许群主和管理员添加成员，Sam 无法拉入。请在飞书调整群设置，或由群主手动添加。需处理"], LONG);
+    await block.getByRole("button", { name: "发送测试消息…" }).click();
+    await expect(block.locator(".atm-test-confirm")).toHaveText(`将以 Daisy${MARK}（<i>设计</i>团队）的机器人向${MARK}银河护卫队发一条测试消息，群里的成员都会看到：`
+      + `「这是 Daisy${MARK}（<i>设计</i>团队）的测试消息，用来确认可以在本群发言。」确认发送取消`);
+    // Nothing in the names became an element, and nothing in them ran.
+    await expect(block.locator("img, i")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { __marked?: number }).__marked)).toBeUndefined();
+  });
+});
+
 // The dispatch-group form (agent-console::US-009). The file write and its refusals are covered by
 // tests/dispatch-group-settings.test.ts and the restart by tests/team-management.integration.test.ts; these journeys check the page.
 // Coverage gap: the page's request states are driven for proposed and running only. Holding a request queued or waiting needs a

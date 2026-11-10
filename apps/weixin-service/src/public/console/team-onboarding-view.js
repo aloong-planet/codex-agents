@@ -80,6 +80,10 @@
    * Returns whether the block is in QR creation (`qr`), the QR area (`area`, null for an existing application), the steps
    * with a row per group where a step has them, whether 「重新检查」 and the test message are offered, and the confirmation's
    * text while it is open. A step's `state` is one of todo, active, review, blocked and done.
+   *
+   * Every text it returns is plain text, and some of it holds names and IDs that come from Feishu or from the owner: a
+   * row's `group` and `note`, the area's `text` and `created`, and `confirm`. The page must draw them as text
+   * (agent-console::REQ-005/AC-04). A step's `title` and `note`, and the area's `box`, are this script's own words.
    */
   function onboardingView({ fixed, team, method, groups, confirming }) {
     const groupName = (chatId) => groups.find((group) => group.chatId === chatId)?.name ?? chatId;
