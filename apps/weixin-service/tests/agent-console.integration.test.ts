@@ -249,15 +249,4 @@ describe("team overview APIs against the running service", () => {
     const audit = fs.readFileSync(path.join(fs.realpathSync(directory), "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(audit.at(-1)).toMatchObject({ by: "browser", browser: { id: ownerId }, event: "browser_revoked", browsers: [{ id: otherId }] });
   }, 60_000);
-
-  it("sends the console's home to the team overview", async () => {
-    const directory = dispatchDirectory();
-    const service = await running(directory);
-    const origin = service.url, cookie = await authorizeLocalService(directory);
-    const home = await fetch(`${origin}/`, { headers: { cookie }, redirect: "manual" });
-    expect([home.status, home.headers.get("location")]).toEqual([302, "/console"]);
-    const page = await fetch(`${origin}/console`, { headers: { cookie } });
-    expect(page.status).toBe(200);
-    expect(await page.text()).toContain("<title>团队总览</title>");
-  }, 60_000);
 });

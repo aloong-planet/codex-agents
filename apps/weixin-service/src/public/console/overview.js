@@ -13,7 +13,7 @@
     cancelled: ["已取消", ""], interrupted: ["已中断", "interrupted"], blocked: ["未开始（前项失败）", ""] };
   // A report's delivery, kept apart from the business state: acceptance by the platform is not proof that anyone read it.
   const DELIVERY = { none: "尚无结果汇报", accepted: "平台已接收", queued: "正在发送", sending: "正在发送", unknown: "发送结果未知", rejected: "发送失败", cancelled: "未发送" };
-  const KIND = { receipt: "开工", cross_team: "跨队指派", decision: "决策", pending: "待确认", failure: "失败", interrupted: "中断", closing: "收尾" };
+  const KIND = { receipt: "开工", cross_team: "跨队指派", decision: "决策", pending: "待确认", failure: "失败", interrupted: "中断", closing: "收尾", cancelled: "取消" };
   const SOURCE = { voice: "语音", media: "图片或文件" };
   const TONES = new Set(["sam", "alice", "bill", "jack"]);
   const WARN = new Set(["waiting", "partially_failed", "failed", "partially_unassigned", "cancelled"]);
@@ -25,6 +25,8 @@
   const collapsed = new Set();
   // The drawer: the selected node (null: every record; undefined: closed), the expanded record, the tab and the nodes opened before.
   let selected, expandedRequest = null, tab = "records", trail = [], lastTrigger = null;
+  // Records whose group-post timeline the owner opened, kept open when the records are redrawn.
+  const openPosts = new Set();
 
   const tone = (id) => `ats-tone ats-tone-${TONES.has(id) ? id : "other"}`;
   const toneKey = (id) => TONES.has(id) ? id : "other";
@@ -39,36 +41,52 @@
   const involves = (request, teamId) => request.lead === teamId || request.assignments.some((a) => a.teamId === teamId) || request.parts.some((part) => part.teamId === teamId);
   const findAssignment = (id) => { for (const request of view.requests) { const a = request.assignments.find((item) => item.id === id); if (a) return { request, a }; } return null; };
   const findRequest = (id) => view.requests.find((request) => request.id === id) ?? null;
-  // Request IDs are long hashes that no group post shows; the tree and records show their first characters, an Assignment its number.
-  const shortId = (id) => id.length > 12 ? id.slice(0, 8) : id;
-  const assignmentLabel = (id) => {
-    const [request, kind, attempt, number] = id.split(":");
-    return kind === "assignment" && number ? `${shortId(request)}-${attempt === "0" ? number : `${attempt}.${number}`}` : shortId(id);
-  };
   const pad = (n) => String(n).padStart(2, "0");
   const clock = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const stamp = (ms) => { const d = new Date(ms), now = new Date(); return d.toDateString() === now.toDateString() ? clock(ms) : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(ms)}`; };
 
+  // The service's view, as text, so that a poll that finds nothing new changes nothing on the page.
+  let loaded = "";
   async function load() {
+    let text;
     try {
       const response = await fetch("/api/overview");
+      // A refused request means this browser lost its authorization: reloading shows the login card (agent-console::US-001/AC-03).
       if (response.status === 401) { location.reload(); return; }
       if (!response.ok) throw new Error(String(response.status));
-      view = await response.json();
+      text = await response.text();
     } catch {
-      $("ats-view").innerHTML = '<div class="acv2-empty" role="alert">暂时读不到团队总览，请稍后刷新。</div>';
+      if (!view) $("ats-view").innerHTML = '<div class="acv2-empty" role="alert">暂时读不到团队总览，请稍后刷新。</div>';
       return;
     }
+    if (text === loaded) return;
+    const first = !view;
+    loaded = text;
+    view = JSON.parse(text);
     // A link from elsewhere in the console, such as the dispatch-group refusal list, names a request: open its record, expanded.
-    const linked = findRequest(new window.URLSearchParams(location.search).get("request") ?? "");
+    const linked = first ? findRequest(new window.URLSearchParams(location.search).get("request") ?? "") : null;
     if (linked) scope = linked.chatId;
     if (!view.groups.some((group) => group.chatId === scope)) scope = view.groups[0]?.chatId ?? null;
+    if (first) { render(); if (linked) open(`req:${linked.id}`); return; }
+    // Work started or ended in the service: redraw the tree and the open records, keeping where the owner was.
+    const canvas = $("ats-scroll"), drawer = $("ats-drawer-scroll");
+    const kept = { left: canvas?.scrollLeft ?? 0, top: canvas?.scrollTop ?? 0, drawer: drawer.scrollTop };
     render();
-    if (linked) open(`req:${linked.id}`);
+    if ($("ats-scroll")) { $("ats-scroll").scrollLeft = kept.left; $("ats-scroll").scrollTop = kept.top; }
+    if (!$("ats-drawer").hidden) {
+      $("ats-drawer-title").textContent = title(selected);
+      renderRows();
+      if (!storeOf(selected)) $("ats-panel-storage").innerHTML = relation(selected);
+      drawer.scrollTop = kept.drawer;
+    }
   }
 
   // ── The tree ──
-  const frames = (teamId) => inScope().map((r) => ({ r, list: r.assignments.filter((a) => a.teamId === teamId && active(a.status)) })).filter((g) => g.list.length);
+  // The frames under a Team Leader in the selected group, each with that team's running and waiting Executors (from the projection).
+  const frames = (teamId) => (view.teams.find((team) => team.id === teamId)?.frames[scope] ?? []).flatMap(({ request, assignments }) => {
+    const r = findRequest(request);
+    return r ? [{ r, list: assignments.flatMap((id) => r.assignments.filter((a) => a.id === id)) }] : [];
+  });
   function coordinatorCard() {
     const id = "coordinator", sam = coordinator();
     return `<div class="ats-card ${tone(sam)}" data-card="${id}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${id}" aria-label="查看${esc(name(sam))}的记录"><strong>${esc(name(sam))}</strong></button></div><button class="ats-node-button" type="button" data-open="${id}" aria-pressed="${selected === id}"><span class="ats-role">总调度 · 协调分派</span><span class="ats-bot">${esc(name(sam))} Bot</span></button></div>`;
@@ -83,12 +101,12 @@
   // An Executor: its profile, its Assignment, status and ID; no bot identity and no chat entry (agent-console::US-003/AC-04).
   function executorCard(a) {
     const id = `exec:${a.id}`;
-    return `<div class="ats-card ${tone(a.teamId)}" data-card="${esc(id)}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${esc(id)}" aria-label="查看${esc(a.executor)}的记录"><strong>${esc(a.executor)}</strong></button></div><button class="ats-node-button" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}"><span class="ats-role">能力档 · ${esc(a.profile)}</span><span class="ats-task-caption">${esc(a.title)}</span><span class="ats-node-foot">${badge(a.status)}<span>${esc(assignmentLabel(a.id))}</span></span></button></div>`;
+    return `<div class="ats-card ${tone(a.teamId)}" data-card="${esc(id)}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${esc(id)}" aria-label="查看${esc(a.executor)}的记录"><strong>${esc(a.executor)}</strong></button></div><button class="ats-node-button" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}"><span class="ats-role">能力档 · ${esc(a.profile)}</span><span class="ats-task-caption">${esc(a.title)}</span><span class="ats-node-foot">${badge(a.status)}<span>${esc(a.label)}</span></span></button></div>`;
   }
   function frame(teamId, group, left) {
     const r = group.r, own = r.assignments.filter((a) => a.teamId === teamId).length, cross = r.assignments.length - own, id = `req:${r.id}`;
     const caption = r.lead === teamId ? `本队 ${own} 项分工${cross ? ` · 跨队 ${cross} 项` : ""}` : `跨队分工 · 应 ${name(r.lead)} 请求`;
-    return `<div class="ats-position ats-req-frame" data-anchor="${esc(`${teamId}:${r.id}`)}" ${box(left, 372, group.width)}><button class="ats-req-label" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}" aria-label="查看事务 ${esc(shortId(r.id))} ${esc(r.title)}"><span class="ats-req-title">${esc(shortId(r.id))} ${esc(r.title)}</span><small>${esc(caption)}</small></button><div class="ats-req-members">${group.list.map((a) => `<div class="ats-req-slot">${executorCard(a)}</div>`).join("")}</div></div>`;
+    return `<div class="ats-position ats-req-frame" data-anchor="${esc(`${teamId}:${r.id}`)}" ${box(left, 372, group.width)}><button class="ats-req-label" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}" aria-label="查看事务 ${esc(r.label)} ${esc(r.title)}"><span class="ats-req-title">${esc(r.label)} ${esc(r.title)}</span><small>${esc(caption)}</small></button><div class="ats-req-members">${group.list.map((a) => `<div class="ats-req-slot">${executorCard(a)}</div>`).join("")}</div></div>`;
   }
   // Node positions travel as data attributes and are applied through the CSSOM: the console's CSP allows no inline style attribute.
   const box = (left, top, width) => `data-left="${left}" data-top="${top}" data-width="${width}"`;
@@ -191,7 +209,7 @@
     if (id === "coordinator") return name(coordinator());
     if (id.startsWith("team:")) return name(id.slice(5));
     if (id.startsWith("exec:")) return findAssignment(id.slice(5))?.a.executor ?? id;
-    if (id.startsWith("req:")) { const r = findRequest(id.slice(4)); return r ? `${shortId(r.id)} ${r.title}` : id; }
+    if (id.startsWith("req:")) { const r = findRequest(id.slice(4)); return r ? `${r.label} ${r.title}` : id; }
     if (id.startsWith("group:")) return groupName(id.slice(6));
     const store = storeOf(id);
     if (store) return STORE_TITLE[store.kind] ?? id;
@@ -210,13 +228,13 @@
   }
   // An expanded record, in order: result, path, Assignments, group posts, original message and storage links (agent-console::US-004/AC-04).
   function detail(r) {
-    const cross = [...new Set([...r.assignments.map((a) => a.teamId), ...r.parts.flatMap((part) => part.teamId ? [part.teamId] : [])])].filter((teamId) => teamId !== r.lead);
+    const cross = r.crossTeams;
     const ended = r.assignments.length > 0 && !r.assignments.some((a) => active(a.status) || a.status === "queued");
     const result = r.result ?? (r.status === "proposed" ? "等待发起人确认后开始。" : ["queued", "running", "waiting"].includes(r.status) ? "事务进行中，收尾后在这里显示结果。" : "没有记录结果。");
     const sam = esc(name(coordinator()));
     const path = `群任务 · ${esc(groupName(r.chatId))}<br>分派路径：${sam} → ${esc(name(r.lead))}（主责）${cross.map((teamId) => `<br>跨队：${sam} → ${esc(name(teamId))} · 应 ${esc(name(r.lead))} 请求`).join("")}${r.parts.filter((part) => part.teamId === null).map((part) => `<br>未承接：${esc(part.title)} · 没有团队承接`).join("")}<br>汇报：${[r.lead, ...cross].map((teamId) => esc(name(teamId))).join("、")} · 原群${ended ? "<br>全部执行者已结束，执行记录保留。" : ""}`;
     const assignments = r.assignments.length ? `<div class="acv2-detail-label">分工 · ${r.assignments.length} 项</div><ul class="ats-asg-list">${r.assignments.map((a) => `<li class="ats-asg"><div class="ats-asg-top"><button class="ats-asg-name ${tone(a.teamId)}" type="button" data-open="${esc(`exec:${a.id}`)}">${esc(a.executor)}</button>${badge(a.status)}</div><div class="ats-asg-meta">${esc(name(a.teamId))} 负责 · 能力档：${esc(a.profile)}${a.crossTeam ? " · 跨队" : ""}</div>${a.brief ? `<p class="ats-asg-brief">交办：${esc(a.brief)}</p>` : ""}<p>${esc(a.title)}${a.result ? `：${esc(a.result)}` : ""}${active(a.status) || a.status === "queued" || a.status === "blocked" ? "" : " 执行者已结束，记录保留。"}</p></li>`).join("")}</ul>` : "";
-    const posts = `<details class="acv2-process"><summary>群内汇报 · ${r.posts.length} 条</summary><ol class="acv2-timeline">${r.posts.map((post) => `<li class="acv2-step"><time>${post.acceptedAt ? esc(clock(post.acceptedAt)) : ""}</time><div><span class="ats-report-who ${tone(post.agentId)}">${esc(name(post.agentId))}${KIND[post.kind] ? ` · ${KIND[post.kind]}` : ""}</span><p class="ats-report-text">${esc(post.text)} · ${esc(DELIVERY[post.state] ?? post.state)}</p></div></li>`).join("")}</ol></details>`;
+    const posts = `<details class="acv2-process" data-posts="${esc(r.id)}"${openPosts.has(r.id) ? " open" : ""}><summary>群内汇报 · ${r.posts.length} 条</summary><ol class="acv2-timeline">${r.posts.map((post) => `<li class="acv2-step"><time>${post.acceptedAt ? esc(clock(post.acceptedAt)) : ""}</time><div><span class="ats-report-who ${tone(post.agentId)}">${esc(name(post.agentId))}${KIND[post.kind] ? ` · ${KIND[post.kind]}` : ""}</span><p class="ats-report-text">${esc(post.text)} · ${esc(DELIVERY[post.state] ?? post.state)}</p></div></li>`).join("")}</ol></details>`;
     const source = [r.requester === "owner" ? "本人" : "群成员", groupName(r.chatId), SOURCE[r.message.source]].filter(Boolean).map(esc).join(" / ");
     const message = `${r.message.text}${r.message.attachments.length ? `\n附件：${r.message.attachments.join("、")}` : ""}`;
     return `<div class="acv2-record-detail"><h3 class="acv4-detail-title">${esc(r.title)}</h3><div class="acv2-result${WARN.has(r.status) ? " acv2-warning" : ""}">${esc(result)}</div><div class="ats-path-line">${path}</div>${assignments}${posts}<div class="acv2-detail-label">原始信息 · ${source}</div><blockquote class="acv2-message">${esc(message)}</blockquote><div class="acv2-detail-label">对应存储</div><div class="acv2-related"><button type="button" data-open="store:group-memory:${esc(r.chatId)}">群业务记忆 · 仅 ${sam}</button><button type="button" data-open="store:agent-memory:${esc(r.chatId)}">负责人与执行者记忆</button><button type="button" data-open="store:team-store:${esc(r.chatId)}">执行记录与交付文件</button></div></div>`;
@@ -294,13 +312,13 @@
         const { request: r, a } = hit;
         summary = `由 ${name(a.teamId)} 按能力档「${a.profile}」为「${a.title}」创建${a.crossTeam ? `，属于 ${sam} 应 ${name(r.lead)} 请求指派的跨队分工` : ""}。${active(a.status) ? "分工仍在进行。" : "分工已结束，执行记录保留。"}只看负责人的交办和本能力档的共享记忆；不开放私聊，由负责人沟通与汇报。`;
         path = `${group} → ${sam} → ${name(a.teamId)}${a.crossTeam ? "（跨队）" : ""} → ${a.executor}`;
-        links = [[`req:${r.id}`, `${shortId(r.id)} ${r.title}`]];
+        links = [[`req:${r.id}`, `${r.label} ${r.title}`]];
       }
       store = "agent-dispatch.sqlite / agent-sessions.sqlite / model-runtimes/";
     } else if (id.startsWith("req:")) {
       const r = findRequest(id.slice(4));
       if (r) {
-        const cross = [...new Set(r.assignments.map((a) => a.teamId))].filter((teamId) => teamId !== r.lead);
+        const cross = r.crossTeams;
         summary = `${name(r.lead)} 主责，共 ${r.assignments.length} 项分工${cross.length ? `，其中 ${cross.map(name).join("、")} 的分工由 ${sam} 应 ${name(r.lead)} 请求指派` : ""}。每项分工由一名临时执行者完成。`;
         path = `${group} → ${sam} → ${name(r.lead)}${cross.length ? ` · 跨队 ${cross.map(name).join("、")}` : ""} → ${r.assignments.length} 项分工`;
         links = r.assignments.map((a) => [`exec:${a.id}`, a.executor]);
@@ -405,5 +423,13 @@
   for (const id of ["ats-search", "ats-status", "ats-delivery"]) $(id).addEventListener(id === "ats-search" ? "input" : "change", () => { expandedRequest = null; renderRows(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !$("ats-drawer").hidden) close(); });
   new window.ResizeObserver(() => { fit(); responsive(); }).observe($("ats-view"));
+  // Opening or closing a record's group-post timeline is remembered (toggle events do not bubble, so this listens in the capture phase).
+  document.addEventListener("toggle", (event) => {
+    const posts = event.target.closest?.("[data-posts]");
+    if (!posts) return;
+    if (posts.open) openPosts.add(posts.dataset.posts); else openPosts.delete(posts.dataset.posts);
+  }, true);
   void load();
+  // Requests start and end in the service, and a revoked browser must lose the page; like the other console pages, it follows the service.
+  setInterval(() => { if (!document.hidden) void load(); }, 2000);
 })();

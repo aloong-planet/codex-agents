@@ -4,6 +4,7 @@ import { requestConsoleControl } from "../src/console-control.js";
 import { groupMemoryAccount, seedEvent, seedMemory } from "../tests/support/memory.js";
 import { processWaitLimitMs } from "../tests/support/process-wait.js";
 import { exchangeLoginLink } from "./console-session.js";
+import { startFixtureServer } from "./fixture-server.js";
 import { test } from "./fixtures.js";
 
 // agent-console::US-001 in a real browser. These cases open their own contexts, so the shared `page`
@@ -83,12 +84,13 @@ const dispatchChannel = { channel: "feishu", owner, taskScope: { accountId: "fix
 const GROUP_NAMES = { chats: { oc_alpha: { name: "银河护卫队" }, oc_beta: { name: "产品讨论组" } } };
 const MARKUP = "请把这段加进详情：<a href=\"https://example.com/x\">链接</a> ![主图](https://example.com/a.png) <script>alert(1)</script>";
 type Server = { url: string; cookie: string };
-type Jobs = { agentDispatch?: { jobs: Array<{ status: string; assignments: Array<{ title: string; status: string }> }> } };
-async function inbound(server: Server, chatId: string, messageId: string, text: string, agentId: string, summary: string, extra: Record<string, unknown> = {}) {
+type Jobs = { agentDispatch?: { jobs: Array<{ id: string; status: string; assignments: Array<{ title: string; status: string }> }> } };
+async function inbound(server: Server, chatId: string, messageId: string, text: string, agentId: string, summary: string, extra: Record<string, unknown> = {},
+  decision: Record<string, unknown> = { kind: "dispatch", agentId, requestId: null, summary, message: "" }) {
   const response = await fetch(`${server.url}/api/fixture/inbound`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" },
     body: JSON.stringify({ event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
       message: { message_id: messageId, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", content: JSON.stringify({ text }), mentions: [] } },
-    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary, message: "" }, ...extra }) });
+    dispatchDecision: decision, ...extra }) });
   expect(response.status, await response.text()).toBe(200);
 }
 const jobs = async (server: Server) => ((await (await fetch(`${server.url}/api/state`, { headers: { cookie: server.cookie } })).json()) as Jobs).agentDispatch?.jobs ?? [];
@@ -105,8 +107,8 @@ async function seedRequests(server: Server) {
   await expect.poll(async () => (await jobs(server))[0]?.status, { timeout: processWaitLimitMs }).toBe("partially_failed");
   await inbound(server, "oc_alpha", "om_running", "商品 D 上架：写详情、核对价格，再做个自动上架脚本", "alice", "商品 D 上架", {
     leaderPlan: { assignments: [{ profileId: "executor-1", title: "撰写商品详情", brief: "九成新" }, { profileId: "executor-1", title: "核对价格", brief: "三家" }], decisions: [],
-      help: [{ title: "自动上架脚本", brief: "只交付代码" }] },
-    crossTeamDecision: { assignments: [{ part: 1, agentId: "bill", summary: "编写自动上架脚本" }] },
+      help: [{ title: "自动上架脚本", brief: "只交付代码" }, { title: "拍摄商品照片", brief: "白底三张" }] },
+    crossTeamDecision: { assignments: [{ part: 1, agentId: "bill", summary: "编写自动上架脚本" }, { part: 2, agentId: null, summary: "" }] },
     teamTurns: { bill: { leaderPlan: { assignments: [{ profileId: "executor-1", title: "编写上架脚本", brief: "只交付代码" }], decisions: [], help: [] } } },
     executorTurns: { 撰写商品详情: { modelHold: true }, 核对价格: { modelHold: true }, 编写上架脚本: { modelHold: true } } });
   await inbound(server, "oc_beta", "om_beta", "整理下周发布说明", "bill", "整理发布说明", { modelReply: reply("发布说明已整理", "整理发布说明") });
@@ -133,6 +135,14 @@ test.describe("with Feishu dispatch", () => {
     await side.locator('[data-open="penny"]').click();
     await expect(page.locator("#ats-drawer-title")).toHaveText("Penny");
     await expect(page.locator("#ats-records")).toContainText("账务内容保持私密");
+    // Penny's and the ordinary private chat's storage each show on their own, without any group's stores (agent-console::US-005/AC-02).
+    for (const [entry, location] of [["penny-store", "penny/ledger.sqlite / journal.sqlite / media/"], ["personal-store", "memory/accounts/<私人作用域>/ / codex-service.json"]] as const) {
+      await page.keyboard.press("Escape");
+      await side.locator(`[data-open="${entry}"]`).click();
+      await page.locator("#ats-tab-storage").click();
+      await expect(page.locator("#ats-panel-storage .acv2-path")).toContainText(location);
+      await expect(page.locator("#ats-panel-storage .acv2-related")).toHaveCount(0);
+    }
     await page.keyboard.press("Escape");
     await side.locator('[data-open="personal"]').click();
     await expect(page.locator("#ats-drawer-title")).toHaveText("个人助手");
@@ -151,6 +161,8 @@ test.describe("with Feishu dispatch", () => {
   test("lists the authorized browsers in the 本机登录 drawer and revokes another one, each after an inline confirmation", async ({ page, fixtureServer }, testInfo) => {
     const other = await exchangeLoginLink(await fixtureServer.loginLink(), "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15");
     await page.goto("/console/teams");
+    // The harness's own login, this browser and the Safari one.
+    await expect(page.locator("#acv-login-meta")).toHaveText("3 个浏览器已授权");
     await page.locator("[data-acv-login]").click();
     const drawer = page.locator("#acv-login-drawer");
     await expect(drawer.locator("h3").first()).toHaveText(/^已授权的浏览器 · 3$/);
@@ -164,6 +176,7 @@ test.describe("with Feishu dispatch", () => {
     await safari.getByRole("button", { name: "确认收回" }).click();
     await expect(drawer.locator(".acv-login-status")).toHaveText(/^已收回「Safari · macOS」的授权，它打开的页面已断开。$/);
     await expect(drawer.locator(".acv5-list li")).toHaveCount(2);
+    await expect(page.locator("#acv-login-meta")).toHaveText("2 个浏览器已授权");
     expect((await fetch(`${fixtureServer.url}/api/overview`, { headers: { cookie: other } })).status).toBe(401);
     await drawer.getByRole("button", { name: "全部收回" }).click();
     await expect(drawer.locator(".acf-inline-confirm")).toContainText("收回全部 2 个浏览器的授权？包括正在使用的这个，本页会立即退出。");
@@ -190,6 +203,10 @@ test.describe("with Feishu dispatch", () => {
     await expect(frames.locator(".ats-card .ats-bot")).toHaveCount(0);
     await expect(frames.locator(".ats-card").first()).toContainText("能力档 · ");
     await expect(page.locator(".ats-task-caption")).toHaveText(["撰写商品详情", "核对价格", "编写上架脚本"]);
+    // IDs show by their first eight characters, an Assignment with its number.
+    const running = (await jobs(fixtureServer))[1]!.id;
+    await expect(frames.locator(".ats-req-title").first()).toHaveText(`${running.slice(0, 8)} 商品 D 上架`);
+    await expect(frames.first().locator(".ats-node-foot span:last-child")).toHaveText([`${running.slice(0, 8)}-1`, `${running.slice(0, 8)}-2`]);
     // 2px connectors in the dispatching role's colour (agent-console::CON-003).
     const edge = await page.locator(".ats-edge").first().evaluate((path) => ({ width: getComputedStyle(path).strokeWidth, colour: getComputedStyle(path).stroke }));
     expect(edge).toEqual({ width: "2px", colour: "rgb(31, 111, 92)" });
@@ -246,6 +263,16 @@ test.describe("with Feishu dispatch", () => {
     await expect(record.locator(".acv2-message")).toContainText("<a href=\"https://example.com/x\">链接</a> ![主图](https://example.com/a.png) <script>");
     await expect(drawer.locator("a, img, script")).toHaveCount(0);
     await testInfo.attach("record-expanded", { body: await page.screenshot(), contentType: "image/png" });
+
+    // Search matches a request's full ID; its record names the cross-team part and the part no team took.
+    await page.locator("#ats-status").selectOption("all");
+    await page.locator("#ats-search").fill(running);
+    await expect(page.locator("#ats-count")).toHaveText("1 条");
+    await drawer.locator(".acv2-record-button").click();
+    await expect(drawer.locator(".acv2-record-detail .ats-path-line")).toContainText("跨队：Sam → Bill · 应 Alice 请求");
+    await expect(drawer.locator(".acv2-record-detail .ats-path-line")).toContainText("未承接：拍摄商品照片 · 没有团队承接");
+    await page.locator("#ats-search").fill("");
+    await page.locator("#ats-status").selectOption("partially_failed");
 
     // Switching tabs keeps the search and the expanded record.
     await page.locator("#ats-search").fill("商品 C");
@@ -306,17 +333,62 @@ test.describe("with Feishu dispatch", () => {
     await expect(panel.locator(".ats-memory li")).toHaveText(["产品讨论组的发布节奏是双周"]);
   });
 
+  test("follows the service: Executors that end leave the open tree, and a revoked browser's open overview turns into the login card", async ({ page, fixtureServer }) => {
+    await seedRequests(fixtureServer);
+    await page.goto("/console");
+    await expect(page.locator(".ats-req-frame .ats-card")).toHaveCount(3);
+    await page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: /^Alice$/ }) }).locator(".ats-name").click();
+    const record = page.locator("#ats-drawer .acv2-record", { hasText: "商品 D 上架" });
+    await record.locator(".acv2-record-button").click();
+    // The owner cancels the held request in its group; its Executors end and leave the tree without a reload, and the open record
+    // follows, still expanded.
+    const running = (await jobs(fixtureServer))[1]!.id;
+    await inbound(fixtureServer, "oc_alpha", "om_cancel_running", "商品 D 先不做了", "alice", "", {}, { kind: "cancel", agentId: null, requestId: running, summary: "", message: "" });
+    await expect(page.locator(".ats-req-frame")).toHaveCount(0, { timeout: processWaitLimitMs });
+    await expect(record.locator(".acv2-record-meta .acv2-badge")).toHaveText("已取消");
+    await expect(record.locator(".acv2-record-button")).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: /^Alice$/ }) }).locator(".ats-node-foot")).toHaveText("0 执行中 · 0 待确认 · 2 历史");
+    const own = await page.evaluate(async () => ((await (await fetch("/api/console/browsers")).json()) as { browsers: Array<{ id: string; current: boolean }> }).browsers.find(({ current }) => current)!.id);
+    await requestConsoleControl(fixtureServer.directory, { command: "revoke", target: own });
+    await expect(page.getByRole("alert")).toHaveText(REVOKED_NOTICE, { timeout: processWaitLimitMs });
+    await expect(page.locator(".ats-card")).toHaveCount(0);
+  });
+
+  test("shows an Assignment interrupted by a restart in its record", async ({ page, fixtureServer }) => {
+    await inbound(fixtureServer, "oc_alpha", "om_restart", "整理商品 E 卖点", "alice", "商品 E 卖点", { modelHold: true });
+    await expect.poll(async () => (await jobs(fixtureServer))[0]?.assignments.map(({ status }) => status), { timeout: processWaitLimitMs }).toEqual(["running"]);
+    await fixtureServer.close();
+    const restarted = await startFixtureServer("fixture", "fixture", undefined, { stateDirectory: fixtureServer.directory, businessDirectory: fixtureServer.businessDirectory,
+      port: Number(new URL(fixtureServer.url).port), channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } });
+    try {
+      await expect.poll(async () => (await jobs(restarted))[0]?.status, { timeout: processWaitLimitMs }).toBe("failed");
+      // The browser's authorization survives the restart.
+      await page.goto("/console");
+      await page.locator("#ats-all").click();
+      await page.locator("#ats-drawer .acv2-record-button").click();
+      await expect(page.locator("#ats-drawer .ats-asg .acv2-badge")).toHaveText("已中断");
+      await expect(page.locator("#ats-drawer .acv2-record-meta .acv2-badge")).toHaveText("失败");
+    } finally { await restarted.close(); }
+  });
+
   test("opens details in a drawer over a scrim at every width, closing on the button, the scrim and Escape, and filling the workspace on phones", async ({ page, fixtureServer }, testInfo) => {
     await seedRequests(fixtureServer);
     await page.goto("/console");
     const drawer = page.locator("#ats-drawer");
     await page.locator("#ats-all").click();
     const viewport = page.viewportSize()!;
+    // Where 720px is the narrower bound, then where 80% of the area beside the sidebar is.
     expect((await drawer.boundingBox())!.width).toBeCloseTo(Math.min(720, (viewport.width - 212) * 0.8), 0);
+    await page.setViewportSize({ width: 1000, height: viewport.height });
+    expect((await drawer.boundingBox())!.width).toBeCloseTo((1000 - 212) * 0.8, 0);
+    await page.setViewportSize(viewport);
     expect(await page.locator("#ats-close").evaluate((button) => getComputedStyle(button).borderTopWidth)).toBe("1px");
     await page.locator("#ats-close").click();
     await expect(drawer).toBeHidden();
     await page.locator("#ats-all").click();
+    // The scrim covers the content underneath, and a click on it closes the drawer.
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.id, { x: 260, y: viewport.height - 20 })).toBe("ats-mask");
     await page.mouse.click(260, viewport.height - 20);
     await expect(drawer).toBeHidden();
     await page.locator("#ats-all").click();
