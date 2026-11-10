@@ -72,7 +72,7 @@ Penny is an optional separate Feishu private bot configured through `PENNY_CONFI
 
 Use `CHANNEL_CONFIG_PATH=/absolute/private/channel.json`, or place `channel.json` beside the existing private `state.json`. Keep its parent private and its file readable only by the owner (`0700` directory, `0600` file). Do not commit it: the Feishu application secret is sensitive.
 
-### First-time Feishu pairing (recommended)
+### Feishu pairing (recommended)
 
 Stop the formal service first and use its existing private state directory. In an interactive local terminal, from the repository root, run:
 
