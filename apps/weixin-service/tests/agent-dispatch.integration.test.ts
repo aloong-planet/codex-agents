@@ -14,7 +14,7 @@ import { TeamRegistry } from "../src/team-registry.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
-import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { allowNotes, decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
 import { scriptedPairing } from "./support/feishu-pairing.js";
 import { memoryAccountId } from "../src/agent-profile.js";
@@ -402,7 +402,7 @@ it("takes the Coordinator's turn to its real runtime with the Codex home's login
     // The turn tried to start the Coordinator's own App Server, which this executable cannot derive a model catalog for.
     expect(result.fixtureDispatchTurns).toEqual([expect.objectContaining({ role: "coordinator", turn: "classify", messageId: "om_real_model_seam", error: "isolated_runtime_catalog_unavailable" })]);
     expect(readFileSync(join(directory, "group-model-runtimes", "dispatch-coordinator", "codex-home", "auth.json"), "utf8")).toBe('{"OPENAI_API_KEY":"sk-synthetic"}');
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(codexHome, { recursive: true, force: true }); }
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
 }, 30000);
 
 const RESPONSIBILITIES = { alice: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。", bill: "日常生活事务，包括吃穿住行的规划和安排。",
@@ -789,12 +789,6 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
 // Several Assignments per request. Each Assignment's Executor turn takes its own injected fixture turn by title
 // (`executorTurns`), so the cases can hold, release and script each Executor apart (agent-dispatch Testing Decisions).
 type Running = Awaited<ReturnType<typeof start>>;
-async function allowNotes(running: Running) {
-  await running.until((state) => state.channels?.feishu?.ready === true);
-  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
-  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
-    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
-}
 const writeFile = (file: string) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: file, content: `内容 ${file}`, overwrite: false } });
 const writeAndSend = (file: string) => [writeFile(file),
   { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 0, path: ["fileRef"] } }] } }];
