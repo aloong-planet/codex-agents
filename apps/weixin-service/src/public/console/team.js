@@ -250,7 +250,7 @@
     }
     if (refusal.kind === "changed") return [esc("渠道配置文件在页面载入后被修改过；为避免覆盖，本次保存没有生效。")];
     if (refusal.kind === "unfinished") {
-      return refusal.groups.map(({ chatId, requests }) => `${esc(`${dcName(chatId)}还有 ${requests.length} 项未结束的派单事务，结束后才能取消勾选：`)}<ul class="atm-dc-busy">${requests.map(({ summary, status }) => `<li>${esc(summary)}<small>${esc(DC_STATE[status] ?? status)}</small></li>`).join("")}</ul>`);
+      return refusal.groups.map(({ chatId, requests }) => `${esc(`${dcName(chatId)}还有 ${requests.length} 项未结束的派单事务，结束后才能取消勾选：`)}<ul class="atm-dc-busy">${requests.map(({ id, summary, status }) => `<li><a class="atm-link" href="/console?request=${esc(encodeURIComponent(id))}">${esc(summary)}</a><small>${esc(DC_STATE[status] ?? status)}</small></li>`).join("")}</ul>`);
     }
     return [esc(refusal.message ?? "请求失败")];
   }

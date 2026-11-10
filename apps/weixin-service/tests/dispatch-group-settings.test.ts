@@ -92,12 +92,12 @@ describe("dispatch-group settings", () => {
 
   it("refuses to uncheck a group that has unfinished dispatch requests, and lists them, but never refuses checking a group", async () => {
     const state = stateWith(document({ groupChatIds: ["oc_alpha"] }));
-    const unfinished: Record<string, DispatchGroupRequest[]> = { oc_alpha: [{ summary: "安排周末出行", status: "proposed" }, { summary: "整理发布说明", status: "running" }] };
+    const unfinished: Record<string, DispatchGroupRequest[]> = { oc_alpha: [{ id: "r1", summary: "安排周末出行", status: "proposed" }, { id: "r2", summary: "整理发布说明", status: "running" }] };
     const { settings } = settingsOn(state.file, { running: ["oc_alpha"], unfinished });
     const { basedOn } = await settings.view() as { basedOn: string };
     const bytes = readFileSync(state.file);
     await expect(settings.save({ groups: ["oc_beta"], basedOn }, BROWSER)).rejects.toEqual(new DispatchGroupRefusal({ kind: "unfinished",
-      groups: [{ chatId: "oc_alpha", requests: [{ summary: "安排周末出行", status: "proposed" }, { summary: "整理发布说明", status: "running" }] }] }));
+      groups: [{ chatId: "oc_alpha", requests: [{ id: "r1", summary: "安排周末出行", status: "proposed" }, { id: "r2", summary: "整理发布说明", status: "running" }] }] }));
     expect(readFileSync(state.file).equals(bytes)).toBe(true);
     expect(existsSync(state.lock)).toBe(false);
     await expect(settings.save({ groups: ["oc_alpha", "oc_beta"], basedOn }, BROWSER)).resolves.toMatchObject({ saved: ["oc_alpha", "oc_beta"], running: ["oc_alpha"] });
@@ -117,12 +117,12 @@ describe("dispatch-group settings", () => {
 
   it("counts only proposed, queued, running and waiting requests as unfinished, under their group's chat ID", () => {
     const chatIds: Record<string, string> = { "feishu.alpha": "oc_alpha", "feishu.beta": "oc_beta" };
-    const job = (summary: string, status: string, target = "feishu.alpha") => ({ summary, status, accountId: "cli_0123456789abcdef", target });
+    const job = (summary: string, status: string, target = "feishu.alpha") => ({ id: `id-${summary}`, summary, status, accountId: "cli_0123456789abcdef", target });
     expect(unfinishedRequestsByGroup([job("提议", "proposed"), job("排队", "queued", "feishu.beta"), job("完成", "completed"), job("处理中", "running"),
       job("部分失败", "partially_failed"), job("等待", "waiting", "feishu.beta"), job("失败", "failed"), job("已取消", "cancelled"), job("私聊", "running", "feishu.private")],
     (_, target) => chatIds[target])).toEqual({
-      oc_alpha: [{ summary: "提议", status: "proposed" }, { summary: "处理中", status: "running" }],
-      oc_beta: [{ summary: "排队", status: "queued" }, { summary: "等待", status: "waiting" }] });
+      oc_alpha: [{ id: "id-提议", summary: "提议", status: "proposed" }, { id: "id-处理中", summary: "处理中", status: "running" }],
+      oc_beta: [{ id: "id-排队", summary: "排队", status: "queued" }, { id: "id-等待", summary: "等待", status: "waiting" }] });
   });
 
   it("audits each save with the groups before and after and the browser, and never returns or audits a secret", async () => {

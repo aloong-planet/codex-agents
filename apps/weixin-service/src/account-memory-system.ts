@@ -316,6 +316,12 @@ export class AccountMemorySystem {
     return { queued: true, jobId: job.id };
   }
 
+  /** An account's stored entries and every event, for the console's read-only view (agent-console::US-005/AC-04); no entry or event changes. */
+  readAccount(accountId: string): Pick<AccountMemorySnapshot, "entries" | "events"> {
+    const { entries, events } = this.store.read(accountId, undefined, { allEvents: true });
+    return { entries, events };
+  }
+
   recall(accountId: string, currentUserText = ""): string {
     if (!this.state.enabledAccounts.includes(accountId)) return "";
     const snapshot = this.store.read(accountId, currentUserText);

@@ -147,6 +147,7 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   In the product, actual execution results drive these transitions.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
+- **群业务记忆.** 有内容 / 尚无内容 / 读取失败 switches what the group memory node's relationships and storage tab shows under 当前内容. In the product the group memory's current entries, and whether they can be read, decide it.
 - **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the eighteen sample requests. These include five partially failed group requests (R-2391; R-2392, with an Assignment that did not start; the cross-team R-2393 and R-2389; and R-2387, which also has a part no team took), two partially unfulfilled ones (R-2386 and R-2383), one cancelled group request (R-2394), the cross-team samples listed under the request records, and two private requests: one running and one partially failed.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.

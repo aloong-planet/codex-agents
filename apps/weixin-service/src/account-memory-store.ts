@@ -104,7 +104,8 @@ export class AccountMemoryStore {
     private readonly now: () => number = Date.now,
   ) {}
 
-  read(accountId: string, eventQuery?: string): AccountMemorySnapshot {
+  /** `allEvents` returns every event instead of the recall window and the events matching `eventQuery`. */
+  read(accountId: string, eventQuery?: string, options: Readonly<{ allEvents?: boolean }> = {}): AccountMemorySnapshot {
     this.assertSafeScope(accountId);
     const databasePath = this.databasePath(accountId);
     if (!fs.existsSync(databasePath)) {
@@ -127,7 +128,7 @@ export class AccountMemoryStore {
         ...relevantEvents.slice(-20).map((event) => event.id),
         ...windowEvents.slice(-(100 - Math.min(20, relevantEvents.length))).map((event) => event.id),
       ]);
-      const events = allEvents.filter((event) => selectedIds.has(event.id));
+      const events = options.allEvents ? allEvents : allEvents.filter((event) => selectedIds.has(event.id));
       const markdown = renderMemory(entries);
       const memoryPath = this.memoryPath(accountId);
       const onDisk = fs.existsSync(memoryPath) ? fs.readFileSync(memoryPath, "utf8") : undefined;

@@ -390,12 +390,13 @@ it("refuses to uncheck a dispatch group that has an unfinished request, and list
     running = await start(directory);
     await running.post("/api/fixture/inbound", groupMessage("om_unfinished_proposal", "周末可能想去附近玩玩",
       { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" }));
-    await running.until((state) => state.agentDispatch?.jobs.some(({ status }) => status === "proposed") === true);
+    const proposed = (await running.until((state) => state.agentDispatch?.jobs.some(({ status }) => status === "proposed") === true)).agentDispatch!.jobs[0]!;
     const before = readFileSync(join(directory, "channel.json"));
     const form = await running.get<{ basedOn: string; running: string[] }>("/api/teams/dispatch-groups");
     expect(form.running).toEqual(["oc_alpha"]);
     expect(await running.send("/api/teams/dispatch-groups", { groups: [], basedOn: form.basedOn })).toEqual({ status: 409, body: { error: "无法保存",
-      refusal: { kind: "unfinished", groups: [{ chatId: "oc_alpha", requests: [{ summary: "安排周末出行", status: "proposed" }] }] } } });
+      // Each listed request carries its ID, which links it to its record on the team overview (ticket 10).
+      refusal: { kind: "unfinished", groups: [{ chatId: "oc_alpha", requests: [{ id: proposed.id, summary: "安排周末出行", status: "proposed" }] }] } } });
     expect(await running.send("/api/teams/dispatch-groups", { groups: ["oc_alpha", "oc_unlisted"], basedOn: form.basedOn }))
       .toEqual({ status: 400, body: { error: "无法保存", refusal: { kind: "invalid" } } });
     expect(readFileSync(join(directory, "channel.json")).equals(before)).toBe(true);

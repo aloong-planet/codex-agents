@@ -4,7 +4,7 @@
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: the page onboards only existing applications.
 > - It shows 接入方式 as 「已有应用，手动填写」, with two steps, the credential check and group joining, and offers 「重新检查」.
-> - Not built yet: QR creation and the test message (team-management::US-002/AC-01, and the QR steps of US-002/AC-03 and AC-04); MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the links to the team overview and to skill management (US-001/AC-04).
+> - Not built yet: QR creation and the test message (team-management::US-002/AC-01, and the QR steps of US-002/AC-03 and AC-04); MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the link to skill management (US-001/AC-04).
 > - Unchecking a group stops the team taking work there and announces its departure; the team then stays draining in that group.
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
 

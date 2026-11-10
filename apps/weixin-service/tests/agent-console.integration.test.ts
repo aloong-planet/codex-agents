@@ -1,5 +1,7 @@
 // Whole-app wiring of the console login (agent-console::US-001): the service process builds the gate on its
 // state directory and starts the control channel, and the `console` command reaches it there.
+// The team overview's APIs (agent-console::US-003 to US-005, US-001/AC-03) through real main with Feishu dispatch in fixture mode:
+// the projection's rules are unit-tested in console-overview.test.ts; these cases show its inputs are wired to the running service.
 // Coverage gap: the real macOS default-browser launch is not exercised; the login case puts a stand-in `open`
 // (and `xdg-open`) first on PATH and checks that it received the printed link.
 import { execFile } from "node:child_process";
@@ -11,9 +13,12 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { exchangeLoginLink } from "../e2e/console-session.js";
+import { authorizeLocalService, exchangeLoginLink } from "../e2e/console-session.js";
 import { startFixtureServer } from "../e2e/fixture-server.js";
+import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
+import { groupMemoryAccount, seedEvent, seedMemory } from "./support/memory.js";
 import { signalProcessGroup } from "./support/process-group.js";
+import { config, decision, groupMessage, start } from "./support/real-main.js";
 
 const SERVICE_DIRECTORY = fileURLToPath(new URL("../", import.meta.url));
 const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
@@ -153,4 +158,95 @@ describe("console login command against the running service", () => {
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("本机服务未运行");
   }, 30_000);
+});
+
+describe("team overview APIs against the running service", () => {
+  const cleanups: Array<() => Promise<void> | void> = [];
+  afterEach(async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  });
+
+  /** A state directory whose channel configuration dispatches in two groups, 银河护卫队 (oc_alpha) and 产品讨论组 (oc_beta). */
+  function dispatchDirectory(): string {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agent-console-overview-"));
+    cleanups.push(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const base = config("feishu");
+    fs.writeFileSync(path.join(directory, "channel.json"), JSON.stringify({ ...base, feishu: { ...base.feishu,
+      groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+      dispatch: { groupChatIds: ["oc_alpha", "oc_beta"], agents: [{ id: "sam" }, { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } }),
+      { mode: 0o600 });
+    return directory;
+  }
+  const NAMES = { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_alpha: { name: "银河护卫队" }, oc_beta: { name: "产品讨论组" } } }) };
+  async function running(directory: string) {
+    const service = await start(directory, NAMES);
+    cleanups.push(() => service.close());
+    return service;
+  }
+  /** The memory accounts of both groups' Coordinator and the owner's personal one, as the service derives them from the file. */
+  function accounts(directory: string) {
+    const owner = parseChannelStartupConfiguration(JSON.parse(fs.readFileSync(path.join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")!.owner;
+    return { alpha: groupMemoryAccount(directory, "oc_alpha"), beta: groupMemoryAccount(directory, "oc_beta"),
+      personal: { account: owner.memoryScope(owner.conversationAddress().accountId), target: owner.conversationAddress().target } };
+  }
+
+  it("serves the dispatch groups, the live roster and each request's record from the running service's dispatch", async () => {
+    const service = await running(dispatchDirectory());
+    await service.post("/api/fixture/inbound", groupMessage("om_overview", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    await service.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    type View = { dispatch: boolean; groups: unknown; agents: Record<string, { name: string }>; teams: Array<{ id: string; counts: Record<string, unknown> }>;
+      requests: Array<{ chatId: string; title: string; lead: string; requester: string; status: string; delivery: string; message: { text: string };
+        assignments: Array<{ executor: string; status: string }> }> };
+    const view = await service.get<View>("/api/overview");
+    expect(view.dispatch).toBe(true);
+    expect(view.groups).toEqual([{ chatId: "oc_alpha", name: "银河护卫队" }, { chatId: "oc_beta", name: "产品讨论组" }]);
+    expect(Object.keys(view.agents).sort()).toEqual(["alice", "bill", "jack", "sam"]);
+    expect(view.teams.find(({ id }) => id === "alice")?.counts).toEqual({ oc_alpha: { running: 0, waiting: 0, history: 1 }, oc_beta: { running: 0, waiting: 0, history: 0 } });
+    expect(view.requests).toEqual([expect.objectContaining({ chatId: "oc_alpha", title: "整理闲鱼商品描述", lead: "alice", requester: "owner", status: "completed",
+      delivery: "accepted", message: expect.objectContaining({ text: "帮我整理闲鱼商品描述" }), assignments: [expect.objectContaining({ executor: "执行者 1", status: "completed" })] })]);
+  }, 60_000);
+
+  it("shows a dispatch group's own memory, every entry and event, and no route reaches or changes any other memory", async () => {
+    const directory = dispatchDirectory(), { alpha, beta, personal } = accounts(directory);
+    await seedMemory(directory, alpha.account, alpha.target, "alpha-1", "上新文案先发到上新话题");
+    await seedEvent(directory, alpha.account, alpha.target, "alpha-2", "2025-01-15", "去年的商品 C 校对完成");
+    await seedMemory(directory, beta.account, beta.target, "beta-1", "产品讨论组的发布节奏是双周");
+    await seedMemory(directory, personal.account, personal.target, "personal-1", "本人偏好晚上收提醒");
+    const service = await running(directory);
+    const cookie = await authorizeLocalService(directory), origin = service.url;
+    const memory = (group: string, init: RequestInit = {}) => fetch(`${origin}/api/overview/memory?group=${group}`, { ...init, headers: { cookie, origin, ...init.headers } });
+
+    const shown = await (await memory("oc_alpha")).json() as { readable: boolean; entries: Array<{ value: string }>; events: Array<{ date: string; summary: string }> };
+    expect(shown).toMatchObject({ readable: true, entries: [{ category: "projects", value: "上新文案先发到上新话题" }],
+      events: [{ date: "2025-01-15", kind: "observed", summary: "去年的商品 C 校对完成" }] });
+    expect(((await (await memory("oc_beta")).json()) as { entries: Array<{ value: string }> }).entries.map(({ value }) => value)).toEqual(["产品讨论组的发布节奏是双周"]);
+    // The owner's private chat is no dispatch group, so personal memory is never reachable; nor is any chat that is not one.
+    for (const group of ["oc_private", "oc_unknown", ""]) expect((await memory(group)).status).toBe(404);
+    for (const method of ["POST", "PUT", "DELETE"]) {
+      expect((await memory("oc_alpha", { method, headers: { "content-type": "application/json" }, body: "{}" })).status).toBe(404);
+    }
+    expect(((await (await memory("oc_alpha")).json()) as { entries: unknown[] }).entries).toHaveLength(1);
+  }, 60_000);
+
+  it("lists the authorized browsers with the current one marked, and revokes another, auditing the browser that asked", async () => {
+    const directory = dispatchDirectory();
+    const service = await running(directory);
+    const origin = service.url;
+    const [owner, other] = [await authorizeLocalService(directory), await authorizeLocalService(directory)];
+    type Browser = { id: string; label: string; current: boolean };
+    const list = async (cookie: string) => (await (await fetch(`${origin}/api/console/browsers`, { headers: { cookie } })).json() as { browsers: Browser[] }).browsers;
+    const browsers = await list(owner);
+    expect(browsers.filter(({ current }) => current)).toHaveLength(1);
+    const otherId = (await list(other)).find(({ current }) => current)!.id, ownerId = browsers.find(({ current }) => current)!.id;
+    expect(otherId).not.toBe(ownerId);
+
+    const revoke = await fetch(`${origin}/api/console/browsers/revoke`, { method: "POST", headers: { cookie: owner, origin, "content-type": "application/json" },
+      body: JSON.stringify({ target: otherId }) });
+    expect(await revoke.json()).toEqual({ revoked: 1, auditFailed: false });
+    expect((await fetch(`${origin}/api/overview`, { headers: { cookie: other } })).status).toBe(401);
+    expect((await list(owner)).map(({ id }) => id)).not.toContain(otherId);
+    const audit = fs.readFileSync(path.join(fs.realpathSync(directory), "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(audit.at(-1)).toMatchObject({ by: "browser", browser: { id: ownerId }, event: "browser_revoked", browsers: [{ id: otherId }] });
+  }, 60_000);
 });

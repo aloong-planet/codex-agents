@@ -22,7 +22,7 @@ const LAST_USED_PERSIST_INTERVAL_MS = 10 * 60 * 1000;
 export const PLUGIN_LABEL = "Codex 插件";
 export const BROWSERS_FILE = "console-browsers.json";
 
-export type ConsoleActor = "login-link" | "local-command" | "codex-plugin";
+export type ConsoleActor = "login-link" | "local-command" | "codex-plugin" | "browser";
 
 export type ConsoleBrowser = {
   id: string;
@@ -164,8 +164,11 @@ export class ConsoleAccess {
     return this.browsers.map(publicBrowser);
   }
 
-  /** Revokes one browser by id, or every browser with `all`, and closes their open connections at once. */
-  revoke(target: string, by: ConsoleActor): { revoked: number; auditFailed: boolean } {
+  /**
+   * Revokes one browser by id, or every browser with `all`, and closes their open connections at once. From the console's
+   * 本机登录 drawer, `by` is `browser` and `actor` the browser that asked, which the audit names (agent-console::REQ-004).
+   */
+  revoke(target: string, by: ConsoleActor, actor?: ConsoleBrowser): { revoked: number; auditFailed: boolean } {
     const removed = target === "all" ? this.browsers : this.browsers.filter((browser) => browser.id === target);
     if (target !== "all" && removed.length === 0) throw new ConsoleAccessError("没有该浏览器");
     this.browsers = this.browsers.filter((browser) => !removed.includes(browser));
@@ -176,7 +179,8 @@ export class ConsoleAccess {
     } catch (error) {
       storeError = error;
     }
-    const auditFailed = removed.length > 0 && !this.audit.tryAppend({ by, event: "browser_revoked", browsers: removed.map(browserRef) });
+    const auditFailed = removed.length > 0 && !this.audit.tryAppend({ by, ...(actor ? { browser: { id: actor.id, label: actor.label } } : {}), event: "browser_revoked",
+      browsers: removed.map(browserRef) });
     if (storeError) {
       process.stderr.write(`console_browsers_write_failed: ${errorCode(storeError)}\n`);
       throw new ConsoleAccessError(`已收回 ${removed.length} 个浏览器的授权并断开连接，但授权文件写入失败，服务重启后会恢复；请检查状态目录后重试`);

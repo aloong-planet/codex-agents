@@ -3,7 +3,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { ConsoleRequestContext } from "./console-access.js";
+import { ConsoleAccessError, type ConsoleAccess, type ConsoleRequestContext } from "./console-access.js";
+import type { ConsoleOverview } from "./console-overview.js";
 import { DispatchGroupRefusal, type DispatchGroupSettings } from "./dispatch-group-settings.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
@@ -22,10 +23,19 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team
  *   No response carries an App Secret (team-management::CON-001); every change is audited.
  * - `/api/teams/dispatch-groups`: the dispatch-group form (agent-console::US-009), with or without dispatch. A save writes the
  *   channel configuration file and applies at the next start; a refusal answers 409 with its kind and leaves the file unchanged.
+ * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
+ * - `/api/overview`: its read projection; `/api/overview/memory?group=<chat ID>` a dispatch group's memory, read-only. No route
+ *   changes or deletes memory (agent-console::US-005/AC-04).
+ * - `/api/console/sidebar`: the sidebar's browser count and Penny's state on every page.
+ * - `/api/console/browsers`: the 本机登录 drawer's list, and `/api/console/browsers/revoke` its revocation, audited with the browser
+ *   that asked (agent-console::US-001/AC-03).
  */
 const CONSOLE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public", "console");
 const MAX_BODY_BYTES = 64 * 1024;
 const ASSETS: Record<string, { file: string; type: string }> = {
+  "/console": { file: "overview.html", type: "text/html; charset=utf-8" },
+  "/console/overview.css": { file: "overview.css", type: "text/css; charset=utf-8" },
+  "/console/overview.js": { file: "overview.js", type: "text/javascript; charset=utf-8" },
   "/console/mcp": { file: "mcp.html", type: "text/html; charset=utf-8" },
   "/console/teams": { file: "team.html", type: "text/html; charset=utf-8" },
   "/console/console.css": { file: "console.css", type: "text/css; charset=utf-8" },
@@ -94,8 +104,42 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
   team_registry_group_unknown: [400, "所属群不在派单群里"],
 };
 
-export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchGroups?: DispatchGroupSettings }): ConsoleRoutes {
-  const { catalog, teams, dispatchGroups } = options;
+export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchGroups?: DispatchGroupSettings; overview?: ConsoleOverview;
+  access?: ConsoleAccess }): ConsoleRoutes {
+  const { catalog, teams, dispatchGroups, overview, access } = options;
+
+  async function overviewApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (!overview || req.method !== "GET") throw new RequestError(404, "未找到");
+    if (url.pathname === "/api/overview") { json(res, 200, await overview.view()); return; }
+    if (url.pathname !== "/api/overview/memory") throw new RequestError(404, "未找到");
+    const memory = overview.memory(url.searchParams.get("group") ?? "");
+    if (!memory) throw new RequestError(404, "不是派单群");
+    json(res, 200, memory);
+  }
+
+  async function browsersApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
+    if (!access) throw new RequestError(404, "未找到");
+    // The sidebar's counts on every page: the 本机登录 entry's browsers and Penny's state (agent-console::US-001/AC-03, REQ-003).
+    if (pathname === "/api/console/sidebar" && req.method === "GET") {
+      json(res, 200, { browsers: access.listBrowsers().length, penny: overview?.penny() ?? { configured: false, ready: false } });
+      return;
+    }
+    if (pathname === "/api/console/browsers" && req.method === "GET") {
+      json(res, 200, { browsers: access.listBrowsers().map((browser) => ({ ...browser, current: browser.id === context.browser?.id })) });
+      return;
+    }
+    if (pathname !== "/api/console/browsers/revoke" || req.method !== "POST") throw new RequestError(404, "未找到");
+    const input = await body(req);
+    if (typeof input.target !== "string" || !input.target) throw new RequestError(400, "要收回的浏览器无效");
+    if (input.target !== "all" && !access.listBrowsers().some(({ id }) => id === input.target)) throw new RequestError(404, "没有该浏览器");
+    try {
+      json(res, 200, access.revoke(input.target, "browser", context.browser));
+    } catch (error) {
+      // The revocation applied, but its file could not be written; the message says so.
+      if (error instanceof ConsoleAccessError) throw new RequestError(500, error.message);
+      throw error;
+    }
+  }
 
   async function teamsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
     const actor = context.browser ? { browser: context.browser } : {};
@@ -208,14 +252,19 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
         return true;
       }
       const team = url.pathname === "/api/teams" || url.pathname.startsWith("/api/teams/");
-      if (!team && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
+      const board = url.pathname === "/api/overview" || url.pathname.startsWith("/api/overview/");
+      const browsers = url.pathname === "/api/console/sidebar" || url.pathname === "/api/console/browsers" || url.pathname.startsWith("/api/console/browsers/");
+      if (!team && !board && !browsers && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
       try {
-        await (team ? teamsApi : mcpApi)(req, res, url.pathname, context);
+        if (board) await overviewApi(req, res, url);
+        else if (browsers) await browsersApi(req, res, url.pathname, context);
+        else await (team ? teamsApi : mcpApi)(req, res, url.pathname, context);
       } catch (error) {
         if (error instanceof RequestError) json(res, error.status, { error: error.message });
         else if (error instanceof McpConfigError) json(res, 400, { error: error.message });
         else {
-          process.stderr.write(`${team ? "console_team_request_failed" : "console_mcp_request_failed"}: ${error instanceof Error ? error.name : "error"}\n`);
+          const area = team ? "team" : board ? "overview" : browsers ? "browsers" : "mcp";
+          process.stderr.write(`console_${area}_request_failed: ${error instanceof Error ? error.name : "error"}\n`);
           json(res, 500, { error: "请求失败" });
         }
       }
