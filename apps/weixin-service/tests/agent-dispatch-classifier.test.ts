@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
-import { CodexDispatchClassifier } from "../src/agent-dispatch-classifier.js";
-import type { DispatchClassificationInput } from "../src/agent-dispatch-types.js";
+import { CodexDispatchClassifier, parseCrossTeamDecision } from "../src/agent-dispatch-classifier.js";
+import type { CrossTeamInput, DispatchClassificationInput } from "../src/agent-dispatch-types.js";
 import type { CodexConversation } from "../src/codex-conversation.js";
 import type { AppServerTurnResult } from "../src/app-server-turn-driver.js";
 
@@ -75,3 +75,59 @@ it("keeps the shared Coordinator prompt free of team-domain examples", async () 
   for (const term of ["商品", "旅行", "项目位置"]) expect(prompt).not.toContain(term);
 });
 
+
+// The Coordinator's cross-team turn (agent-dispatch::REQ-013/AC-02): one placement per requested part, with an offered team or
+// none (agent-dispatch::REQ-008/AC-05, REQ-015/AC-01). Its JSON has no real model sample yet; ticket 21's live run checks it.
+const crossTeam: CrossTeamInput = {
+  requestId: "request-one", coordinator: "Sam", message: "商品 D 要上架，再弄个脚本以后自动上架", summary: "商品 D 上架", lead: { id: "alice", name: "Alice", responsibility: "商品运营" },
+  parts: [{ part: 1, title: "自动上架脚本", brief: "只交付代码，不运行" }, { part: 2, title: "拍照", brief: "白底" }],
+  teams: [{ id: "jack", name: "Jack", responsibility: "技术" }, { id: "bill", name: "Bill", responsibility: "衣食住行" }], fixtureMessageId: "om_one",
+};
+const placed = (...assignments: Array<[number, string | null, string]>) => ({ assignments: assignments.map(([part, agentId, summary]) => ({ part, agentId, summary })) });
+
+it.each([
+  ["each part with an offered team or none, in part order", placed([2, null, ""], [1, "jack", " 编写自动上架脚本 "]),
+    [{ part: 1, agentId: "jack", summary: "编写自动上架脚本" }, { part: 2, agentId: null, summary: "" }]],
+  ["the lead team", placed([1, "alice", "脚本"], [2, null, ""]), "dispatch_cross_team_invalid"],
+  ["the Coordinator", placed([1, "sam", "脚本"], [2, null, ""]), "dispatch_cross_team_invalid"],
+  ["a team not offered", placed([1, "penny", "脚本"], [2, null, ""]), "dispatch_cross_team_invalid"],
+  ["a part left out", placed([1, "jack", "脚本"]), "dispatch_cross_team_invalid"],
+  ["a part placed twice", placed([1, "jack", "脚本"], [1, "bill", "脚本"]), "dispatch_cross_team_invalid"],
+  ["a part past the requested ones", placed([1, "jack", "脚本"], [3, null, ""]), "dispatch_cross_team_invalid"],
+  ["an empty summary for a placed part", placed([1, "jack", "  "], [2, null, ""]), "dispatch_cross_team_invalid"],
+  ["a malformed value", { assignments: [{ part: 1, team: "jack" }] }, "dispatch_cross_team_invalid"],
+])("decodes or refuses a cross-team decision naming %s", (_case, value, expected) => {
+  if (typeof expected === "string") expect(() => parseCrossTeamDecision(value, crossTeam)).toThrow(expected);
+  else expect(parseCrossTeamDecision(value, crossTeam)).toEqual(expected);
+});
+
+it("places parts through a tool-free constrained Coordinator turn and releases its thread", async () => {
+  const external = runtime({ owner: "model_owned", finalText: JSON.stringify(placed([1, "jack", "编写自动上架脚本"], [2, null, ""])) });
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }), "协调规则");
+  await expect(classifier.assign(crossTeam)).resolves.toEqual([{ part: 1, agentId: "jack", summary: "编写自动上架脚本" }, { part: 2, agentId: null, summary: "" }]);
+  expect(external.startOrResume).toHaveBeenCalledWith(undefined, "/isolated/coordinator", []);
+  expect(external.runTurn).toHaveBeenCalledWith("coordinator-thread", expect.any(String), undefined, undefined, expect.objectContaining({
+    model: "fixture-model", effort: "low", outputSchema: expect.objectContaining({ required: ["assignments"] }) }));
+  for (const fragment of ["你是 Sam", "协调规则", "自动上架脚本", "只交付代码，不运行", '"id":"jack"']) expect(external.runTurn.mock.calls[0]![1]).toContain(fragment);
+  expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
+});
+
+it.each([
+  { name: "an oversized valid answer", response: { owner: "model_owned", finalText: JSON.stringify(placed([1, "jack", "脚本"], [2, null, ""])) + " ".repeat(16_001) },
+    error: "dispatch_cross_team_invalid" },
+  { name: "malformed JSON", response: { owner: "model_owned", finalText: "{broken" }, error: SyntaxError },
+  { name: "a workflow-owned result", response: { owner: "workflow_owned", receipt: { outcome: "accepted", reply: "not a decision" } }, error: "dispatch_cross_team_invalid" },
+] satisfies Array<{ name: string; response: AppServerTurnResult; error: string | typeof SyntaxError }>)("refuses $name in the Coordinator's cross-team turn and releases its thread", async ({ response, error }) => {
+  const external = runtime(response);
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
+  await expect(classifier.assign(crossTeam)).rejects.toThrow(error);
+  expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
+});
+
+it("keeps a model failure of the Coordinator's cross-team turn and releases its thread", async () => {
+  const external = runtime({ owner: "model_owned", finalText: "{}" });
+  external.runTurn.mockRejectedValue(new Error("model_unavailable"));
+  const classifier = new CodexDispatchClassifier((work) => work(external, "/isolated/coordinator"), () => ({ model: "fixture-model", effort: "low" }));
+  await expect(classifier.assign(crossTeam)).rejects.toThrow("model_unavailable");
+  expect(external.releaseThread).toHaveBeenCalledExactlyOnceWith("coordinator-thread");
+});

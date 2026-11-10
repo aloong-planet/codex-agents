@@ -16,6 +16,9 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   private readonly leaderPlans = new Map<string, unknown[]>();
   private readonly leaderClosings = new Map<string, unknown>();
   private readonly leaderSupplements = new Map<string, unknown>();
+  /** Injected outputs of one team's Team Leader turns on a message (`teamTurns`), keyed by message and team. */
+  private readonly teamTurns = new Map<string, { leaderPlan?: unknown[]; leaderClosing?: unknown; leaderSupplement?: unknown }>();
+  private readonly crossTeamDecisions = new Map<string, unknown>();
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
   private applications = new Map<string, FixtureFeishuTransport>();
@@ -48,17 +51,28 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     if (!this.decisions.has(messageId)) throw new Error("fixture_dispatch_decision_missing");
     return structuredClone(this.decisions.get(messageId));
   }
+  /** The Coordinator's injected cross-team decision for a message; its absence fails the turn, as a missing dispatch decision does. */
+  crossTeamDecision(messageId: string): unknown {
+    if (!this.crossTeamDecisions.has(messageId)) throw new Error("fixture_cross_team_decision_missing");
+    return structuredClone(this.crossTeamDecisions.get(messageId));
+  }
   /**
-   * The next injected Team Leader plan for a message, one per turn; the last one repeats once the list is used up.
-   * Undefined when the message injected none, so the fixture Team Leader plans its default.
+   * The next injected Team Leader plan for a message, one per turn; the last one repeats once the list is used up. A team the
+   * message gave its own turns (`teamTurns`) takes those. Undefined when none was injected, so the fixture Team Leader plans its default.
    */
-  leaderPlan(messageId: string): unknown {
-    const plans = this.leaderPlans.get(messageId);
+  leaderPlan(messageId: string, teamId?: string): unknown {
+    const plans = (teamId === undefined ? undefined : this.teamTurns.get(`${messageId}\u0000${teamId}`)?.leaderPlan) ?? this.leaderPlans.get(messageId);
     if (!plans?.length) return undefined;
     return structuredClone(plans.length > 1 ? plans.shift() : plans[0]);
   }
-  leaderClosing(messageId: string): unknown { return structuredClone(this.leaderClosings.get(messageId)); }
-  leaderSupplement(messageId: string): unknown { return structuredClone(this.leaderSupplements.get(messageId)); }
+  leaderClosing(messageId: string, teamId?: string): unknown {
+    const team = teamId === undefined ? undefined : this.teamTurns.get(`${messageId}\u0000${teamId}`);
+    return structuredClone(team && "leaderClosing" in team ? team.leaderClosing : this.leaderClosings.get(messageId));
+  }
+  leaderSupplement(messageId: string, teamId?: string): unknown {
+    const team = teamId === undefined ? undefined : this.teamTurns.get(`${messageId}\u0000${teamId}`);
+    return structuredClone(team && "leaderSupplement" in team ? team.leaderSupplement : this.leaderSupplements.get(messageId));
+  }
   /**
    * The model's tool calls and reply for an Executor turn on `messageId`. An Assignment whose title the message gave its own
    * turn (`executorTurns`) takes that one; the others share the message's.
@@ -151,6 +165,16 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     }
     if (input.leaderClosing !== undefined && event?.message?.message_id) this.leaderClosings.set(event.message.message_id, structuredClone(input.leaderClosing));
     if (input.leaderSupplement !== undefined && event?.message?.message_id) this.leaderSupplements.set(event.message.message_id, structuredClone(input.leaderSupplement));
+    if (input.crossTeamDecision !== undefined && event?.message?.message_id) this.crossTeamDecisions.set(event.message.message_id, structuredClone(input.crossTeamDecision));
+    if (input.teamTurns !== undefined && event?.message?.message_id) {
+      if (!input.teamTurns || typeof input.teamTurns !== "object" || Array.isArray(input.teamTurns) || Object.keys(input.teamTurns).length > 5) throw new Error("fixture_team_turns_invalid");
+      for (const [teamId, turns] of Object.entries(input.teamTurns as Record<string, { leaderPlan?: unknown; leaderClosing?: unknown; leaderSupplement?: unknown }>)) {
+        const plans = turns.leaderPlan === undefined ? undefined : Array.isArray(turns.leaderPlan) ? turns.leaderPlan : [turns.leaderPlan];
+        if (plans && (plans.length === 0 || plans.length > 5)) throw new Error("fixture_leader_plan_invalid");
+        this.teamTurns.set(`${event.message.message_id}\u0000${teamId}`, structuredClone({ ...(plans ? { leaderPlan: plans } : {}),
+          ...(turns.leaderClosing !== undefined ? { leaderClosing: turns.leaderClosing } : {}), ...(turns.leaderSupplement !== undefined ? { leaderSupplement: turns.leaderSupplement } : {}) }));
+      }
+    }
     if (input.executorTurns !== undefined && event?.message?.message_id) {
       if (!input.executorTurns || typeof input.executorTurns !== "object" || Array.isArray(input.executorTurns) || Object.keys(input.executorTurns).length > 20) throw new Error("fixture_executor_turns_invalid");
       for (const [title, turn] of Object.entries(input.executorTurns as Record<string, { modelReply?: unknown; modelHold?: unknown; modelToolCalls?: unknown }>)) {

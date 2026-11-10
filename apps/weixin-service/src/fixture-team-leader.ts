@@ -1,14 +1,19 @@
-import { parseLeaderClosing, planWithCorrection, supplementWithCorrection, type LeaderAssignmentReport, type LeaderAssignmentView, type LeaderTurnInput,
+import { namedParts, parseLeaderClosing, planWithCorrection, supplementWithCorrection, type LeaderAssignmentReport, type LeaderAssignmentView, type LeaderTurnInput,
   type TeamLeader } from "./agent-dispatch-leader.js";
 
 /** Where fixture Team Leader outputs come from: the outputs injected with the message a turn concerns. */
-export type FixtureLeaderSource = { leaderPlan(messageId: string): unknown; leaderSupplement(messageId: string): unknown; leaderClosing(messageId: string): unknown };
+export type FixtureLeaderSource = { leaderPlan(messageId: string, teamId: string): unknown; leaderSupplement(messageId: string, teamId: string): unknown;
+  leaderClosing(messageId: string, teamId: string): unknown };
 export type FixtureLeaderRequest = { phase: "plan" | "supplement" | "close"; teamId: string; input: unknown };
 
-/** The default plan when a message injects none: one Assignment on the team's first preset, titled with the Coordinator's summary. */
+/**
+ * The default plan when a message injects none: one Assignment on the team's first preset, titled with the Coordinator's summary,
+ * or for a cross-team Team Leader with the part placed with it.
+ */
 export function fixtureDefaultPlan(input: LeaderTurnInput) {
-  return { assignments: [{ profileId: input.profiles[0]?.id ?? "", title: input.brief.summary.slice(0, 120), brief: input.brief.latest ?? input.brief.message, dependsOn: [] }],
-    decisions: [] };
+  const part = input.relay?.requestedBy ? input.relay.parts[0] : undefined;
+  return { assignments: [{ profileId: input.profiles[0]?.id ?? "", title: (part?.title ?? input.brief.summary).slice(0, 120), brief: part?.brief ?? input.brief.latest ?? input.brief.message,
+    dependsOn: [] }], decisions: [], help: [] };
 }
 /**
  * Fixture mode only: an injected plan or supplement answer whose Assignments leave out `dependsOn` gets an empty one, so
@@ -20,9 +25,9 @@ export function withFixtureDependencies(value: unknown): unknown {
   return { ...output, assignments: output.assignments.map((assignment) => assignment && typeof assignment === "object" && !("dependsOn" in assignment)
     ? { ...assignment, dependsOn: [] } : assignment) };
 }
-/** The default supplement answer when its message injects none: every Assignment of the request is affected. */
+/** The default supplement answer when its message injects none: every Assignment shown is affected. */
 export function fixtureDefaultSupplement(assignments: readonly LeaderAssignmentView[]) {
-  return { affected: assignments.map(({ position }) => position), assignments: [], decisions: [] };
+  return { affected: assignments.map(({ position }) => position), assignments: [], decisions: [], parts: [], help: [] };
 }
 /** The default closing when a message injects none: every Executor's result, in the request's order. */
 export function fixtureDefaultClosing(assignments: readonly LeaderAssignmentReport[]) {
@@ -37,27 +42,28 @@ export class FixtureTeamLeader implements TeamLeader {
   readonly requests: FixtureLeaderRequest[] = [];
   constructor(private readonly source: FixtureLeaderSource) {}
 
-  plan(input: LeaderTurnInput) {
+  plan(input: LeaderTurnInput, existing = 0) {
     return planWithCorrection(async (refusal) => {
       this.record("plan", input, refusal ? { refusal: refusal.reason } : {});
-      return JSON.stringify(withFixtureDependencies(this.source.leaderPlan(input.fixtureMessageId)) ?? fixtureDefaultPlan(input));
-    }, { executorProfiles: input.profiles });
+      return JSON.stringify(withFixtureDependencies(this.source.leaderPlan(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultPlan(input));
+    }, { executorProfiles: input.profiles }, existing);
   }
 
-  supplement(input: LeaderTurnInput, assignments: readonly LeaderAssignmentView[], supplement: string) {
+  supplement(input: LeaderTurnInput, assignments: readonly LeaderAssignmentView[], supplement: string, total = assignments.length) {
     return supplementWithCorrection(async (refusal) => {
       this.record("supplement", input, { assignments, supplement, ...(refusal ? { refusal: refusal.reason } : {}) });
-      return JSON.stringify(withFixtureDependencies(this.source.leaderSupplement(input.fixtureMessageId)) ?? fixtureDefaultSupplement(assignments));
-    }, { executorProfiles: input.profiles }, assignments.length);
+      return JSON.stringify(withFixtureDependencies(this.source.leaderSupplement(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultSupplement(assignments));
+    }, { executorProfiles: input.profiles }, assignments.length, { total, parts: namedParts(input) });
   }
 
   async close(input: LeaderTurnInput, assignments: readonly LeaderAssignmentReport[]) {
     this.record("close", input, { assignments });
-    return parseLeaderClosing(JSON.stringify(this.source.leaderClosing(input.fixtureMessageId) ?? fixtureDefaultClosing(assignments)));
+    return parseLeaderClosing(JSON.stringify(this.source.leaderClosing(input.fixtureMessageId, input.leader.id) ?? fixtureDefaultClosing(assignments)));
   }
 
   private record(phase: FixtureLeaderRequest["phase"], input: LeaderTurnInput, extra: Record<string, unknown>): void {
-    this.requests.push({ phase, teamId: input.leader.id, input: structuredClone({ brief: input.brief, profiles: input.profiles, directory: input.directory, memory: input.memory, ...extra }) });
+    this.requests.push({ phase, teamId: input.leader.id, input: structuredClone({ brief: input.brief, profiles: input.profiles, directory: input.directory, memory: input.memory,
+      ...(input.relay ? { relay: input.relay } : {}), ...extra }) });
     if (this.requests.length > 40) this.requests.shift();
   }
 }
