@@ -59,6 +59,16 @@ class PairingFile {
     if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.size > 1024 * 1024) throw Error("pairing_unsafe_configuration");
     return fs.readFileSync(this.file, "utf8");
   }
+  /**
+   * Steps the kept Feishu configuration still needs before the next start, one preview line each, in the order they are done
+   * (channel-switching::US-003/AC-08). A kept webhook holds the previous application's verification token and encrypt key.
+   */
+  keptConfigurationSteps(appId: string): string[] {
+    const previous = this.document.feishu;
+    return [
+      ...(previous?.webhook !== undefined && previous.appId !== appId ? ["本次换了应用：webhook 里的 Verification Token 和 Encrypt Key 仍是原应用的，请换成新应用的再启动。"] : []),
+    ];
+  }
   enabledChannels(): PersonalChannel[] {
     const previous = parseChannelStartupConfiguration(this.document).enabledChannels;
     return ["feishu", ...previous.filter((channel) => channel !== "feishu")];
@@ -151,7 +161,7 @@ export async function runFeishuPairing(options: {
     const candidate = await guarded(candidatePromise);
     io.write(`收到匹配口令的私聊：\n本人标识：${candidate.senderId}\n私聊标识：${candidate.target}`);
     if ((await ask("这是你刚才发送的私聊吗？[y/N] ")).toLowerCase() !== "y") return "cancelled";
-    io.write(`保存预览：\n下次启动渠道：${file.enabledChannels().map((channel) => channel === "weixin" ? "微信" : "飞书").join("、")}\n本人：${candidate.senderId}\n私聊：${candidate.target}\n原微信绑定、记忆、权限和任务身份：保留\n配置位置：${options.configPath}\n文件仅限本机当前用户读写。`);
+    io.write(`保存预览：\n下次启动渠道：${file.enabledChannels().map((channel) => channel === "weixin" ? "微信" : "飞书").join("、")}\n本人：${candidate.senderId}\n私聊：${candidate.target}\n原微信绑定、记忆、权限和任务身份：保留\n配置位置：${options.configPath}\n文件仅限本机当前用户读写。${file.keptConfigurationSteps(appId).map((step) => `\n${step}`).join("")}`);
     if ((await ask("保存此配置？[y/N] ")).toLowerCase() !== "y") return "cancelled";
     controller.signal.throwIfAborted();
     await closeTransport();

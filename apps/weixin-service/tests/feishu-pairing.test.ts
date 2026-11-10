@@ -242,6 +242,24 @@ it("P10 re-pairing another application replaces only its credentials and the own
   } finally { h.cleanup(); }
 });
 
+const TOKEN_STEP = "本次换了应用：webhook 里的 Verification Token 和 Encrypt Key 仍是原应用的，请换成新应用的再启动。";
+it.each([
+  ["a different application keeping webhook", repairedApp, true, [TOKEN_STEP]],
+  ["the same application keeping webhook", appId, true, []],
+  ["a different application without webhook", repairedApp, false, []],
+] as const)("P10 the save preview of a re-pair onto %s names the kept steps still to do", async (_case, pairedApp, webhook, steps) => {
+  const h = harness(pairedApp);
+  const input = configured({ groupChatIds: ["oc_alpha"] });
+  if (!webhook) { delete (input.feishu as Record<string, unknown>).receiveMode; delete (input.feishu as Record<string, unknown>).webhook; }
+  fs.writeFileSync(h.configPath, JSON.stringify(input));
+  h.answers.unshift("y");
+  try {
+    expect(await runFeishuPairing({ configPath: h.configPath, statePath: path.join(h.dir, "state.json"), io: h.io, transport: () => h.transport })).toBe("saved");
+    const preview = h.output.find((text) => text.startsWith("保存预览："));
+    expect(preview?.split("\n").slice(-steps.length - 1)).toEqual(["文件仅限本机当前用户读写。", ...steps]);
+  } finally { h.cleanup(); }
+});
+
 it("P05 refuses a re-pair whose kept dispatch roster already uses the new App ID, and releases its lock", async () => {
   const h = harness("cli_1111111111111111");
   fs.writeFileSync(h.configPath, JSON.stringify(configured({ groupChatIds: ["oc_alpha"], agents: [{ id: "sam" },
