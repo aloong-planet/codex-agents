@@ -3,7 +3,7 @@
 > Status: the team registry and the team management page are implemented locally for existing applications. Teams are edited, bound to groups, onboarded and announced from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: the page onboards only existing applications.
-> - It shows 接入方式 as 「已有应用，手动填写」, with two steps, the credential check and group joining, and offers 「重新检查」.
+> - It shows 接入方式 as 「已有应用，手动填写」, with two steps, 校验凭证并读取机器人信息 (the credential check) and 加入所绑定的群 (group joining, one row per group), and offers 「重新检查」. Each step and group row shows 未开始, 等待审核, 需处理 or 已完成, and one that awaits review or needs action says why.
 > - Not built yet: QR creation and the test message (team-management::US-002/AC-01, and the QR steps of US-002/AC-03 and AC-04); MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the link to skill management (US-001/AC-04).
 > - Unchecking a group stops the team taking work there and announces its departure; the team then stays draining in that group.
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. Two points are open: whether the preset permissions can change the created application's configuration, and which permission the group-membership check needs.
@@ -22,7 +22,7 @@ A team-management page in the local console lists every Agent Team beside an edi
 
 As the owner, I want to define a team once and choose the groups where it works, so that one team serves several groups without separate configurations or Feishu applications.
 
-- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state, its bound groups, its number of Executor profiles and its active Assignments.
+- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state (固定 for Sam, otherwise 正常接单 or 接入未完成), its bound groups, its number of Executor profiles and its active Assignments.
 - team-management::US-001/AC-02: "新增团队" adds an unnamed team to the list and opens it in the editor.
 - team-management::US-001/AC-03: The groups section has a checkbox for each dispatch group. Each group shows a preview of the teams the Coordinator can dispatch to there. A team appears in the preview only when it accepts work in that group under team-management::REQ-003.
 - team-management::US-001/AC-04: Links lead from the page to the team overview, the MCP management page and the skill management page.
@@ -52,7 +52,7 @@ As the owner, I want to set each team's responsibility, its Team Leader's instru
 - team-management::US-003/AC-03: "绑定 MCP" lists the enabled servers of the [MCP Catalog](mcp-catalog.md) that the profile does not yet attach, with their transport, state and usable tool count. Choosing one shows a confirmation card that names the team and profile, the `mcp__<server>__…` tools they gain and the exact command or address. The card states that the service holds the connection and Executors never see the credentials. Only confirming the card attaches the server.
 - team-management::US-003/AC-04: Each attached server can be unbound. Unbinding is a revocation under [agent-dispatch::REQ-017/AC-02](agent-dispatch.md).
 - team-management::US-003/AC-05: Skills are checked from the [Skill Library](skill-library.md). Links lead to MCP management for registering a server and to skill management for importing a skill.
-- team-management::US-003/AC-06: A save bar shows unsaved, saved and clean states. A saved change applies under [agent-dispatch::REQ-017](agent-dispatch.md).
+- team-management::US-003/AC-06: A save bar shows unsaved (有未保存的修改), saved and clean states. A saved change applies under [agent-dispatch::REQ-017](agent-dispatch.md).
 
 ### team-management::US-004 Remove a team from a group, or delete it
 
@@ -62,7 +62,7 @@ As the owner, I want to take a team out of a group, or delete it, without cancel
 - team-management::US-004/AC-02: Active Assignments of the team in the affected groups finish, and its Team Leader closes them. The removal then completes: the team is unbound from those groups and, when deleted, leaves the team list, with a note in the editor that the deletion is complete. History keeps the team's identity and records.
 - team-management::US-004/AC-03: Scheduled tasks that send with the team's identity in an affected group are listed with the removal. Each must be moved to another team that accepts work in that group, or deleted, before the removal completes.
 - team-management::US-004/AC-04: Requests with Assignments of the team that wait for their requester keep waiting, and the removal stays pending. The page lists those requests with links to their records. The owner can confirm or cancel the ones the owner requested; the others wait for their own requester ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)).
-- team-management::US-004/AC-05: An unchecked group is marked as removed after saving; once saved, it shows as draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
+- team-management::US-004/AC-05: An unchecked group is marked 「保存后移除」; once saved, it shows 「移除中 · 停止接单」, draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
 
 ## Functional Requirements
 
@@ -98,7 +98,7 @@ Moving a scheduled task changes only its sending identity to the chosen team's T
 
 ### team-management::CON-001 Write-only application secrets (direct acceptance)
 
-Applies to: App Secrets entered by hand or filled in by QR creation. They are stored locally, never displayed, never returned by any console API and never written to logs, diagnostics or the audit ([agent-console::REQ-004](agent-console.md)).
+Applies to: App Secrets entered by hand or filled in by QR creation. They are stored locally, never displayed, never returned by any console API and never written to logs, diagnostics or the audit ([agent-console::REQ-004](agent-console.md)). On the page, 填写 or 替换 opens a password field, and a saved secret shows as 「已保存 · 不显示」.
 
 ## Failure modes and boundaries
 
@@ -169,9 +169,9 @@ A new team's ID is generated at its first save. Sam's save changes only its resp
 - joining: 「<负责人>（<团队名>）已加入本群，负责：<职责>」;
 - leaving: 「<负责人>（<团队名>）已离开本群，不再接新的事务；进行中的事务会做完。」.
 
-Each announcement keeps its delivery state: accepted, failed or unknown. A send cut off by a restart is unknown, and nothing is resent automatically.
+Each announcement keeps its delivery state: accepted, failed or unknown. The page lists the announcements under each group with that state: 飞书已接收, 发送失败 · 不会自动重发 or 发送结果未知 · 不会自动重发. A send cut off by a restart is unknown, and nothing is resent automatically.
 
-**Executor profiles and effective tools.** A profile's 执行者称呼 names its Executors `<noun> <n>`; the default is 执行者. The page shows the effective tools: the checked tools that module permissions grant. Each host tool's gate decides this:
+**Executor profiles and effective tools.** A profile's 执行者称呼 names its Executors `<noun> <n>`; the default is 执行者, and the field's hint shows the form, such as 「视觉执行者 51」. Profiles can be added and removed. The page groups the host tools as 文件, 发送 and 定时任务 and shows the effective tools as 「实际可用：…」: the checked tools that module permissions grant. Each host tool's gate decides this:
 - `files.find`, `files.grep`, `files.read` and `weixin.send_files` need read on a saved scope;
 - `files.write` needs write;
 - `files.edit` needs read and write on one scope;

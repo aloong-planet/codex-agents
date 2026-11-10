@@ -8,15 +8,14 @@ This repository uses one `docs/CONTEXT.md` across its workspace packages.
 | --- | --- |
 | `docs/CONTEXT.md` | Domain terminology and invariants |
 | `docs/adr/` | Architectural decisions and their rationale |
-| `docs/specs/<slug>.md` | Agreed requirements, boundaries, and exclusions |
-| `docs/features/<slug>.md` | Current user-visible behavior |
+| `docs/specs/<slug>.md` | Agreed requirements, current user-visible behavior, boundaries, and exclusions |
 | `docs/prototypes/` | Approved interface and interaction references |
 | `docs/postmortems/` | Incident analysis and lessons |
 | `docs/ops/` | Project-specific operational procedures |
 | `docs/agents/` | Agent workflow conventions |
 | `docs/testing/` | Test requirements, procedures, and report templates |
 
-Specifications and feature documents for the same feature share a slug.
+Each feature is described once, by its specification.
 Cross-check current claims against implementation and current verification
 evidence; report discrepancies rather than silently choosing one account.
 
@@ -41,6 +40,5 @@ duplicate research copy in this repository unless explicitly requested.
 
 ## Before making changes
 
-Read `docs/CONTEXT.md` and the relevant specifications, feature documents,
-and ADRs. Use the established domain vocabulary. Explicitly identify
+Read `docs/CONTEXT.md` and the relevant specifications and ADRs. Use the established domain vocabulary. Explicitly identify
 conflicts with existing decisions instead of silently overriding them.

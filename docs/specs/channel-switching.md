@@ -23,7 +23,7 @@ Activate the configured private channels together behind one independent busines
 As the same owner, I can use Weixin and Feishu without replacing the assistant's business capabilities.
 
 - channel-switching::US-001/AC-01: After configuring both owner-bound channels and starting successfully, both Weixin and Feishu admit private messages without restarting between conversations. A configuration that enables only one channel remains supported.
-- channel-switching::US-001/AC-02: Each enabled channel supports its retained personal assistant paths: text conversations, authorized local file operations, image/file delivery, persistent selections, memory and scheduled notifications. Channel-specific transport presentation may differ without changing authorization or delivery meaning.
+- channel-switching::US-001/AC-02: Each enabled channel supports its retained personal assistant paths: text conversations, authorized local file operations, image/file delivery, persistent selections, memory and scheduled notifications. Channel-specific transport presentation may differ without changing authorization or delivery meaning. Feishu receives text, supported rich text, images and files, and sends text, images up to 10 MiB and files up to 30 MiB; Feishu video, audio and interactive cards are unsupported.
 
 ### channel-switching::US-002 Preserve personal continuity
 
@@ -38,7 +38,7 @@ As the owner, I retain my personal data without accidentally merging unrelated c
 
 As the existing owner, I can supply application credentials and confirm my private message locally instead of manually finding platform identity IDs.
 
-- channel-switching::US-003/AC-01: A standalone command, headed 「飞书配对」 for a first pairing and a re-pairing alike, prompts for application ID and concealed secret, establishes a pairing-only connection, and displays a fresh one-time challenge with a five-minute lifetime.
+- channel-switching::US-003/AC-01: A standalone command, headed 「飞书配对」 for a first pairing and a re-pairing alike, prompts for application ID and concealed secret, establishes a pairing-only connection, and displays a fresh one-time challenge with a five-minute lifetime. Pairing needs the running service stopped and the application's bot configured; the command asks for both before the challenge.
 - channel-switching::US-003/AC-02: Only an authenticated human private text message matching the current challenge can supply the candidate sender and chat. Malformed, unrelated, group, bot and expired messages cannot bind an owner.
 - channel-switching::US-003/AC-03: Local confirmation of the candidate is required before a save preview; saving requires a second explicit confirmation. Default answers decline. Replacing an existing Feishu binding additionally requires explicit consent.
 - channel-switching::US-003/AC-04: Saved configuration enables Feishu for the next startup while preserving any already configured Weixin membership, the existing owner memory key, Weixin binding and task scope. Missing or ambiguous legacy identities fail locally rather than inventing new storage identities.
@@ -71,7 +71,7 @@ As the owner, I can enable selected Feishu groups and members so those members c
 As the owner, I can collaborate without making personal memory available to a group.
 
 - channel-switching::US-006/AC-01: Each group recalls and captures only its own curated memory, including plan evidence; private memory and other groups' memory are neither read nor written.
-- channel-switching::US-006/AC-02: Group model configuration, recoverable threads, native tools, delegated tools and file tools cannot bypass this boundary to access service-private state or personal Codex memory.
+- channel-switching::US-006/AC-02: Group model configuration, recoverable threads, native tools, delegated tools and file tools cannot bypass this boundary to access service-private state or personal Codex memory. A group turn inherits none of the owner's personal model integrations, and it is offered only the business tools and, where its turn allows, web search.
 - channel-switching::US-006/AC-03: Authorized members inherit the owner's granted business file operations and current revocations. This grants no additional directories and does not override protected internal-memory boundaries.
 
 ### channel-switching::US-007 Manage group work together

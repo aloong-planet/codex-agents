@@ -1,6 +1,6 @@
 # Feishu agent dispatch setup and acceptance
 
-This procedure enables [automatic group dispatch](../features/agent-dispatch.md) on the existing local service. Keep the current owner bindings, memory identity, task scope, state directory and business-file grants. All examples use synthetic values; never commit real identifiers, credentials or state.
+This procedure enables [automatic group dispatch](../specs/agent-dispatch.md) on the existing local service. Keep the current owner bindings, memory identity, task scope, state directory and business-file grants. All examples use synthetic values; never commit real identifiers, credentials or state.
 
 ## Applications and event intake
 

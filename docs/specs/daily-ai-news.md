@@ -1,6 +1,6 @@
 # Daily AI news
 
-> Related: [feature catalogue](../features/daily-ai-news.md) · [shared scheduling contract](scheduled-tasks.md) · [ADR-0016](../adr/0016-daily-news-owner-handoff.md) · [ADR-0017](../adr/0017-daily-news-results-and-archives.md)
+> Related: [shared scheduling contract](scheduled-tasks.md) · [ADR-0016](../adr/0016-daily-news-owner-handoff.md) · [ADR-0017](../adr/0017-daily-news-results-and-archives.md)
 >
 > Resilience implementation: local candidate on 2026-10-16. The user approved nonblocking archive failure and then continued after the seven-state message prototype. Deployment and real-Weixin acceptance are separate.
 
@@ -37,9 +37,9 @@ Retain generated reports and resume eligible delivery for the original enabled a
 ### daily-ai-news::REQ-004 Complete summaries
 
 - daily-ai-news::REQ-004/AC-01: Newly generated summaries express the article's central argument in natural prose. Neither the detailed archive summary nor the short delivery summary requires background/development/evidence/impact fields or labels. Preserve qualifications needed to avoid changing the argument; do not invent facts or merely paraphrase the title.
-- daily-ai-news::REQ-004/AC-02: Short delivery summaries are complete sentences, not character-cut fragments or ellipsis substitutions. Retain the existing 280-code-point item and 1,500-code-point message limits for up to ten articles. Metadata is included in those budgets.
+- daily-ai-news::REQ-004/AC-02: Short delivery summaries are complete sentences, not character-cut fragments or ellipsis substitutions. A new short summary has at most 80 Unicode code points, punctuation included. Retain the existing 280-code-point item and 1,500-code-point message limits for up to ten articles. Metadata is included in those budgets.
 - daily-ai-news::REQ-004/AC-03: An invalid short summary receives one bounded rewrite attempt. If it remains invalid, use the existing research failure/selection behavior; never silently truncate it for delivery. Other process or structural failures do not trigger this content rewrite.
-- daily-ai-news::REQ-004/AC-04: Persist the short summary separately from the full archive summary, and reuse it in preview, sending and cached recovery. Existing frozen outbound messages retain their exact body; legacy previews without a short summary may show a complete fitting original summary, otherwise explicitly indicate that the legacy short summary is unavailable rather than fabricate or cut a viewpoint.
+- daily-ai-news::REQ-004/AC-04: Persist the short summary separately from the full archive summary, and reuse it in preview, sending and cached recovery. Existing frozen outbound messages retain their exact body; legacy previews without a short summary may show a complete fitting original summary, otherwise explicitly indicate that the legacy short summary is unavailable and point to the local detailed archive, rather than fabricate or cut a viewpoint.
 
 ### daily-ai-news::REQ-005 Reuse successfully processed articles
 
