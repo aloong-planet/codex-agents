@@ -19,12 +19,13 @@ const defaultAgents = (): Agent[] => [{ id: "sam" },
   { id: "alice", appId: "cli_1111111111111111", appSecret: "alice-secret" },
   { id: "bill", appId: "cli_2222222222222222", appSecret: "bill-secret" },
   { id: "jack", appId: "cli_3333333333333333", appSecret: "jack-secret" }];
-function local(agents: Agent[] = defaultAgents(), groupChatIds = ["oc_alpha", "oc_beta"]) {
+/** The parsed `feishu.dispatch` section; `agents: null` gives a groups-only section, as the console writes it. */
+function local(agents: Agent[] | null = defaultAgents(), groupChatIds = ["oc_alpha", "oc_beta"]) {
   const parsed = parseChannelStartupConfiguration({ channel: "feishu",
     owner: { memoryAccountId: "owner-memory", bindings: [{ channel: "feishu", accountId: SAM.appId, target: "oc_private", senderId: "ou_owner" }] },
     taskScope: { accountId: "owner-memory", target: "oc_private" },
     feishu: { ...SAM, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
-      dispatch: { groupChatIds, agents } } });
+      dispatch: agents === null ? { groupChatIds } : { groupChatIds, agents } } });
   const feishu = parsed.entries.find((entry) => entry.channel === "feishu");
   if (!feishu?.dispatch) throw new Error("expected_dispatch_configuration");
   return feishu.dispatch;
@@ -116,17 +117,48 @@ describe("team registry", () => {
     } finally { registry.close(); }
   });
 
-  it("stops importing the local configuration after the first console save", () => {
+  it("after the first console save, follows only the file's dispatch groups and drops bindings to groups it no longer lists", () => {
     const registry = new TeamRegistry(databasePath());
     try {
       const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
       const saved = registry.save(renameBill(seeded.definitions, "Bella"), { basedOn: 1 });
       expect({ version: saved.version, basedOn: saved.basedOn, source: saved.source }).toEqual({ version: 2, basedOn: 1, source: "console" });
+      // A roster in the file no longer changes the teams; its group list still applies.
       const replaced = defaultAgents();
       replaced[2] = { id: "bill", appId: "cli_6666666666666666", appSecret: "bill-replaced" };
-      expect(registry.importLocalConfiguration(local(replaced, ["oc_alpha"]), { executorHostTools: HOST_TOOLS })).toEqual(saved);
-      expect(registry.current()).toEqual(saved);
+      const followed = registry.importLocalConfiguration(local(replaced, ["oc_alpha"]), { executorHostTools: HOST_TOOLS });
+      expect({ version: followed.version, basedOn: followed.basedOn, source: followed.source }).toEqual({ version: 3, basedOn: 2, source: "local_configuration" });
+      expect(followed.definitions.dispatchGroups).toEqual(["oc_alpha"]);
+      expect(followed.definitions.teams.map(({ id, bindings }) => ({ id, bindings }))).toEqual(["alice", "bill", "jack"]
+        .map((id) => ({ id, bindings: [{ chatId: "oc_alpha", state: "accepting" }] })));
       expect(registry.roster(SAM).agents.find(({ id }) => id === "bill")).toMatchObject({ name: "Bella", appId: "cli_2222222222222222", appSecret: "bill-secret" });
+      expect(registry.importLocalConfiguration(local(null, ["oc_alpha"]), { executorHostTools: HOST_TOOLS }).version).toBe(3);
+    } finally { registry.close(); }
+  });
+
+  it("starts an empty registry from a groups-only section with the Coordinator alone", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      registry.importLocalConfiguration(local(null, ["oc_beta"]), { executorHostTools: HOST_TOOLS, coordinatorAppId: SAM.appId });
+      expect(registry.current()).toEqual({ version: 1, basedOn: null, source: "local_configuration", definitions: {
+        coordinator: { id: "sam", name: "Sam", teamName: "总协调", responsibility: "协调、澄清和分派任务，不执行具体业务事务。",
+          appId: SAM.appId, profile: { instructions: "", hostTools: [] } },
+        dispatchGroups: ["oc_beta"], teams: [] } });
+      expect(registry.roster(SAM)).toEqual({ groupChatIds: ["oc_beta"], agents: [
+        { id: "sam", name: "Sam", responsibility: "协调、澄清和分派任务，不执行具体业务事务。", appId: SAM.appId, appSecret: "sam-secret" }] });
+    } finally { registry.close(); }
+  });
+
+  it("never changes the teams or their secrets from a groups-only section, before any console save too", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      const followed = registry.importLocalConfiguration(local(null, ["oc_beta"]), { executorHostTools: HOST_TOOLS, coordinatorAppId: SAM.appId });
+      expect({ version: followed.version, source: followed.source }).toEqual({ version: 2, source: "local_configuration" });
+      expect(followed.definitions).toEqual({ ...seeded.definitions, dispatchGroups: ["oc_beta"],
+        teams: seeded.definitions.teams.map((team) => ({ ...team, bindings: [{ chatId: "oc_beta", state: "accepting" }] })) });
+      expect(registry.roster(SAM).agents.map(({ id, appSecret }) => ({ id, appSecret }))).toEqual([
+        { id: "sam", appSecret: "sam-secret" }, { id: "alice", appSecret: "alice-secret" }, { id: "bill", appSecret: "bill-secret" }, { id: "jack", appSecret: "jack-secret" }]);
     } finally { registry.close(); }
   });
 

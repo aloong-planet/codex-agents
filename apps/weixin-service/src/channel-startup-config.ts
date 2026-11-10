@@ -3,13 +3,13 @@ import { PersonalOwnerIdentity, type PersonalChannel, type PersonalChannelBindin
 import { OwnerNotificationRoute, type NotificationAddress } from "./notification-channel.js";
 import { FeishuConversationIdentity } from "./feishu-conversation-identity.js";
 import type { FeishuWebhookConfiguration } from "./feishu-webhook-receiver.js";
-import { parseFeishuDispatch, type FeishuDispatchConfiguration } from "./feishu-agent-config.js";
+import { parseFeishuDispatch, type LocalDispatchConfiguration } from "./feishu-agent-config.js";
 
 export type ChannelStartupEntry = {
   binding: Readonly<PersonalChannelBinding>;
 } & (
   | { channel: "weixin"; owner: PersonalOwnerIdentity }
-  | { channel: "feishu"; owner: FeishuConversationIdentity; connection: Readonly<{ appId: string; appSecret: string }>; webhook?: Readonly<FeishuWebhookConfiguration>; dispatch?: Readonly<FeishuDispatchConfiguration> }
+  | { channel: "feishu"; owner: FeishuConversationIdentity; connection: Readonly<{ appId: string; appSecret: string }>; webhook?: Readonly<FeishuWebhookConfiguration>; dispatch?: Readonly<LocalDispatchConfiguration> }
 );
 export type ChannelStartupConfiguration = ChannelStartupEntry & {
   enabledChannels: readonly PersonalChannel[];

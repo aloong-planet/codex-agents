@@ -13,7 +13,7 @@ import { createChannelStatusServer } from "./channel-status-server.js";
 import { ConsoleAccess } from "./console-access.js";
 import { ConsoleControlServer } from "./console-control.js";
 import { FixtureFeishuTransport } from "./fixture-feishu-transport.js";
-import { loadChannelStartupConfiguration } from "./channel-startup-config.js";
+import { loadChannelStartupConfiguration, type ChannelStartupEntry } from "./channel-startup-config.js";
 import { FeishuChannel } from "./feishu-channel.js";
 import { FeishuSdkTransport } from "./feishu-sdk-transport.js";
 import { FeishuWebhookTransport } from "./feishu-webhook-transport.js";
@@ -223,12 +223,16 @@ let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () =>
 let countActiveAssignments: () => Readonly<Record<string, number>> = () => ({});
 // Penny's application, read from its configuration at startup; no team may use it (ADR-0025, team-management::REQ-002).
 let pennyApplicationId: string | undefined;
-const feishuConfiguration = (() => {
+// With dispatch, the entry carries the registry's roster, so every reader sees the Coordinator and the teams with an application.
+type FeishuStartupEntry = Omit<Extract<ChannelStartupEntry, { channel: "feishu" }>, "dispatch"> & { dispatch?: Readonly<FeishuDispatchConfiguration> };
+const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
-  if (!entry?.dispatch) return entry;
+  if (!entry) return undefined;
+  const { dispatch: local, ...rest } = entry;
+  if (!local) return rest;
   const registry = new TeamRegistry(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
   try {
-    registry.importLocalConfiguration(entry.dispatch, { executorHostTools: workflowToolCatalog.memberIds() });
+    registry.importLocalConfiguration(local, { executorHostTools: workflowToolCatalog.memberIds(), coordinatorAppId: entry.connection.appId });
     const management = new TeamManagement({ registry, coordinator: entry.connection,
       platform: fixtureOnboarding ?? new FeishuHttpOnboardingPlatform(),
       announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
@@ -242,7 +246,7 @@ const feishuConfiguration = (() => {
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
       report: (code) => process.stderr.write(`${code}\n`) });
     teamManagement = management;
-    return Object.freeze({ ...entry, dispatch: management.roster() });
+    return Object.freeze({ ...rest, dispatch: management.roster() });
   } catch (error) { registry.close(); throw error; }
 })();
 const directChannel = fixtureMode || !weixinConfiguration

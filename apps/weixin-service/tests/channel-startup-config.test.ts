@@ -27,12 +27,12 @@ describe("startup channel configuration", () => {
     const result = parseChannelStartupConfiguration({ ...base, feishu });
     if (result.channel !== "feishu") throw new Error("expected_feishu");
     expect(result.dispatch?.groupChatIds).toEqual(["oc_alpha"]);
-    expect(result.dispatch?.agents.map(({ id, name, appId }) => ({ id, name, appId }))).toEqual([
+    expect(result.dispatch?.agents?.map(({ id, name, appId }) => ({ id, name, appId }))).toEqual([
       { id: "sam", name: "Sam", appId: "cli_0123456789abcdef" }, { id: "alice", name: "Alice", appId: "cli_1111111111111111" },
       { id: "bill", name: "Bill", appId: "cli_2222222222222222" }, { id: "jack", name: "Jack", appId: "cli_3333333333333333" },
     ]);
     agents[1]!.appSecret = "changed";
-    expect(result.dispatch?.agents[1]?.appSecret).toBe("alice-secret");
+    expect(result.dispatch?.agents?.[1]?.appSecret).toBe("alice-secret");
     for (const dispatch of [
       { groupChatIds: ["oc_unlisted"], agents }, { groupChatIds: [], agents },
       { groupChatIds: ["oc_alpha", "oc_alpha"], agents }, { groupChatIds: ["oc_alpha"], agents: agents.slice(0, 3) },
@@ -40,6 +40,16 @@ describe("startup channel configuration", () => {
       { groupChatIds: ["oc_alpha"], agents: [agents[0], { ...agents[1], appId: base.feishu.appId }, ...agents.slice(2)] },
       { groupChatIds: ["oc_alpha"], agents: [{ id: "sam", appId: "cli_5555555555555555", appSecret: "wrong-sam" }, ...agents.slice(1)] },
     ]) expect(() => parseChannelStartupConfiguration({ ...base, feishu: { ...feishu, dispatch } })).toThrow(/^channel_startup_configuration_invalid$/);
+  });
+  it("accepts a dispatch section that lists only groups, as the console writes it, and nothing else beside them", () => {
+    const base = configuration();
+    const feishu = { ...base.feishu, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+      dispatch: { groupChatIds: ["oc_beta", "oc_alpha"] } };
+    const result = parseChannelStartupConfiguration({ ...base, feishu });
+    if (result.channel !== "feishu") throw new Error("expected_feishu");
+    expect(result.dispatch).toEqual({ groupChatIds: ["oc_beta", "oc_alpha"] });
+    expect(() => parseChannelStartupConfiguration({ ...base, feishu: { ...feishu, dispatch: { groupChatIds: ["oc_alpha"], roster: [] } } }))
+      .toThrow(/^channel_startup_configuration_invalid$/);
   });
   it("selects authenticated webhook reception explicitly while preserving legacy bindings", () => {
     const base = configuration();

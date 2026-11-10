@@ -91,6 +91,21 @@ As the owner, I want to discuss, supplement and confirm the requests I started i
 - agent-console::US-008/AC-04: Repeating a confirmation applies it once. A proposal made against an older revision of the request must be checked again.
 - agent-console::US-008/AC-05: An ended request remains available for discussion; new work needs a new request.
 
+### agent-console::US-009 Choose the dispatch groups
+
+As the owner, I want to choose from the console which Feishu groups use dispatch, so that I do not edit the channel configuration file by hand.
+
+- agent-console::US-009/AC-01: On 团队管理, the dispatch-group form lists every group in the Feishu group allowlist of the channel configuration file, by name, with the chat ID beside it; a group whose name cannot be read shows its chat ID. A group is checked when the file names it as a dispatch group. Without dispatch, the page's 未配置 state 「尚未配置派单群」 shows this form instead of the team list. With dispatch, the 「派单群设置」 action opens the same form in the drawer.
+- agent-console::US-009/AC-02: Saving writes exactly the checked groups as the dispatch groups of the channel configuration file. Every other key keeps its value, and the file stays owner-only. Saving with no group checked removes dispatch from the file, so the service starts without dispatch. The page says that a save applies after the service restarts.
+- agent-console::US-009/AC-03: Until the restart, the form shows both the groups the running service dispatches in (运行中的服务) and the saved ones (已保存，重启后), with 未启用派单 or 不启用派单 for none. On the configured page, a strip 「派单群设置已保存，重启服务后生效。」 with 「查看派单群设置」 stays while the two differ.
+- agent-console::US-009/AC-04: A save is refused, with the file unchanged and the reason shown in the save bar 「无法保存」, when:
+  - the pairing wizard's lock exists: 「飞书配对向导正在使用渠道配置，暂时不能保存；配对结束后再保存。」;
+  - the file changed after the page loaded it: 「渠道配置文件在页面载入后被修改过；为避免覆盖，本次保存没有生效。」, and the save action becomes 「重新载入」;
+  - it leaves unchecked a group that still has unfinished dispatch requests (proposed, queued, running or waiting): 「<群>还有 <n> 项未结束的派单事务，结束后才能取消勾选：」 with those requests listed. Checking a group never meets this refusal.
+- agent-console::US-009/AC-05: Without Feishu paired, the page shows 「尚未配置派单群」 with 「飞书尚未接入本机服务：请先停止服务，在终端运行 `pnpm feishu:pair` 完成飞书配对，再回到这里选择派单群。」 and no group list. Pairing, the group allowlist and the receive mode are never edited from the console.
+- agent-console::US-009/AC-06: No response of the form carries a secret from the channel configuration file.
+- agent-console::US-009/AC-07: After the restart, the service dispatches in exactly the saved groups. When no team exists yet, a group request there reaches the Coordinator alone ([agent-dispatch](agent-dispatch.md) Implementation Decisions: local configuration).
+
 ## Functional Requirements
 
 ### agent-console::REQ-001 Executor content is the owner's view only (direct acceptance)
@@ -113,6 +128,7 @@ Penny appears with its status, responsibility and storage locations only. Amount
 The service appends an entry to a local audit file for each of these events:
 
 - a saved change to a team, a group binding, an Agent Profile, an MCP server or tool, or a skill;
+- a saved change to the dispatch groups, with the groups before and after;
 - an onboarding action;
 - a browser authorization or revocation;
 - a refused MCP call.
@@ -195,6 +211,13 @@ The interface is Chinese and light only; the project's capability declaration di
 | Owner changes a team or MCP server | Audit entry without secrets under agent-console::REQ-004 |
 | A leader's reply contains a link, a `javascript:` or `file:` link, an image, raw HTML or a 2,000-row table | `http(s)` links open in a new tab; other targets, images and HTML stay text; the table scrolls inside the message under agent-console::REQ-005/AC-02, agent-console::REQ-005/AC-03 and agent-console::REQ-005/AC-05 |
 | Records contain message text, links, markup, image references or file names from members, Executors or MCP tools | Plain text; nothing navigates, loads or submits under agent-console::REQ-005/AC-04 |
+| Owner checks dispatch groups and saves, then keeps working without restarting | Running dispatch is unchanged; the form and strip show running and saved groups under agent-console::US-009/AC-02 and agent-console::US-009/AC-03 |
+| Owner unchecks every dispatch group and saves | Dispatch is removed from the file and is off after the restart; teams stay stored for a later re-enable under agent-console::US-009/AC-02 |
+| Owner saves while `pnpm feishu:pair` runs, or after a pairing run left its lock behind | Refused with the lock reason, file unchanged; the console never removes the lock under agent-console::US-009/AC-04 |
+| Owner edits the file by hand, or saves from a second tab, after the page loaded | Refused as changed; 「重新载入」 shows the file's current groups under agent-console::US-009/AC-04 |
+| Owner unchecks a group with a proposed or running request | Refused, the requests listed; checking another group in the same save is not refused for it under agent-console::US-009/AC-04 |
+| Owner opens 团队管理 before pairing Feishu | Pairing instruction only, no form under agent-console::US-009/AC-05 |
+| Response, log or audit entry could reveal an App Secret or webhook key from the file | Never under agent-console::US-009/AC-06 and agent-console::REQ-004 |
 
 ## Implementation Decisions
 
@@ -206,6 +229,14 @@ The interface is Chinese and light only; the project's capability declaration di
 
 **Audit file.** The audit is a JSON Lines file in the state directory with owner-only permissions, appended to and read with standard command-line tools. An authorization that cannot be stored or audited is refused; a revocation always applies and reports an audit entry that could not be written.
 
+**Dispatch groups.** The form reads the channel configuration file the service loaded and returns only chat IDs, group names and a fingerprint of the file's contents. A save works on the file the way the pairing wizard does:
+- it takes the wizard's lock file by exclusive creation, and releases it when the save ends, whatever the outcome; a lock it did not create is never removed;
+- under the lock, it refuses when the file's fingerprint differs from the one the page loaded;
+- it changes only the dispatch group list, keeping every other key (including a dispatch roster written by hand), and checks the whole new configuration with the startup validation before writing;
+- it writes an owner-only temporary file in the same directory, syncs it and renames it over the file.
+
+The unfinished requests come from the running service's dispatch records. The running groups are those the service started with. The startup and registry rules for a configuration written this way are in the agent dispatch spec's Implementation Decisions.
+
 **Read projections.** The overview and records read from a projection over Dispatch Requests, Assignments, Executors, group reports and their delivery outcomes, keyed by conversation. Penny contributes only its readiness and storage locations.
 
 **Private conversations.** Each private conversation with the Coordinator or a Team Leader is its own conversation scope for memory and requests (ADR-0027). Its transcript, drafts and private requests are stored apart from group state and ordinary personal memory. A message sent from the console enters the same admission path as other requests, with the owner as requester and the private conversation as destination.
@@ -215,6 +246,7 @@ The interface is Chinese and light only; the project's capability declaration di
 - **Authorization.** Tested at the HTTP boundary of the real local service: Host refusal, unauthorized access to every route, link expiry and single use, persistence across restart, revocation closing connections, and the fixture-mode exception. The control channel and the Codex plugin's authorization are tested over a real Unix socket, and the plugin's renewal at its HTTP client boundary.
 - **Projections.** Tested at their public interface from durable dispatch records, including partial failure, cross-team Assignments, delivery states and Penny's exclusion.
 - **Private conversations.** The real-main path drives console messages through admission and verifies destinations, requester checks, private isolation and confirmation once-only behavior.
+- **Dispatch groups.** The file write is tested at its public interface on real files: other keys unchanged, owner-only mode, each refusal leaving the file byte for byte unchanged, and the lock released. The real-main fixture route saves through the console API, restarts the service on the same state directory, and observes a group request reaching the Coordinator.
 - **Pages.** Playwright end-to-end tests drive the console as the owner: login, tree and records, drawer behavior, chat drafts, private request creation and a private supplement to a group request.
 
 ## Out of Scope

@@ -42,9 +42,9 @@ The owner chose this layout: the team list on the left, and the selected team's 
   - It opens in the 未配置 panel, and with dispatch configured from 「派单群设置」 in the page header, in the right drawer.
   - Saving writes the local channel configuration and shows 「已保存，重启服务后生效」. The form then compares 「运行中的服务」 with 「已保存，重启后」, and with dispatch configured a status strip above the team list says the saved change takes effect after a restart, with 「查看派单群设置」.
   - A refused save shows "无法保存" with one reason:
-    - the Feishu pairing wizard holds the channel configuration;
+    - the Feishu pairing wizard holds the channel configuration. A second line names the wizard's lock file, in the path style of the 未接入飞书 panel, for a lock that a pairing run left behind;
     - the configuration file changed after the page loaded it, with 「重新载入」;
-    - an unchecked group that the running service uses still has unfinished dispatch requests, each listed with a link to its record.
+    - an unchecked group that the running service uses still has unfinished dispatch requests. Each is listed as plain text: its Coordinator summary, then its state, 等待发起人确认 (proposed or waiting) or 处理中 (queued or running). An item has no request number, because the service has none shorter than the Feishu message key, and no link, because no console page shows a request's records yet.
 - **Navigation.**
   - "Skill 管理" and "MCP 管理" lead to `prototype-skill-library.html` and `prototype-mcp-catalog.html`.
   - "返回团队总览" leads to `prototype-team-structures.html`, whose "团队管理" button leads here.

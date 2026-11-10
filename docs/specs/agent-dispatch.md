@@ -243,6 +243,10 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | First tasks lack product facts, trip constraints or repository access | Clarify missing facts and report validation truthfully under agent-dispatch::REQ-006 and agent-dispatch::CON-003 |
 | Executor saves or sends a file, waits for a choice, schedules a reminder, then restarts | Team Leader identity and group frozen under agent-dispatch::REQ-010/AC-01 |
 | Dispatch disabled; legacy private/group task becomes due | Preserve legacy behavior under agent-dispatch::REQ-010/AC-02 |
+| Owner enables a group from the console while no team exists, then restarts | Dispatch starts with the Coordinator alone; a group request reaches it, and it clarifies under agent-dispatch::REQ-001 (Implementation Decisions: local configuration) |
+| Owner saves the console's dispatch groups without a group that a team is bound to, then restarts | The binding is dropped at startup with no join or leave announcement in that group; the start does not fail (Implementation Decisions: local configuration) |
+| A request is admitted in a group after the owner saved it unchecked and before the restart | The restart cancels it, because the group is no longer authorized, under agent-dispatch::REQ-008/AC-04. Startup is not refused; the ops guide asks to inspect in-flight work before restarting |
+| Owner removes the dispatch section after a console save, then adds a groups-only one back | Teams, profiles and secrets come back from the registry; only bindings to groups no longer listed were dropped (Implementation Decisions: local configuration) |
 
 ## Implementation Decisions
 
@@ -261,7 +265,13 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 - the Coordinator, the teams and their Team Leader applications, and each team's group bindings and state (onboarding, accepting, draining);
 - each agent's Agent Profile.
 
-It starts from the existing local configuration with the same four roles and is then edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).
+It starts from the local configuration and is then edited from the console ([team-management](team-management.md)). Every saved change produces a new definitions version. A request records the version it was admitted under (ADR-0028).
+
+**Local configuration.** The channel configuration's Feishu `dispatch` section turns dispatch on. It holds the dispatch group list and, optionally, a roster:
+- **Groups only**, as the console writes it ([agent-console::US-009](agent-console.md)): 1 to 98 distinct groups, each in the Feishu group allowlist, and no other key. It never changes the teams, the Coordinator or any stored secret. On an empty registry the first version holds the Coordinator alone (Sam, with the Feishu connection's application and the built-in name and responsibility), the groups and no team, so group requests reach the Coordinator, which can only clarify until a team accepts work there.
+- **With a roster**, as hand-written configurations have it: the roster rules are unchanged (4 to 16 agents including the four built-in roles, each team with its application credentials). Until the console saves its first change, each start seeds the teams and their secrets from it, as before.
+
+At every start, also after a console save, the registry's dispatch groups follow the file. A team's binding to a group the file no longer lists is dropped in the same version, with source local configuration and no announcement: dispatch is off in that group. A start whose groups and bindings already match appends nothing. Without the section, the service starts without dispatch and the registry keeps its teams and secrets for a later re-enable.
 
 **Live roster.** A saved team applies without a restart. Every reader of the roster takes the current definitions at each use:
 - routing and the accepting teams of a group;
