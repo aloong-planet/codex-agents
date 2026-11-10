@@ -6,6 +6,7 @@
 > - Each agent sees only its own scope and, for Team Leaders, the group's Team Directory (ticket 06).
 > - Teams are edited from the console's team management page and apply without a restart (ticket 11).
 > - Cross-team work goes through the Coordinator (ticket 08).
+> - Dispatch groups are chosen on the console's team management page and apply at the next start; a configuration that lists only groups takes the teams from the registry, and starts with the Coordinator alone when there is none.
 >
 > The console's other views are specified here and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
@@ -55,7 +56,7 @@ As an authorized group member, I want the service to interpret ordinary messages
 
 As a group member, I want each Team Leader and the Coordinator to speak with its own identity, so that I can see what type of work a message concerns without one coordinator relaying everything.
 
-- agent-dispatch::US-002/AC-01: The initial roster contains the Coordinator and the three Team Leaders in agent-dispatch::REQ-002, with the responsibility boundaries defined there.
+- agent-dispatch::US-002/AC-01: A roster seeded from a hand-written configuration contains the Coordinator and the three Team Leaders in agent-dispatch::REQ-002, with the responsibility boundaries defined there. A configuration that lists only dispatch groups starts with the Coordinator alone (Implementation Decisions: local configuration).
 - agent-dispatch::US-002/AC-02: The Coordinator and every Team Leader bound to a group post with their own Feishu application bot identity.
 - agent-dispatch::US-002/AC-03: Executors have no bot identity and never post in the group. Their results, files and media reach the group only under their Team Leader's identity.
 
