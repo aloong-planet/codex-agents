@@ -72,7 +72,7 @@ Penny is an optional separate Feishu private bot configured through `PENNY_CONFI
 
 Use `CHANNEL_CONFIG_PATH=/absolute/private/channel.json`, or place `channel.json` beside the existing private `state.json`. Keep its parent private and its file readable only by the owner (`0700` directory, `0600` file). Do not commit it: the Feishu application secret is sensitive.
 
-### First-time Feishu pairing (recommended)
+### Feishu pairing (recommended)
 
 Stop the formal service first and use its existing private state directory. In an interactive local terminal, from the repository root, run:
 
@@ -88,7 +88,7 @@ Keep the same `WEIXIN_DEMO_STATE_DIR` and optional `CHANNEL_CONFIG_PATH` as the 
 4. Confirm locally that this is your message, inspect the save preview, then confirm saving. Both confirmations default to no; replacing an existing Feishu binding also requires confirmation.
 5. The wizard closes its connection and enables Feishu for the next startup while preserving any already enabled Weixin membership. Start the formal service yourself using the same state directory, then verify a reply in Feishu.
 
-The original Weixin binding, memory identity, permissions and task identity are retained. Cancel with Ctrl+C or `/cancel`; a timeout, disconnection, rejected confirmation or failed save leaves the old configuration intact. Another pairing command or a detected configuration edit prevents replacement. Credentials are saved only in the owner-readable private configuration. If an interrupted process leaves `channel.json.pairing-lock` (or the equivalent beside your custom configuration), confirm that no pairing command is still running before removing that lock. Restore private-directory permissions first if cleanup failed. The wizard never starts or restarts the service.
+The original Weixin binding, memory identity, permissions and task identity are retained. Cancel with Ctrl+C or `/cancel`; a timeout, disconnection, rejected confirmation or failed save leaves the old configuration intact. Another pairing command or a detected configuration edit prevents replacement. Credentials are saved only in the owner-readable private configuration. Re-pairing an already configured service replaces only the App ID, App Secret and your Feishu binding, and keeps the group allowlist, dispatch, receive mode and webhook settings. A kept `receiveMode: "webhook"` listens only for callbacks: after the save, start the service, then switch the event subscription back from long connection to the request URL and complete URL verification. See [dispatch setup](../../docs/ops/feishu-agent-dispatch.md) before pairing a different application. If an interrupted process leaves `channel.json.pairing-lock` (or the equivalent beside your custom configuration), confirm that no pairing command is still running before removing that lock. Restore private-directory permissions first if cleanup failed. The wizard never starts or restarts the service.
 
 ### Manual configuration and switching
 
