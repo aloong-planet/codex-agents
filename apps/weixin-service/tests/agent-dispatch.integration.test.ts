@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { runFeishuPairing } from "../src/feishu-pairing.js";
 import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { RuntimePool } from "../src/runtime-pool.js";
@@ -15,6 +16,7 @@ import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
+import { scriptedPairing } from "./support/feishu-pairing.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
 import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
@@ -136,6 +138,52 @@ it("names the Coordinator from the registry in its default reassignment explanat
     expect(result.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual(["这项需求属于 Jack 的职责。我请 Lin 重新分派，由他独立处理。"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+/** Re-pairs the service in `directory` onto `appId` through the pairing wizard, with a scripted terminal and the owner's private-chat answer. */
+async function repair(directory: string, appId: string, appSecret: string) {
+  const pairing = scriptedPairing(appId, ["y", appId, appSecret, "y", "y"]);
+  expect(await runFeishuPairing({ configPath: join(directory, "channel.json"), statePath: join(directory, "state.json"),
+    io: pairing.io, transport: () => pairing.transport })).toBe("saved");
+}
+
+it("starts with Sam on a re-paired application and the teams kept, after refusing a start on a team's application", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-repaired-sam-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    // The registry as the service seeds it, then the groups-only section the dispatch-group form writes (ticket 30).
+    dispatchConfig(directory);
+    const path = join(directory, "channel.json");
+    const configuration = JSON.parse(readFileSync(path, "utf8"));
+    const parsed = parseChannelStartupConfiguration(configuration).entries.find((entry) => entry.channel === "feishu")?.dispatch;
+    if (!parsed) throw new Error("expected_dispatch_configuration");
+    const seeding = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    const seeded = (() => { try { return seeding.importLocalConfiguration(parsed, { executorHostTools: [] }); } finally { seeding.close(); } })();
+    writeFileSync(path, JSON.stringify({ ...configuration, feishu: { ...configuration.feishu, dispatch: { groupChatIds: ["oc_alpha"] } } }));
+    chmodSync(path, 0o600);
+
+    await repair(directory, "cli_bbbbbbbbbbbbbbbb", "bill-as-sam");
+    // A start that is wrongly admitted is closed at once, so the case never leaves a service running.
+    const refusal = await start(directory).then(async (admitted) => { await admitted.close(); return "started"; }, (error: Error) => error.message);
+    expect(refusal).toMatch(/team_registry_roster_unsupported/);
+    const refused = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try { expect(refused.current()).toEqual(seeded); } finally { refused.close(); }
+
+    await repair(directory, "cli_eeeeeeeeeeeeeeee", "sam-repaired");
+    running = await start(directory);
+    const teams = await running.get<{ coordinator: { appId: string }; teams: Array<{ id: string; leader: { appId: string }; secretStored: boolean }> }>("/api/teams");
+    expect({ sam: teams.coordinator.appId, teams: teams.teams.map(({ id, leader, secretStored }) => ({ id, appId: leader.appId, secretStored })) }).toEqual({ sam: "cli_eeeeeeeeeeeeeeee", teams: [
+      { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", secretStored: true }, { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", secretStored: true },
+      { id: "jack", appId: "cli_cccccccccccccccc", secretStored: true }] });
+    await running.close(); running = undefined;
+    const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try {
+      const current = registry.current()!;
+      expect({ version: current.version, source: current.source }).toEqual({ version: seeded.version + 1, source: "local_configuration" });
+      expect(current.definitions).toEqual({ ...seeded.definitions, coordinator: { ...seeded.definitions.coordinator, appId: "cli_eeeeeeeeeeeeeeee" } });
+      expect(["cli_aaaaaaaaaaaaaaaa", "cli_bbbbbbbbbbbbbbbb", "cli_cccccccccccccccc"].map((appId) => registry.secret(appId))).toEqual(["fixture-alice", "fixture-bill", "fixture-jack"]);
+    } finally { registry.close(); }
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
 
 const executorReply = (message: string, subject: string) => JSON.stringify({ message, results: [{ subject, status: "completed" }] });
 

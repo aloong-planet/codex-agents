@@ -20,11 +20,11 @@ const defaultAgents = (): Agent[] => [{ id: "sam" },
   { id: "bill", appId: "cli_2222222222222222", appSecret: "bill-secret" },
   { id: "jack", appId: "cli_3333333333333333", appSecret: "jack-secret" }];
 /** The parsed `feishu.dispatch` section; `agents: null` gives a groups-only section, as the console writes it. */
-function local(agents: Agent[] | null = defaultAgents(), groupChatIds = ["oc_alpha", "oc_beta"]) {
+function local(agents: Agent[] | null = defaultAgents(), groupChatIds = ["oc_alpha", "oc_beta"], sam = SAM) {
   const parsed = parseChannelStartupConfiguration({ channel: "feishu",
-    owner: { memoryAccountId: "owner-memory", bindings: [{ channel: "feishu", accountId: SAM.appId, target: "oc_private", senderId: "ou_owner" }] },
+    owner: { memoryAccountId: "owner-memory", bindings: [{ channel: "feishu", accountId: sam.appId, target: "oc_private", senderId: "ou_owner" }] },
     taskScope: { accountId: "owner-memory", target: "oc_private" },
-    feishu: { ...SAM, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+    feishu: { ...sam, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
       dispatch: agents === null ? { groupChatIds } : { groupChatIds, agents } } });
   const feishu = parsed.entries.find((entry) => entry.channel === "feishu");
   if (!feishu?.dispatch) throw new Error("expected_dispatch_configuration");
@@ -159,6 +159,46 @@ describe("team registry", () => {
         teams: seeded.definitions.teams.map((team) => ({ ...team, bindings: [{ chatId: "oc_beta", state: "accepting" }] })) });
       expect(registry.roster(SAM).agents.map(({ id, appSecret }) => ({ id, appSecret }))).toEqual([
         { id: "sam", appSecret: "sam-secret" }, { id: "alice", appSecret: "alice-secret" }, { id: "bill", appSecret: "bill-secret" }, { id: "jack", appSecret: "jack-secret" }]);
+    } finally { registry.close(); }
+  });
+
+  // Re-pairing replaces feishu.appId; Sam follows it at the next start (ticket 32). The seeded registry is set up as each variant reaches it.
+  const REPAIRED = { appId: "cli_9999999999999999", appSecret: "sam-repaired" };
+  it.each([
+    ["after a console save, with a roster still in the file", (registry: TeamRegistry) => {
+      const seeded = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      registry.save(renameBill(seeded.definitions, "Bella"), { basedOn: seeded.version });
+      return local(defaultAgents(), undefined, REPAIRED);
+    }],
+    ["with a groups-only section", (registry: TeamRegistry) => {
+      registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      return local(null, undefined, REPAIRED);
+    }],
+  ] as const)("moves Sam to a re-paired application %s, in a new version that keeps the teams and their secrets", (_case, prepare) => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      const repaired = prepare(registry);
+      const before = registry.current()!;
+      const after = registry.importLocalConfiguration(repaired, { executorHostTools: HOST_TOOLS, coordinatorAppId: REPAIRED.appId });
+      expect({ version: after.version, basedOn: after.basedOn, source: after.source }).toEqual({ version: before.version + 1, basedOn: before.version, source: "local_configuration" });
+      expect(after.definitions).toEqual({ ...before.definitions, coordinator: { ...before.definitions.coordinator, appId: "cli_9999999999999999" } });
+      expect(registry.roster(REPAIRED).agents.map(({ id, appId, appSecret }) => ({ id, appId, appSecret }))).toEqual([
+        { id: "sam", appId: "cli_9999999999999999", appSecret: "sam-repaired" },
+        { id: "alice", appId: "cli_1111111111111111", appSecret: "alice-secret" },
+        { id: "bill", appId: "cli_2222222222222222", appSecret: "bill-secret" },
+        { id: "jack", appId: "cli_3333333333333333", appSecret: "jack-secret" }]);
+    } finally { registry.close(); }
+  });
+
+  it("refuses to move Sam onto an application a team uses, recording no version", () => {
+    const registry = new TeamRegistry(databasePath());
+    try {
+      registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      const before = registry.current();
+      const onBill = { appId: "cli_2222222222222222", appSecret: "bill-secret" };
+      expect(() => registry.importLocalConfiguration(local(null, undefined, onBill), { executorHostTools: HOST_TOOLS, coordinatorAppId: onBill.appId }))
+        .toThrow(/^team_registry_roster_unsupported$/);
+      expect(registry.current()).toEqual(before);
     } finally { registry.close(); }
   });
 

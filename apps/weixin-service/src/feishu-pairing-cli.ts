@@ -8,7 +8,7 @@ import { runFeishuPairing } from "./feishu-pairing.js";
 
 export async function pairingMain(): Promise<void> {
   if (process.argv.includes("--help")) {
-    process.stdout.write("飞书首次配对\n用法：pnpm feishu:pair\n使用原服务的 WEIXIN_DEMO_STATE_DIR；CHANNEL_CONFIG_PATH 可指定配置文件。\n请先停止正式服务。凭据在终端输入，不要放在命令参数中。\n"); return;
+    process.stdout.write("飞书配对\n用法：pnpm feishu:pair\n使用原服务的 WEIXIN_DEMO_STATE_DIR；CHANNEL_CONFIG_PATH 可指定配置文件。\n请先停止正式服务。凭据在终端输入，不要放在命令参数中。\n"); return;
   }
   if (process.argv.length > 2) { process.stderr.write("不接受命令参数；使用 --help 查看用法。\n"); process.exitCode = 1; return; }
   const stop = new AbortController(); const cancel = () => stop.abort();

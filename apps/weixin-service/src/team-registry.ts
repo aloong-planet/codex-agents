@@ -99,9 +99,11 @@ export class TeamRegistry {
    * Imports the parsed local `feishu.dispatch` section at startup (agent-dispatch Implementation Decisions: local configuration).
    * - With a roster and before the first console save, the roster seeds the teams, with the production host tools for their
    *   Executor profiles; a version is appended only when the definitions differ, and leader secrets follow without a new version.
-   * - Otherwise only the dispatch groups follow the file: bindings to groups it no longer lists are dropped in the same version,
-   *   and the teams, the Coordinator and the secrets are left as they are. An empty registry starts with the Coordinator alone,
-   *   on `coordinatorAppId`.
+   * - Otherwise only the dispatch groups and the Coordinator's application follow the file: bindings to groups it no longer lists
+   *   are dropped, and the Coordinator moves to `coordinatorAppId` (`feishu.appId`, which re-pairing replaces), in the same
+   *   version; the teams and the secrets are left as they are. An empty registry starts with the Coordinator alone, on
+   *   `coordinatorAppId`. Definitions the roster view would refuse, such as the Coordinator on a team's application, are
+   *   refused before anything is written.
    */
   importLocalConfiguration(local: Readonly<LocalDispatchConfiguration>, seed: Readonly<{ executorHostTools: readonly string[]; coordinatorAppId?: string }>): DefinitionsVersion {
     this.transaction(() => {
@@ -267,10 +269,7 @@ export class TeamRegistry {
     if (!current) throw new Error("team_registry_empty");
     const { coordinator, dispatchGroups, teams } = current.definitions;
     // A team may be bound to some dispatch groups and in any binding state; dispatch routes per group (agent-dispatch::REQ-015/AC-01).
-    if (coordinator.appId !== connection.appId ||
-        teams.some(({ bindings }) => bindings.some(({ chatId }) => !dispatchGroups.includes(chatId))) ||
-        new Set([coordinator.id, ...teams.map(({ id }) => id)]).size !== teams.length + 1 ||
-        new Set([coordinator.appId, ...teams.flatMap(({ leader }) => leader.appId ? [leader.appId] : [])]).size !== teams.filter(({ leader }) => leader.appId).length + 1) throw new Error("team_registry_roster_unsupported");
+    if (coordinator.appId !== connection.appId || !representable(current.definitions)) throw new Error("team_registry_roster_unsupported");
     return deepFreeze({ groupChatIds: [...dispatchGroups], agents: [
       { id: coordinator.id, name: coordinator.name, responsibility: coordinator.responsibility, appId: coordinator.appId, appSecret: connection.appSecret },
       // A team without an application or a stored secret has no identity to post with yet; it is onboarding, not a startup failure.
@@ -293,14 +292,19 @@ export class TeamRegistry {
 
   close(): void { this.database.close(); }
 
-  /** Sets the dispatch groups to the file's, dropping bindings to groups it no longer lists; appends a version only on a change. */
+  /**
+   * Sets the dispatch groups to the file's, dropping bindings to groups it no longer lists, and moves the Coordinator to
+   * `coordinatorAppId`; appends a version only on a change, and refuses definitions the roster view would refuse.
+   */
   private followDispatchGroups(groupChatIds: readonly string[], coordinatorAppId: string | undefined): void {
     const latest = this.current();
     if (!latest && !coordinatorAppId) throw new Error("team_registry_coordinator_missing");
     const base: TeamDefinitions = latest?.definitions ?? { coordinator: { id: COORDINATOR_ID, ...COORDINATOR_DEFAULTS, teamName: COORDINATOR_TEAM_NAME,
       appId: coordinatorAppId!, profile: EMPTY_PROFILE }, dispatchGroups: [], teams: [] };
-    const definitions: TeamDefinitions = { ...base, dispatchGroups: [...groupChatIds],
-      teams: base.teams.map((team) => ({ ...team, bindings: team.bindings.filter(({ chatId }) => groupChatIds.includes(chatId)) })) };
+    const definitions: TeamDefinitions = { ...base, coordinator: coordinatorAppId ? { ...base.coordinator, appId: coordinatorAppId } : base.coordinator,
+      dispatchGroups: [...groupChatIds], teams: base.teams.map((team) => ({ ...team, bindings: team.bindings.filter(({ chatId }) => groupChatIds.includes(chatId)) })) };
+    // A start that is refused leaves no version behind, so the history holds only definitions that ran.
+    if (!representable(definitions)) throw new Error("team_registry_roster_unsupported");
     if (latest) { this.append(definitions, latest.version, "local_configuration"); return; }
     this.database.prepare("INSERT INTO definitions_version (version, based_on, source, definitions) VALUES (1, NULL, 'local_configuration', ?)").run(JSON.stringify(definitions));
   }
@@ -342,6 +346,16 @@ export class TeamRegistry {
 export function acceptingTeams(definitions: TeamDefinitions, chatId: string): Array<{ id: string; name: string; responsibility: string }> {
   return definitions.teams.filter(({ bindings }) => bindings.some((binding) => binding.chatId === chatId && binding.state === "accepting"))
     .map(({ id, teamName, responsibility }) => ({ id, name: teamName, responsibility }));
+}
+
+/**
+ * Whether today's fixed-roster readers can represent the definitions: every binding names a dispatch group, and the Coordinator
+ * and the teams have distinct agent IDs and distinct applications.
+ */
+function representable({ coordinator, dispatchGroups, teams }: TeamDefinitions): boolean {
+  return teams.every(({ bindings }) => bindings.every(({ chatId }) => dispatchGroups.includes(chatId))) &&
+    new Set([coordinator.id, ...teams.map(({ id }) => id)]).size === teams.length + 1 &&
+    new Set([coordinator.appId, ...teams.flatMap(({ leader }) => leader.appId ? [leader.appId] : [])]).size === teams.filter(({ leader }) => leader.appId).length + 1;
 }
 
 /** The parts of a team the console edits; binding states are the registry's own, so they are not compared. */

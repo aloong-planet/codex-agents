@@ -14,7 +14,7 @@ export interface PairingIO {
 }
 type Credentials = { appId: string; appSecret: string };
 type Document = { channel?: PersonalChannel; enabledChannels?: PersonalChannel[]; owner: PersonalOwnerConfiguration;
-  taskScope: { accountId: string; target: string }; feishu?: Credentials; [key: string]: unknown };
+  taskScope: { accountId: string; target: string }; feishu?: Credentials & Record<string, unknown>; [key: string]: unknown };
 export type PairingResult = "saved" | "cancelled" | "failed";
 const object = (v: unknown): Record<string, unknown> | undefined => v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : undefined;
 
@@ -59,12 +59,25 @@ class PairingFile {
     if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || stat.size > 1024 * 1024) throw Error("pairing_unsafe_configuration");
     return fs.readFileSync(this.file, "utf8");
   }
+  /**
+   * Steps the kept Feishu configuration still needs before the next start, one preview line each, in the order they are done
+   * (channel-switching::US-003/AC-08). A kept webhook holds the previous application's verification token and encrypt key, and
+   * a kept callback receive mode listens only for callbacks while pairing left the platform on long connection.
+   */
+  keptConfigurationSteps(appId: string): string[] {
+    const previous = this.document.feishu;
+    return [
+      ...(previous?.webhook !== undefined && previous.appId !== appId ? ["本次换了应用：webhook 里的 Verification Token 和 Encrypt Key 仍是原应用的，请换成新应用的再启动。"] : []),
+      ...(previous?.receiveMode === "webhook" ? ["接收方式：回调（webhook）保留。保存后先启动服务，再在飞书后台把事件订阅改回请求地址并完成地址验证。"] : []),
+    ];
+  }
   enabledChannels(): PersonalChannel[] {
     const previous = parseChannelStartupConfiguration(this.document).enabledChannels;
     return ["feishu", ...previous.filter((channel) => channel !== "feishu")];
   }
   save(credentials: Credentials, candidate: { senderId: string; target: string }): void {
-    const document: Document = { ...this.document, enabledChannels: this.enabledChannels(), feishu: credentials,
+    // Re-pairing replaces only the application's credentials; every other Feishu key is kept (channel-switching::US-003/AC-08).
+    const document: Document = { ...this.document, enabledChannels: this.enabledChannels(), feishu: { ...this.document.feishu, ...credentials },
       owner: { ...this.document.owner, bindings: [...this.document.owner.bindings.filter(b => b.channel !== "feishu"),
         { channel: "feishu", accountId: credentials.appId, ...candidate }] } };
     delete document.channel;
@@ -114,7 +127,7 @@ export async function runFeishuPairing(options: {
   }
   try {
     controller.signal.throwIfAborted();
-    io.write("飞书首次配对\n保存前不会修改配置。请先停止正式服务。");
+    io.write("飞书配对\n保存前不会修改配置。请先停止正式服务。");
     file = new PairingFile(options.configPath, options.statePath);
     io.write(`保留原记忆与任务身份：${file.document.owner.memoryAccountId}`);
     if (file.document.owner.bindings.some(b => b.channel === "feishu") && (await ask("已有飞书绑定，是否重新配对并在最后确认替换？[y/N] ")).toLowerCase() !== "y") return "cancelled";
@@ -150,7 +163,7 @@ export async function runFeishuPairing(options: {
     const candidate = await guarded(candidatePromise);
     io.write(`收到匹配口令的私聊：\n本人标识：${candidate.senderId}\n私聊标识：${candidate.target}`);
     if ((await ask("这是你刚才发送的私聊吗？[y/N] ")).toLowerCase() !== "y") return "cancelled";
-    io.write(`保存预览：\n下次启动渠道：${file.enabledChannels().map((channel) => channel === "weixin" ? "微信" : "飞书").join("、")}\n本人：${candidate.senderId}\n私聊：${candidate.target}\n原微信绑定、记忆、权限和任务身份：保留\n配置位置：${options.configPath}\n文件仅限本机当前用户读写。`);
+    io.write(`保存预览：\n下次启动渠道：${file.enabledChannels().map((channel) => channel === "weixin" ? "微信" : "飞书").join("、")}\n本人：${candidate.senderId}\n私聊：${candidate.target}\n原微信绑定、记忆、权限和任务身份：保留\n配置位置：${options.configPath}\n文件仅限本机当前用户读写。${file.keptConfigurationSteps(appId).map((step) => `\n${step}`).join("")}`);
     if ((await ask("保存此配置？[y/N] ")).toLowerCase() !== "y") return "cancelled";
     controller.signal.throwIfAborted();
     await closeTransport();

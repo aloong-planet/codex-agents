@@ -39,7 +39,7 @@ A hand-written `dispatch` section may also carry a roster, as configurations did
 At startup the service imports `feishu.dispatch` into its team registry (`team-registry.sqlite` in the state directory), and dispatch reads the roster only from there:
 
 - The dispatch groups follow the file at every start. A team bound to a group the file no longer lists loses that binding at that start, with no announcement in the group.
-- A section without `agents` never changes the teams, Sam or the stored secrets. On a new state directory, dispatch starts with Sam alone; Sam can only clarify until a team is added on the console and accepts work in the group.
+- A section without `agents` never changes the teams or the stored secrets, and changes Sam only by following `feishu.appId` (see re-pairing below). On a new state directory, dispatch starts with Sam alone; Sam can only clarify until a team is added on the console and accepts work in the group.
 - A roster changes the teams only until the console saves its first change: each start imports it again and records a new registry version when it differs. After the console's first save, the roster no longer changes the teams; its group list still applies.
 
 The registry stores Team Leader App Secrets beside its versions with owner-only file permissions, never inside a version; Sam's secret stays in `feishu.appSecret`.
@@ -52,7 +52,17 @@ A save is refused, leaving the file unchanged, while the pairing wizard's lock `
 
 Before restarting after unchecking a group, inspect that group's in-flight work in `/api/state`: a request admitted there after the save is cancelled at the restart, because the group no longer has dispatch.
 
-Re-running `pnpm feishu:pair` currently replaces the whole `feishu` object with the new credentials. It drops `groups`, `dispatch`, `receiveMode` and `webhook`, so the next start runs without dispatch. Merge those keys back before restarting, and check the dispatch groups on the page again; a group missing at a start loses its team bindings. Pairing a different Feishu application for Sam also stops the next start with dispatch, because the team registry keeps Sam's previous App ID; until the registry follows `feishu.appId`, keep Sam on the same application while dispatch is configured.
+Re-running `pnpm feishu:pair` replaces only `feishu.appId`, `feishu.appSecret` and the owner's Feishu binding; `groups`, `dispatch`, `receiveMode`, `webhook` and every other `feishu` key are kept. At the next start Sam follows `feishu.appId`: the team registry records Sam on the new application and keeps the teams and their secrets.
+
+The wizard pairs over a long connection and asks for long-connection events in the platform console, while a kept `receiveMode: "webhook"` makes the next start listen only for callbacks. After re-pairing a callback-mode service, start the service and ingress, then switch the application's event subscription back to the request URL `https://YOUR_HOST/feishu/events` and complete URL verification, as in the cutover below. Until then Sam receives nothing, and nothing reports an error.
+
+A different application needs its own setup before that start:
+- its bot must be published and added to the dispatch groups, as at the first setup above;
+- `webhook.verificationToken` and `webhook.encryptKey` are kept from the previous application and must be replaced with the new application's;
+- the open IDs in `groups[].allowedSenderIds` belong to the previous application and must be replaced with the new application's;
+- each group's conversation and memory are keyed by the application as well as the chat, so the new application starts them afresh and does not continue the previous application's.
+
+Sam's application must not be one a team uses. If a start after re-pairing stops with `team_registry_roster_unsupported`, which stops the whole service and not only Feishu, re-pair Sam's own application and start again; the refused start changed nothing in the registry.
 
 Teams are edited on the console's 团队管理 page, and saves apply without a restart. A team added there uses an existing Feishu application: its App ID and App Secret are entered on the page, and the secret is stored in the registry, never shown. The service then checks the credentials and the bot. Sam adds the bot to each bound group, and the team's application confirms it is in the group. Sam's application must therefore be allowed to add bots to the dispatch groups and to read their group information. Which permission scopes this needs is not yet verified on a real tenant. A group where only the owner and admins add members needs that setting changed in Feishu, or the bot added by hand, before 「重新检查」. Sam announces each team that starts or stops taking work in a group; a failed or uncertain announcement is never resent.
 
