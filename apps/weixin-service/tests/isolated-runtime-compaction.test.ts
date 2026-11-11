@@ -1,19 +1,21 @@
-// Executor home compaction (agent-dispatch::QR-002) on the installed Codex App Server, with its model requests routed to the
-// loopback fake endpoint of tests/fixtures/isolated-runtime-probe.ts. The executor, the pool and the runtime are built by a
-// copy of main.ts's construction (the production close, createIsolatedRuntime, spawnIsolatedAppServer and each spawned
-// transport's `exited`). Opt-in (CODEX_ISOLATED_RUNTIME_TEST=1, `pnpm test:isolated-runtime`) because CI has no Codex
-// executable; rerun after every Codex upgrade, since what a retry needs from the home is the App Server's behavior.
-// Gap: no case asserts main.ts's own exit wiring for Executors (collecting each spawned transport's `exited` and returning it
-// as the runtime's `exited`); this file uses its copy. The only real-main case that runs Executors on the installed App Server,
-// in channel-startup.integration.test.ts (opt-in `DISPATCH_RESULT_SCOPE_LIVE=1`), checks no home. Retest: add to that case,
-// or check in the owner's acceptance, that a released Executor's home holds only its rollout and that no
-// `dispatch_executor_home_deferred` line appears.
+// Executor home compaction (agent-dispatch::QR-002) and superseded Team Leader home compaction (agent-dispatch::QR-003) on the
+// installed Codex App Server, with its model requests routed to the loopback fake endpoint of
+// tests/fixtures/isolated-runtime-probe.ts. The executor, the Team Leader, the pool and the runtimes are built by a copy of
+// main.ts's construction (the production close, createIsolatedRuntime, spawnIsolatedAppServer and each spawned transport's
+// `exited`). Opt-in (CODEX_ISOLATED_RUNTIME_TEST=1, `pnpm test:isolated-runtime`) because CI has no Codex executable; rerun
+// after every Codex upgrade, since what a retry needs from the home is the App Server's behavior.
+// Gap: no case asserts main.ts's own exit wiring for Executors or Team Leaders (collecting each spawned transport's `exited`
+// and returning it as the runtime's `exited`); this file uses its copy. The only real-main case that runs them on the installed
+// App Server, in channel-startup.integration.test.ts (opt-in `DISPATCH_RESULT_SCOPE_LIVE=1`), checks no home. Retest: add to
+// that case, or check in the owner's acceptance, that a released Executor's home holds only its rollout and that no
+// `dispatch_executor_home_deferred` or `dispatch_leader_home_deferred` line appears.
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { closeDispatchRuntime, CodexDispatchExecutor, type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
+import { CodexTeamLeader, type LeaderSessionKey, type LeaderTurnInput } from "../src/agent-dispatch-leader.js";
 import type { DispatchAssignment, DispatchJob } from "../src/agent-dispatch-types.js";
 import { CodexConversation } from "../src/codex-conversation.js";
 import { spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
@@ -25,7 +27,7 @@ import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalo
 import { assistantMessage, FakeResponsesEndpoint, modelInputText, runsInstalledAppServer } from "./fixtures/isolated-runtime-probe.js";
 import { homeListing } from "./support/runtime-home.js";
 
-describe.skipIf(!runsInstalledAppServer)("Executor home compaction on the installed Codex App Server", () => {
+describe.skipIf(!runsInstalledAppServer)("Runtime home compaction on the installed Codex App Server", () => {
   let work: string, environment: NodeJS.ProcessEnv, model: FakeResponsesEndpoint;
   beforeAll(async () => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "isolated-runtime-compaction-"));
@@ -128,6 +130,76 @@ describe.skipIf(!runsInstalledAppServer)("Executor home compaction on the instal
       const retryInput = modelInputText(model.modelRequestsSince(from)[0]!);
       for (const marker of ["TURN1-USER-MARKER", "TOOL-OUTPUT-MARKER", "TURN1-ANSWER-MARKER"]) expect(retryInput, marker).toContain(marker);
     } finally { await run.executor.close(); }
+    const { home } = run.homesAtCreation[0]!;
+    expect(rolloutsIn(home)).toHaveLength(1);
+    expect(homeListing(home)).toEqual(keptFor(rolloutsIn(home)[0]!));
+    expect(run.reports).toEqual([]);
+  }, 120_000);
+
+  /**
+   * A Team Leader as main.ts builds it, over the installed App Server; records each runtime's home at creation and at process
+   * exit. Unlike main, the pool releases each runtime as soon as its turn ends, so no case waits for the idle limit.
+   */
+  function leaderOn(stateDirectory: string, inUse: () => readonly LeaderSessionKey[]) {
+    const homesAtCreation: Array<{ home: string; listing: string[]; rollouts: Record<string, string> }> = [], homesAtExit: Array<{ listing: string[]; rollouts: Record<string, string> }> = [];
+    const threads: Array<{ saved: string | undefined; started: string }> = [], reports: string[] = [];
+    const hashes = (home: string) => Object.fromEntries(rolloutsIn(home).map((entry) => [entry, sha256(path.join(home, entry))]));
+    const pool = new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: closeDispatchRuntime });
+    const leader: CodexTeamLeader = new CodexTeamLeader(path.join(stateDirectory, "agent-sessions.sqlite"), {
+      model: () => ({ model: "gpt-5.6-terra", effort: "low" }),
+      runtime: (scope, turn) => pool.use(scope, () => leader.tracked(scope, () => {
+        const home = path.join(stateDirectory, "group-model-runtimes", scope);
+        homesAtCreation.push(fs.existsSync(home) ? { home, listing: homeListing(home), rollouts: hashes(home) } : { home, listing: [], rollouts: {} });
+        const runtime = createIsolatedRuntime("dispatchLeader", { stateDirectory, instance: scope, environment });
+        const exits: Array<Promise<void>> = [];
+        const conversation = new CodexConversation(() => {
+          const transport = spawnIsolatedAppServer(resolveCodexExecutable(process.env), model.route(runtime, "gpt-5.6-terra"));
+          exits.push(transport.exited);
+          return transport;
+        }, 60_000, undefined, undefined, 60_000, isolatedConversationOptions("dispatchLeader", runtime, { structuredOutputSupported: true }));
+        return {
+          agent: { runTurn: (...input: Parameters<CodexConversation["runTurn"]>) => conversation.runTurn(...input),
+            startOrResume: async (saved: string | undefined, ...rest: [string, string[]?]) => {
+              const started = await conversation.startOrResume(saved, ...rest); threads.push({ saved, started }); return started;
+            },
+            releaseThread: (threadId: string) => conversation.releaseThread(threadId), interruptThread: (threadId: string) => conversation.interruptThread(threadId),
+            close: () => conversation.close() },
+          cwd: runtime.cwd,
+          exited: async () => { await Promise.all(exits); homesAtExit.push({ listing: homeListing(home), rollouts: hashes(home) }); },
+        };
+      }), ({ agent, cwd }) => turn(agent, cwd), { releaseWhenDone: true }),
+      homes: { root: path.join(stateDirectory, "group-model-runtimes"), compact: compactRuntimeHome, inUse }, report: (code) => reports.push(code),
+    });
+    return { leader, pool, homesAtCreation, homesAtExit, threads, reports };
+  }
+  const leaderInput = (memory: string): LeaderTurnInput => ({ requestId: "om_compaction", fixtureMessageId: "om_compaction",
+    leader: { id: "alice", name: "Alice", teamName: "商品团队", responsibility: "商品运营", instructions: "" }, profiles: [{ id: "executor-1", name: "能力档 1" }],
+    brief: { message: "帮我整理闲鱼商品描述", summary: "整理闲鱼商品描述" }, directory: [{ name: "商品团队", responsibility: "商品运营" }], memory,
+    session: { accountId: "cli_sam", target: "feishu.group.oc_alpha", bindingHash: "binding-alpha", revision: "revision-1", definitionsVersion: 1 } });
+
+  it("resumes a compacted Team Leader session's own thread for a retry's closing turn, with its plan turn in the model input", async () => {
+    // No stored request keeps the session in use, as after its request failed and a later definitions version took effect:
+    // the release of its runtime compacts its home.
+    const run = leaderOn(fs.mkdtempSync(path.join(work, "state-")), () => []);
+    let served = 0;
+    model.respondWith(() => served++ === 0
+      ? [assistantMessage(JSON.stringify({ assignments: [{ profileId: "executor-1", title: "整理文案", brief: "TURN1-ANSWER-MARKER 按原消息整理文案", dependsOn: [] }], decisions: [], help: [] }))]
+      : [assistantMessage(JSON.stringify({ message: "文案已整理好。" }))]);
+    try {
+      // Recalled memory differs between the turns, so the plan turn's input can reach the closing turn only through the thread's history.
+      await expect(run.leader.plan(leaderInput("TURN1-MEMORY-MARKER"))).resolves.toMatchObject({ assignments: [{ title: "整理文案" }] });
+      const from = model.requests.length;
+      // The closing turn starts at once; the pool starts its runtime only after the plan turn's close, compaction included, has settled.
+      await expect(run.leader.close(leaderInput(""), [{ position: 1, title: "整理文案", executor: "执行者 1", status: "completed", result: "文案已整理。", dependsOn: [] }]))
+        .resolves.toBe("文案已整理好。");
+      const [rollout] = Object.keys(run.homesAtExit[0]!.rollouts);
+      expect(run.homesAtExit[0]!.listing).toEqual(expect.arrayContaining(["codex-home/state_5.sqlite-wal", "codex-home/config.toml", "workspace/", rollout!]));
+      expect(run.homesAtCreation.map(({ listing }) => listing)).toEqual([[], keptFor(rollout!)]);
+      expect(run.homesAtCreation[1]!.rollouts).toEqual(run.homesAtExit[0]!.rollouts);
+      expect(run.threads).toEqual([{ saved: undefined, started: run.threads[0]!.started }, { saved: run.threads[0]!.started, started: run.threads[0]!.started }]);
+      const closingInput = modelInputText(model.modelRequestsSince(from)[0]!);
+      for (const marker of ["TURN1-MEMORY-MARKER", "TURN1-ANSWER-MARKER"]) expect(closingInput, marker).toContain(marker);
+    } finally { await run.pool.close(); run.leader.dispose(); }
     const { home } = run.homesAtCreation[0]!;
     expect(rolloutsIn(home)).toHaveLength(1);
     expect(homeListing(home)).toEqual(keptFor(rolloutsIn(home)[0]!));

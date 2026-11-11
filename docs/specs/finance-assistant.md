@@ -28,7 +28,7 @@ As the owner, I want to describe completed receipts and payments naturally and o
 
 - finance-assistant::US-002/AC-01: An explicit, unambiguous text instruction records its actual financial events and replies with stable record references, ledger, date, direction, amount and description only after the write succeeds. A failed write is not reported as saved.
 - finance-assistant::US-002/AC-02: An unspecified ledger defaults to personal. Business entries require an explicit business selection. The two books remain separately queryable and are never silently combined.
-- finance-assistant::US-002/AC-03: Each record carries CNY amount, effective local date, financial-event kind, description and category, plus provenance and a stable reference. Amount and date ambiguity produces a clarification rather than a guessed financial event. Omitted text dates use the admitted message's date in Asia/Shanghai.
+- finance-assistant::US-002/AC-03: Each record carries CNY amount, effective local date, financial-event kind, description and category, plus provenance and a stable reference. Amount and date ambiguity produces a clarification rather than a guessed financial event. Omitted text dates use the admitted message's date in Asia/Shanghai. A payment date later than the message's date is refused.
 - finance-assistant::US-002/AC-04: Planned purchases, unpaid/failed transactions, quotations, examples and vague discussion are not silently recorded as actual income or expenditure. Missing or contradictory facts are clarified before a write.
 
 ### finance-assistant::US-003 Review statements and payment screenshots
@@ -86,7 +86,7 @@ Confirmed movements between the owner's own accounts, including own-account top-
 ### finance-assistant::REQ-005 Recover without replaying writes
 
 - finance-assistant::REQ-005/AC-01: Record mutations, pending preview revisions and operation outcomes survive restart; a crash after commit, model reconnect or explicit retry cannot repeat completed financial mutations.
-- finance-assistant::REQ-005/AC-02: Delivery outcomes are separate from financial outcomes. A failed receipt cannot restart financial work; accepted or uncertain messages are not blindly resent.
+- finance-assistant::REQ-005/AC-02: Delivery outcomes are separate from financial outcomes. A failed receipt cannot restart financial work; accepted or uncertain messages are not blindly resent. Channel acceptance does not prove that the owner received a reply; when one is missing, the owner queries the saved records before sending the payment instruction again.
 - finance-assistant::REQ-005/AC-03: A failed transaction rolls back its candidate writes and is reported accurately.
 
 ## Constraints
@@ -97,7 +97,7 @@ Penny does not join the existing shared group or become a group-dispatch executi
 
 ### finance-assistant::CON-002 Restrict runtime authority (direct acceptance)
 
-Use the existing Codex runtime with an isolated financial session and host-controlled financial operations. Imported content is data, not authority. The model cannot select another owner, application, conversation, database, arbitrary path or destination, and cannot obtain payment-account, terminal, browser, purchasing or transfer authority from this feature.
+Use the existing Codex runtime with an isolated financial session and host-controlled financial operations. Imported content is data, not authority. The model cannot select another owner, application, conversation, database, arbitrary path or destination, and cannot obtain payment-account, terminal, browser, purchasing or transfer authority from this feature. Penny's runtime loads none of the owner's personal skills, so naming one in a Penny conversation applies nothing, and its model cannot run code, edit files or start helper agents.
 
 ### finance-assistant::CON-003 Preserve existing channels
 

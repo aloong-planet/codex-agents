@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import path, { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Ajv } from "ajv";
 import type { CodexConversation, CodexTurnModel } from "./codex-conversation.js";
+import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
 
 /** The safety ceiling of a request's Assignments (agent-dispatch::REQ-011/AC-02); a plan over it is corrected, never confirmed. */
 export const ASSIGNMENT_CEILING = 10;
@@ -179,6 +180,13 @@ export type LeaderTurnInput = Readonly<{
   /** Routes a fixture turn to its injected output; never consulted by a model turn. */
   fixtureMessageId: string;
 }>;
+/** What keys a Team Leader's session and its runtime home: its leader, conversation, binding, access revision and definitions version. */
+export type LeaderSessionKey = Readonly<{ leaderId: string }> & LeaderTurnInput["session"];
+/** A Team Leader's runtime home: `dispatch-leader-` and its session scope's 64-hex hash. */
+export const LEADER_RUNTIME_HOME = /^dispatch-leader-([0-9a-f]{64})$/u;
+function sessionScope({ leaderId, accountId, target, bindingHash, revision, definitionsVersion }: LeaderSessionKey): string {
+  return createHash("sha256").update(JSON.stringify(["leader", leaderId, accountId, target, bindingHash, revision, definitionsVersion])).digest("hex");
+}
 /**
  * What the Coordinator relays between teams (agent-dispatch::REQ-013/AC-03): never another team's Executor content.
  * A cross-team Team Leader gets `requestedBy` and the parts the Coordinator assigned it. The lead gets the parts it asked
@@ -227,10 +235,19 @@ export type LeaderRuntimeAccess = <T>(scope: string, work: (runtime: LeaderRunti
  */
 export class CodexTeamLeader implements TeamLeader {
   private readonly database: DatabaseSync;
+  /** The homes, by session scope, that a runtime exists for, and those a released runtime's process had not left in time. */
+  private readonly occupied = new Set<string>();
+  private readonly unexited = new Set<string>();
   constructor(databasePath: string, private readonly options: {
     runtime: LeaderRuntimeAccess;
     model(): CodexTurnModel;
     prepareThread?(input: LeaderTurnInput, phase: LeaderPhase, threadId: string, assignments?: readonly LeaderAssignmentReport[] | readonly LeaderAssignmentView[]): void;
+    /**
+     * Where Team Leader runtime homes are, how one is compacted to its records, and the sessions stored requests can still use,
+     * whose homes stay whole (agent-dispatch::QR-003); without it no home is compacted.
+     */
+    homes?: { root: string; compact(home: string, recordedThread: string | undefined): CompactionOutcome; inUse(): readonly LeaderSessionKey[] };
+    report?(code: string): void;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
@@ -280,13 +297,65 @@ export class CodexTeamLeader implements TeamLeader {
   /** Closes the session store; runtimes belong to the pool. */
   dispose(): void { this.database.close(); }
 
+  /**
+   * Compacts every superseded Team Leader home on disk (agent-dispatch::QR-003/AC-03): each home no session in use names.
+   * Main runs it at start, before any dispatch work; a turn that starts a session with none recorded runs it too.
+   */
+  compactSupersededHomes(): void {
+    const homes = this.options.homes;
+    if (!homes) return;
+    let found: RuntimeHome[], inUse: Set<string>;
+    try { found = runtimeHomes(homes.root, LEADER_RUNTIME_HOME); inUse = new Set(homes.inUse().map(sessionScope)); }
+    catch { this.report("dispatch_leader_homes_unreadable"); return; }
+    for (const home of found) if (!inUse.has(home.key) && !this.occupied.has(home.key) && !this.unexited.has(home.key)) this.compactHome(home.key, home.path);
+  }
+
+  /**
+   * Creates the runtime of the home `scope` names, so that the home is never compacted while an App Server may run on it
+   * (agent-dispatch::QR-003/AC-04). The home counts as occupied from before `create` runs until the pool has closed the
+   * runtime, and a sweep skips it. Once the closed runtime's process has exited, the home is compacted if no session in use
+   * names it then; a process that has not exited leaves the home to the next start. Finding a home superseded and removing
+   * its files run with no await between them, and the pool creates no other runtime for the scope until this close settles,
+   * so compaction and creation never interleave.
+   */
+  tracked<R extends object>(scope: string, create: () => R): R & { afterClose?(exited: boolean): void } {
+    const homes = this.options.homes, key = LEADER_RUNTIME_HOME.exec(scope)?.[1];
+    if (!homes || !key) return create();
+    this.occupied.add(key);
+    let runtime: R & { afterClose?(exited: boolean): void };
+    try { runtime = create(); } catch (error) { this.occupied.delete(key); throw error; }
+    return { ...runtime, afterClose: (exited: boolean) => {
+      runtime.afterClose?.(exited);
+      this.occupied.delete(key);
+      const home = path.join(homes.root, scope);
+      if (!exited) { this.unexited.add(key); this.report(`dispatch_leader_home_deferred:process_running:${scope}`); return; }
+      if (this.unexited.has(key)) return;
+      let superseded: boolean;
+      try { superseded = !homes.inUse().some((session) => sessionScope(session) === key); }
+      catch { this.report("dispatch_leader_homes_unreadable"); return; }
+      if (superseded) this.compactHome(key, home);
+    } };
+  }
+
+  private compactHome(scope: string, home: string): void {
+    try {
+      const recorded = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
+      const outcome = this.options.homes!.compact(home, recorded ? String(recorded.thread_id) : undefined);
+      if (outcome.status === "kept") this.report(`dispatch_leader_home_kept:${outcome.reason}:${path.basename(home)}`);
+    } catch { this.report(`dispatch_leader_home_kept:compaction_failed:${path.basename(home)}`); }
+  }
+
+  private report(code: string): void {
+    try { this.options.report?.(code); } catch { /* Diagnostics cannot change task outcomes. */ }
+  }
+
   private turn(input: LeaderTurnInput, phase: LeaderPhase, prompt: string, outputSchema: Record<string, unknown>,
     assignments?: readonly LeaderAssignmentReport[] | readonly LeaderAssignmentView[]): Promise<string> {
-    const { session } = input;
-    const scope = createHash("sha256").update(JSON.stringify(["leader", input.leader.id, session.accountId, session.target,
-      session.bindingHash, session.revision, session.definitionsVersion])).digest("hex");
+    const scope = sessionScope({ leaderId: input.leader.id, ...input.session });
     return this.options.runtime(`dispatch-leader-${scope}`, async (runtime, cwd) => {
       const previous = this.database.prepare("SELECT thread_id FROM agent_session WHERE scope = ?").get(scope);
+      // A session with none recorded gets a new home: this is when a new access revision or definitions version takes effect here.
+      if (!previous) this.compactSupersededHomes();
       const threadId = await runtime.startOrResume(previous ? String(previous.thread_id) : undefined, cwd, []);
       this.database.prepare("INSERT INTO agent_session VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET thread_id = excluded.thread_id").run(scope, threadId);
       this.options.prepareThread?.(input, phase, threadId, assignments);
