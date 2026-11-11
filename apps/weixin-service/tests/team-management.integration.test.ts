@@ -1,9 +1,10 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { TeamRegistry } from "../src/team-registry.js";
+import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { allowNotes, config, decision, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
@@ -541,6 +542,77 @@ it("refuses a host tool removed from a profile at the next call of a request adm
     expect(refused).toEqual([{ team: "bill", profile: "executor-1", tool: "files.find" }]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+// MCP servers attached to a profile, through real main (agent-dispatch::REQ-016/AC-03, REQ-017/AC-01 and AC-02, CON-003; mcp-catalog::CON-001).
+// The server is a real local program registered and attached through the console API; a file its `write_file` tool writes shows
+// that a call reached it. The fixture App Server takes any tool name; the installed one's rule is in isolated-runtime-tools.test.ts.
+it("gives a registered MCP server's tools only to Executors of the profile that attaches it, for requests admitted after the attachment and until it is unbound", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-mcp-attached-"));
+  const written = (name: string) => join(directory, `written-${name}.txt`);
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
+    const files = testServerFiles(directory, "amap");
+    writeTools(files.tools, [{ name: "route_plan", description: "Plans a route between two places.", inputSchema: { type: "object", properties: { from: { type: "string" }, to: { type: "string" } } } }]);
+    const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
+    const { launchLine } = await running.post<{ launchLine: string }>("/api/mcp/preview", { server });
+    await running.post("/api/mcp/servers", { server, confirmed: launchLine });
+    type McpView = View & { mcpServers: Array<{ name: string; state: string }> };
+    await vi.waitFor(async () => expect((await running!.get<McpView>("/api/teams")).mcpServers).toMatchObject([{ name: "amap", state: "connected" }]), { timeout: processWaitLimitMs, interval: 50 });
+    const call = (name: string) => [{ namespace: "mcp-amap", tool: "write_file", arguments: { path: written(name), text: name } }];
+    const attach = async (mcpServers: unknown[]) => {
+      const view = await running!.get<View>("/api/teams");
+      await running!.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, executorProfiles: bill.executorProfiles.map((profile) => ({ ...profile, mcpServers })) })) });
+    };
+    const retry = (messageId: string, requestId: string, name: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
+      { modelToolCalls: call(name), modelReply: completedReply("规划行程") });
+
+    // Admitted before the attachment: Bill's Executor is offered no MCP tool.
+    await running.post("/api/fixture/inbound", groupMessage("om_mcp_before", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelReply: failedReply("规划行程") }));
+    const before = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    await attach([{ name: "amap", confirmed: launchLine }]);
+    // The same request, retried after the attachment, keeps the definitions it was admitted under: its call is refused.
+    await running.post("/api/fixture/inbound", retry("om_mcp_before_retry", before.agentDispatch!.jobs[0]!.id, "before"));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+
+    // Admitted after it: Bill's Executor is offered the server's tools and its call reaches the server; Jack's Executor is offered none.
+    await running.post("/api/fixture/inbound", groupMessage("om_mcp_after", "再帮我规划周日行程", decision("bill", "规划周日行程"), { modelToolCalls: call("after"), modelReply: failedReply("规划行程") }));
+    const after = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed");
+    await running.post("/api/fixture/inbound", groupMessage("om_mcp_jack", "请帮我看一段代码", decision("jack", "看一段代码"), { modelToolCalls: call("jack"), modelReply: completedReply("看一段代码") }));
+    await running.until((state) => state.agentDispatch?.jobs[2]?.status === "completed");
+
+    // Unbound while that request is unfinished: its next call is refused, and a request admitted now is told nothing of the server.
+    await attach([]);
+    await running.post("/api/fixture/inbound", retry("om_mcp_after_retry", after.agentDispatch!.jobs[1]!.id, "unbound"));
+    await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+    await running.post("/api/fixture/inbound", groupMessage("om_mcp_unbound", "再帮我规划下周行程", decision("bill", "规划下周行程"), { modelReply: completedReply("规划行程") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[3]?.status === "completed");
+
+    const jobs = result.agentDispatch!.jobs;
+    const offered = (service: string) => result.fixtureThreadStarts!.filter(({ serviceName }) => serviceName === service).map(({ dynamicTools }) => (dynamicTools ?? []).filter((tool) => tool.startsWith("mcp-")));
+    const refused = readFileSync(join(directory, "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line)).filter(({ event }) => event === "mcp_call_refused")
+      .map(({ by, team: refusedTeam, profile, executor, request, tool, reason }) => ({ by, team: refusedTeam, profile, executor, request, tool, reason }));
+    const turns = result.fixtureCoordinationRequests!.map(({ input }) => JSON.stringify(input));
+    // Bill's plan turn of each request: whether it names what the server gives the preset's Executors.
+    const planNamesServer = (brief: string) => turns.find((input) => input.includes("生活团队的负责人") && input.includes(brief))!.includes("通过 MCP 服务器「amap」：");
+    console.log(JSON.stringify({ kind: "team_mcp_attached", commands: ["请帮我规划周末一日行程", "attach amap", "重试", "再帮我规划周日行程", "请帮我看一段代码", "unbind amap", "重试", "再帮我规划下周行程"],
+      jobs: result.agentDispatch, offered: { bill: offered("feishu_agent_bill"), jack: offered("feishu_agent_jack") }, refused }));
+    // Three Bill Executors started a thread: before the attachment, after it, and after the unbinding.
+    expect(offered("feishu_agent_bill")).toEqual([[], ["mcp-amap.env", "mcp-amap.whoami", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.route_plan"], []]);
+    expect(offered("feishu_agent_jack")).toEqual([[]]);
+    expect(["before", "after", "jack", "unbound"].map((name) => existsSync(written(name)) ? readFileSync(written(name), "utf8") : null)).toEqual([null, "after", null, null]);
+    const billExecutor = (job: number) => ({ by: "service", team: "bill", profile: "executor-1", executor: jobs[job]!.assignments[0]!.executor, request: jobs[job]!.id, tool: "mcp__amap__write_file" });
+    expect(refused).toEqual([{ ...billExecutor(0), reason: "not_attached" },
+      { by: "service", team: "jack", profile: "executor-1", executor: jobs[2]!.assignments[0]!.executor, request: jobs[2]!.id, tool: "mcp__amap__write_file", reason: "not_attached" },
+      { ...billExecutor(1), reason: "unbound" }]);
+    expect(["请帮我规划周末一日行程", "再帮我规划周日行程", "再帮我规划下周行程"].map(planNamesServer)).toEqual([false, true, false]);
+    expect(turns.find((input) => input.includes("生活团队的负责人") && input.includes("再帮我规划周日行程"))).toContain("route_plan（Plans a route between two places.）");
+    await running.close(); running = undefined;
+    // Stopping the service stops the server it started.
+    expect(runningPrograms(directory)).toEqual([]);
+  } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
+}, 90000);
 
 // The dispatch-group form (agent-console::US-009) through real main: the file, the startup import and dispatch in the saved group.
 it("enables a group from the console: the save writes it, and after a restart a request there reaches Sam alone", async () => {

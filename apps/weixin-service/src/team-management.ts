@@ -7,6 +7,7 @@ import type { ConsoleBrowser } from "./console-access.js";
 import type { ConsoleAudit } from "./console-audit.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { GroupNames } from "./group-names.js";
+import type { McpCatalog } from "./mcp-catalog.js";
 import type { AnnouncementSend, TeamAnnouncements } from "./team-announcements.js";
 import { type ApplicationCredentials, type CreationEnd, type OnboardingPlatform, TeamOnboarding } from "./team-onboarding.js";
 import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type DefinitionsVersion, type OnboardingMethod, type OnboardingOutcome, type TeamDefinition,
@@ -24,6 +25,8 @@ export type TeamActor = Readonly<{ browser?: ConsoleBrowser }>;
 /** A request, or a group post still to be sent, that involves a team in a chat (agent-dispatch's `TeamWork`, as the console names it). */
 export type TeamWorkItem = Readonly<{ chatId: string; requestId: string; label: string; summary: string; requester: "owner" | "member";
   active: number; awaitingRequester: number; waitingFor: readonly string[] | null }>;
+/** A server of the MCP Catalog as the team page lists it and a save judges an attachment to it; never a secret. */
+export type CatalogServer = Readonly<{ name: string; transport: "stdio" | "http"; launchLine: string; enabled: boolean; state: string; usable: number }>;
 /** A scheduled task as a removal lists it. */
 export type SenderTask = Readonly<{ id: string; name: string; when: string; chatId: string }>;
 
@@ -52,6 +55,8 @@ export type TeamManagementOptions = Readonly<{
   rosterChanged(roster: Readonly<FeishuDispatchConfiguration>): void;
   /** Applications no team may use, such as Penny's, each with the reason the save bar shows. */
   reservedApplications?(): Readonly<Record<string, string>>;
+  /** The MCP Catalog, whose servers profiles attach (team-management::US-003/AC-03). */
+  mcpCatalog?: Pick<McpCatalog, "view">;
   report(code: string): void;
   now?: () => number;
   /** Group names shared with the dispatch-group form; without it, team management reads names on its own. */
@@ -132,11 +137,13 @@ export class TeamManagement {
     this.groupNames.forgetFailed(edit.groups);
     const basedOn = parseVersion(options.basedOn);
     const before = edit.id === undefined ? undefined : this.current().definitions.teams.find(({ id }) => id === edit.id);
+    const servers = this.catalogServers();
     const { version, teamId, creation } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, at: this.now(),
-      ...(secret === undefined ? {} : { secret }) });
+      mcpServers: Object.fromEntries(servers.map(({ name, launchLine, enabled }) => [name, { launchLine, enabled }])), ...(secret === undefined ? {} : { secret }) });
     const after = version.definitions.teams.find(({ id }) => id === teamId)!;
     const method: OnboardingMethod = edit.method ?? "existing";
     this.auditTeamSave(before, after, secret !== undefined && method === "existing", version.version, options.actor, before === undefined || creation ? method : undefined);
+    this.auditAttachments(before, after, servers, version.version, options.actor);
     if (creation === "ended") this.onboarding.endCreation(teamId);
     if (creation === "started") void this.requestCreation(teamId, options.actor);
     // Removing a team from a group starts at once: the Coordinator announces that it left (team-management::REQ-004/AC-01).
@@ -206,6 +213,12 @@ export class TeamManagement {
     this.taskChanged(this.options.tasks.delete(task.id, team.leader.appId));
     this.audit(actor, { event: "team_task_deleted", team: team.id, task: task.id, name: task.name, group: task.chatId });
     this.settle();
+  }
+
+  /** The profiles of the current definitions that attach an MCP server, as the server's drawer lists them (mcp-catalog::US-003/AC-03). */
+  mcpAttachments(server: string): Array<{ teamId: string; leader: string; teamName: string; profile: string }> {
+    return this.current().definitions.teams.flatMap((team) => team.executorProfiles.filter(({ mcpServers }) => mcpServers?.includes(server))
+      .map((profile) => ({ teamId: team.id, leader: team.leader.name, teamName: team.teamName, profile: profile.name })));
   }
 
   /** Saves Sam's responsibility and instructions, the only parts the console may change (team-management::REQ-001/AC-01). */
@@ -279,6 +292,7 @@ export class TeamManagement {
     const names = await this.groupNames.of(definitions.dispatchGroups);
     const scopes = this.options.moduleScopes();
     const active = this.options.activeAssignments();
+    const servers = this.catalogServers();
     const removal = (team: TeamDefinition, work: readonly TeamWorkItem[], tasks: readonly SenderTask[], chatId: string) => {
       const here = work.filter((item) => item.chatId === chatId);
       return { active: here.reduce((sum, item) => sum + item.active, 0), awaitingRequester: here.reduce((sum, item) => sum + item.awaitingRequester, 0), closing: here.filter((item) => !item.active && !item.waitingFor).length,
@@ -289,6 +303,7 @@ export class TeamManagement {
     for (const { chatId, teamId, kind, state, text: message } of this.options.announcements.list()) latest.set(`${teamId}\n${chatId}`, { kind, state, text: message });
     return {
       configured: true, version: current.version,
+      mcpServers: servers,
       groups: definitions.dispatchGroups.map((chatId) => ({ chatId, name: names[chatId] ?? chatId })),
       tools: effectiveHostTools(this.options.catalogToolIds, scopes).offered.reduce((granted, id) => ({ ...granted, [id]: true }),
         Object.fromEntries(this.options.catalogToolIds.map((id) => [id, false])) as Record<string, boolean>),
@@ -311,15 +326,21 @@ export class TeamManagement {
           ...(record.credentials ? { credentials: record.credentials } : {}),
           bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}),
             ...(state === "draining" ? { removal: removal(team, work, tasks, chatId) } : {}) })),
-          profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => {
+          profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools, mcpServers }) => {
             const effective = effectiveHostTools(hostTools, scopes);
-            return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted };
+            return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted,
+              // A server the catalog no longer has gives nothing; the page leaves it out, and the team's next save drops it.
+              mcpServers: (mcpServers ?? []).filter((server) => servers.some(({ name: registered }) => registered === server)) };
           }),
           activeAssignments: active[team.id] ?? 0,
           announcements: Object.fromEntries(team.bindings.flatMap(({ chatId }) => latest.has(`${team.id}\n${chatId}`) ? [[chatId, latest.get(`${team.id}\n${chatId}`)!]] : [])) };
       }),
       preview: Object.fromEntries(definitions.dispatchGroups.map((chatId) => [chatId, acceptingTeams(definitions, chatId).map(({ id }) => id)])),
     };
+  }
+
+  private catalogServers(): CatalogServer[] {
+    return (this.options.mcpCatalog?.view() ?? []).map(({ name, transport, launchLine, enabled, state, counts }) => ({ name, transport, launchLine, enabled, state, usable: counts.usable }));
   }
 
   /** The scheduled tasks that send with the team's identity. */
@@ -417,6 +438,21 @@ export class TeamManagement {
     for (const profile of profiles.keys()) this.audit(actor, { event: "team_profile_removed", team: after.id, profile, version });
   }
 
+  /**
+   * One entry per MCP server a profile attached or unbound in this save, a removed profile's servers included. An attachment
+   * names the command or address the owner confirmed for it.
+   */
+  private auditAttachments(before: TeamDefinition | undefined, after: TeamDefinition, servers: readonly CatalogServer[], version: number, actor: TeamActor): void {
+    const attached = (team: TeamDefinition | undefined) => new Map((team?.executorProfiles ?? []).map(({ id, mcpServers }) => [id, mcpServers ?? []]));
+    const old = attached(before), now = attached(after);
+    for (const profile of new Set([...old.keys(), ...now.keys()])) {
+      const was = old.get(profile) ?? [], is = now.get(profile) ?? [];
+      for (const server of is.filter((name) => !was.includes(name))) this.audit(actor, { event: "team_profile_mcp_attached", team: after.id, profile, server, version,
+        launchLine: servers.find(({ name }) => name === server)?.launchLine ?? null });
+      for (const server of was.filter((name) => !is.includes(name))) this.audit(actor, { event: "team_profile_mcp_unbound", team: after.id, profile, server, version });
+    }
+  }
+
   /** One entry per binding whose state differs; a team that is new, or gone, has no binding on that side. */
   private auditBindings(before: TeamDefinition | undefined, after: TeamDefinition | undefined, version: number, actor: TeamActor): void {
     const states = (team: TeamDefinition | undefined) => new Map((team?.bindings ?? []).map(({ chatId, state }) => [chatId, state]));
@@ -434,6 +470,8 @@ export class TeamManagement {
 
 export type TeamsView = Readonly<{
   configured: true; version: number;
+  /** The MCP Catalog's servers, for each profile's attached rows and its 绑定 MCP list. */
+  mcpServers: CatalogServer[];
   groups: Array<{ chatId: string; name: string }>;
   /** Each catalog host tool and whether module permissions grant it. */
   tools: Record<string, boolean>;
@@ -451,7 +489,9 @@ export type TeamsView = Readonly<{
     /** Step 6: the latest test message of the team's application in each group it sent one to, and the text a new one would carry. */
     tests: Record<string, TestMessageOutcome>; testMessage: string;
     credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome; removal?: RemovalView }>;
-    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[] }>;
+    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[];
+      /** The names of the MCP servers the profile attaches. */
+      mcpServers: string[] }>;
     activeAssignments: number;
     announcements: Record<string, { kind: "join" | "leave"; state: string; text: string }>;
   }>;
@@ -495,8 +535,16 @@ function parseTeamEdit(input: unknown, catalogToolIds: readonly string[]): Reado
     const profile = object(item);
     if (profile.id !== undefined && typeof profile.id !== "string") throw new TeamInputError("能力档编号无效");
     if (!Array.isArray(profile.hostTools) || !profile.hostTools.every((tool) => typeof tool === "string" && catalogToolIds.includes(tool))) throw new TeamInputError("工具格式无效");
+    // A save that names no MCP server attaches none; the registry judges each server and its confirmation.
+    const attached = profile.mcpServers === undefined ? [] : profile.mcpServers;
+    if (!Array.isArray(attached) || attached.length > 100) throw new TeamInputError("MCP 格式无效");
+    const mcpServers = attached.map((item) => {
+      const server = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : {};
+      if (typeof server.name !== "string" || !server.name || server.name.length > 64 || (server.confirmed !== undefined && typeof server.confirmed !== "string")) throw new TeamInputError("MCP 格式无效");
+      return { name: server.name, ...(server.confirmed === undefined ? {} : { confirmed: server.confirmed as string }) };
+    });
     return { ...(profile.id === undefined ? {} : { id: profile.id as string }), name: text(profile.name, "能力档名称"), noun: text(profile.noun, "执行者称呼"),
-      instructions: text(profile.instructions, "执行者提示词"), hostTools: profile.hostTools as string[] };
+      instructions: text(profile.instructions, "执行者提示词"), hostTools: profile.hostTools as string[], ...(mcpServers.length ? { mcpServers } : {}) };
   });
   const edit: TeamEdit = { ...(value.id === undefined ? {} : { id: value.id as string }), teamName: text(value.teamName, "团队名称"),
     responsibility: text(value.responsibility, "职责"),

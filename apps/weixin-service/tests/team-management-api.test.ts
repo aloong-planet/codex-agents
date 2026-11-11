@@ -20,6 +20,8 @@ import { TeamAnnouncements } from "../src/team-announcements.js";
 import { TeamManagement, type TeamManagementOptions, type TeamsView } from "../src/team-management.js";
 import { FixtureOnboardingPlatform } from "../src/team-onboarding.js";
 import { TeamRegistry } from "../src/team-registry.js";
+import { SECRET_SENTINEL as SERVER_SECRET, testServerArgs, testServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 
 const CHROME_MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
@@ -46,7 +48,8 @@ async function start({ work: earlier, teamWork, ...options }: { now?: () => numb
   fs.mkdirSync(home, { recursive: true });
   const audit = new ConsoleAudit({ directory: state });
   const access = new ConsoleAccess({ directory: state, audit });
-  const catalog = new McpCatalog({ stateDirectory: state, homeDirectory: home, audit, retryMs: 60_000, refreshMs: 0 });
+  // As main wires them: the catalog asks team management which profiles attach a server, and team management reads the catalog's servers.
+  const catalog: McpCatalog = new McpCatalog({ stateDirectory: state, homeDirectory: home, audit, retryMs: 60_000, refreshMs: 0, attachments: (server) => teams.mcpAttachments(server) });
   steps.push(() => catalog.close());
   const registry = new TeamRegistry(path.join(state, "team-registry.sqlite"));
   const announcements = new TeamAnnouncements(path.join(state, "team-announcements.sqlite"));
@@ -62,7 +65,7 @@ async function start({ work: earlier, teamWork, ...options }: { now?: () => numb
   registry.importLocalConfiguration(feishu.dispatch, { executorHostTools: PRODUCTION_TOOL_IDS });
   const platform = new FixtureOnboardingPlatform();
   platform.configure({ chats: { oc_alpha: { name: "银河护卫队" } } });
-  const teams = new TeamManagement({ registry, coordinator: SAM, platform, announcements, audit, catalogToolIds: PRODUCTION_TOOL_IDS,
+  const teams: TeamManagement = new TeamManagement({ registry, coordinator: SAM, platform, announcements, audit, catalogToolIds: PRODUCTION_TOOL_IDS, mcpCatalog: catalog,
     moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => ({}), rosterChanged: () => {}, report: () => {},
     work: teamWork ?? (() => []), tasks: { sentBy: () => [], move: () => "unknown", delete: () => "unknown" }, ...options });
   steps.push(() => teams.close());
@@ -154,6 +157,46 @@ describe("team management API", () => {
     expect((await request("/api/teams/save", { basedOn: view.version, team: { ...daisy, executorProfiles: [{ ...daisy.executorProfiles[0]!, hostTools: ["shell.exec"] }] } })).body)
       .toEqual({ error: "工具格式无效" });
     expect((await request("/api/teams", undefined, {})).status).toBe(401);
+  });
+
+  // team-management::US-003/AC-03 and AC-04, mcp-catalog::US-003/AC-03 and US-005/AC-01, agent-console::REQ-004. The server is a real
+  // local program; its environment value stands for a secret that no response may hold (mcp-catalog::REQ-001).
+  it("attaches a registered MCP server to a profile only with its confirmed command, lists the profile on the server, and deletes the server only once it is unbound", async () => {
+    const { request, bodies, auditEntries, work } = await start();
+    const files = testServerFiles(work, "amap");
+    const server = { name: "amap", command: process.execPath, args: testServerArgs(files), env: { SECRET_TOKEN: SERVER_SECRET } };
+    const launchLine = (await request("/api/mcp/preview", { server })).body.launchLine as string;
+    expect((await request("/api/mcp/servers", { server, confirmed: launchLine })).status).toBe(200);
+    await vi.waitFor(async () => expect((await request("/api/teams")).body.mcpServers).toEqual([{ name: "amap", transport: "stdio", launchLine, enabled: true, state: "connected", usable: 4 }]),
+      { timeout: processWaitLimitMs, interval: 50 });
+    const first = (await request("/api/teams")).body;
+    const bill = (view: View, mcpServers: unknown[]) => ({ ...editOf(view, "bill", ["oc_alpha", "oc_beta"]),
+      executorProfiles: editOf(view, "bill", []).executorProfiles.map((profile) => ({ ...profile, mcpServers })) });
+    // Without the line of the confirmation card, or with an outdated one, nothing is attached.
+    for (const unconfirmed of [{ name: "amap" }, { name: "amap", confirmed: `${launchLine} --changed` }]) {
+      expect(await request("/api/teams/save", { basedOn: first.version, team: bill(first, [unconfirmed]) }))
+        .toEqual({ status: 400, body: { error: "无法保存", reasons: ["MCP 服务器 amap 的命令或地址与确认时不一致，请重新绑定并确认。"] } });
+    }
+    expect((await request("/api/teams/save", { basedOn: first.version, team: bill(first, ["amap"]) })).body).toEqual({ error: "MCP 格式无效" });
+    expect(teamOf((await request("/api/teams")).body, "bill")!.profiles[0]!.mcpServers).toEqual([]);
+
+    const attached = (await request("/api/teams/save", { basedOn: first.version, team: bill(first, [{ name: "amap", confirmed: launchLine }]) })).body.view as TeamsView;
+    expect(attached.teams.map((team) => [team.id, team.profiles.map(({ mcpServers }) => mcpServers)])).toEqual([["alice", [[]]], ["bill", [["amap"]]], ["jack", [[]]]]);
+    expect((await request("/api/mcp/servers")).body.servers[0].attachedProfiles).toEqual([{ teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" }]);
+    expect(await request("/api/mcp/servers/amap/delete", {})).toEqual({ status: 400, body: { error: "被 1 个能力档绑定。先在团队管理解绑，才能删除。" } });
+    expect((await request("/api/mcp/servers")).body.servers).toHaveLength(1);
+
+    // Unbinding is saved like any other change of the team; the server can then be deleted.
+    const unbound = (await request("/api/teams/save", { basedOn: attached.version, team: bill(attached, []) })).body.view as TeamsView;
+    expect(teamOf(unbound, "bill")!.profiles[0]!.mcpServers).toEqual([]);
+    expect((await request("/api/mcp/servers")).body.servers[0].attachedProfiles).toEqual([]);
+    expect(await request("/api/mcp/servers/amap/delete", {})).toEqual({ status: 200, body: { deleted: "amap" } });
+    expect((await request("/api/teams")).body.mcpServers).toEqual([]);
+
+    expect(auditEntries().filter(({ event }) => String(event).startsWith("team_profile_mcp_")).map(({ by, browser, event, team, profile, server: name, version, launchLine: line }) => ({ by, browser: typeof browser, event, team, profile, server: name, version, launchLine: line })))
+      .toEqual([{ by: "browser", browser: "object", event: "team_profile_mcp_attached", team: "bill", profile: "executor-1", server: "amap", version: attached.version, launchLine },
+        { by: "browser", browser: "object", event: "team_profile_mcp_unbound", team: "bill", profile: "executor-1", server: "amap", version: unbound.version, launchLine: undefined }]);
+    for (const body of bodies) expect(body).not.toContain(SERVER_SECRET);
   });
 
   it("deletes a team nothing holds at once: it leaves the list, each group gets its leave announcement, and Sam cannot be deleted", async () => {
