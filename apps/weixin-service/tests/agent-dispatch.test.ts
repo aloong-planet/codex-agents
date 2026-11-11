@@ -248,6 +248,31 @@ it.each([
   expect(classified).toEqual([text === "alice" ? "dispatch" : "propose", "cancel"]);
 });
 
+// A message that the pending-choice handling took is not taken in again at the next start, also when its handling then fails while
+// the service stops: the host already acted on it, and a second pass would take the answer to the Coordinator as a new message.
+it("does not take in again an answer that the pending-choice handling took when the service stops as its handling fails", async () => {
+  const state = directory();
+  let stopped: Promise<void> | undefined;
+  const asked: string[] = [];
+  const executor: DispatchExecutor = { run: async () => { throw new Error("no Executor runs for an answer"); }, close: () => {} };
+  // The answer's sender is an application no agent has any more, so its handling fails once the host has taken it.
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), executor, [], { pending: async (inbound) => {
+    asked.push(inbound.key); stopped ??= first.close();
+    return { handled: true, senderAccountId: "cli_removed", runRef: "run-1", result: { status: "completed", message: "已发送所选文件。" } };
+  } });
+  await first.start();
+  first.admit(event("one", "choose:1"));
+  await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
+  await stopped;
+
+  const after: Array<{ sender: string; message: string; id: string }> = [];
+  const second = dispatchWith(state, closingLeader(), executor, after, { pending: async (inbound) => { asked.push(inbound.key); return { handled: false }; } });
+  await second.start();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect({ asked, classified, posts: posts(after) }).toEqual({ asked: ["one"], classified: [], posts: [] });
+  expect(second.getState().jobs).toEqual([]);
+});
+
 it("gives a request no new Assignment after a restart once its team no longer accepts work in the group", async () => {
   const state = directory();
   const hung = deferred<never>();
