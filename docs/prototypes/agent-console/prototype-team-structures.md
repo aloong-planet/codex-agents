@@ -101,6 +101,8 @@ The relationships/storage tab separates:
 - ordinary personal memory;
 - Penny's financial stores.
 
+Sam's and each first-level leader's tab links to 负责人私聊记录 beside the group stores, so the private conversations' store is reachable from the agents the owner chats with. A node opened from a link in the drawer keeps the current tab, and 返回 in the drawer header goes back to the node shown before, as on the app's team overview.
+
 Storage for leader memory, executor memory, leader chats and private requests is described as a conceptual scope, not an implemented filesystem path. Penny shows status and storage only, with no financial records and no general chat entry.
 
 ### Chat
