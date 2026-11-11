@@ -362,6 +362,52 @@ it("has Sam tell the group that the attempt has not started when the request's t
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// The channel-refused branch of the same rule through main, and the revalidation of authority at a restart
+// (agent-dispatch::REQ-008/AC-04): an application that is offline has its start message refused without a send.
+it.each(["member", "group", "application"] as const)("fails closed for an unavailable assignee and fences queued work after %s replacement", async (replacement) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-revocation-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, sender: string, agentId: string, modelHold = false, chatId = "oc_alpha") => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text: "处理当前请求" }) } },
+    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: "处理当前请求", message: "" }, modelHold,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "unavailable" } });
+    await send("om_assignee_offline", "ou_owner", "alice");
+    const unavailable = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    expect(unavailable.fixtureModelRequests).toEqual([]);
+    expect(unavailable.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
+    // The channel refuses the start message of an application that is offline, so it is recorded as rejected: Sam's one sentence
+    // is the only post, and nothing goes out for Alice under another identity (agent-dispatch::REQ-008/AC-04).
+    expect(unavailable.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Alice 队的接单通知未能发出，本次尚未开始处理。请检查 Alice 是否可在本群发言后明确重试。" })]);
+    expect(unavailable.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "ready" } });
+    await send("om_running_before_revocation", "ou_owner", "alice", true);
+    await running.until((state) => state.fixtureModelRequests?.length === 1);
+    await send("om_queued_before_revocation", "ou_owner", "alice");
+    const queued = await running.until((state) => state.agentDispatch?.jobs.length === 3);
+    expect(queued.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["failed", "running", "queued"]);
+    await running.close(); running = undefined;
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    if (replacement === "member") configuration.feishu.groups[0].allowedSenderIds = ["ou_colleague"];
+    else if (replacement === "group") {
+      configuration.feishu.groups[0].chatId = "oc_beta";
+      configuration.feishu.dispatch.groupChatIds = ["oc_beta"];
+    } else configuration.feishu.dispatch.agents[1].appId = "cli_dddddddddddddddd";
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    running = await start(directory);
+    await send("om_authorized_after_revocation", "ou_colleague", "bill", false, replacement === "group" ? "oc_beta" : "oc_alpha");
+    const restored = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(restored.fixtureModelRequests).toHaveLength(1);
+    expect(restored.agentFixtureOutboxes?.alice?.text).toEqual([]);
+    expect(restored.fixtureTextOutbox).toEqual([]);
+    expect(restored.agentDispatch?.jobs[2]?.status).toBe(replacement === "application" ? "failed" : "cancelled");
+    expect(restored.agentDispatch?.jobs.some(({ requester, status }) => requester === "ou_owner" && ["running", "queued"].includes(status))).toBe(false);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 // agent-dispatch::REQ-008/AC-04 with a Team Leader application replaced from the console while its work runs (ticket 11, D5).
 it("posts nothing through another identity for work started under a Team Leader application that was replaced", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-replaced-application-"));
