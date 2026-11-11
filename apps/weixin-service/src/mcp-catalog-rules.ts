@@ -266,6 +266,18 @@ export function redactSecrets(text: string, secrets: Iterable<string>): string {
   return out;
 }
 
+/** `redactSecrets` over every string of a JSON value, keys included, at any depth. */
+export function redactDeep(value: unknown, secrets: Iterable<string>): unknown {
+  const values = [...secrets];
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") return redactSecrets(item, values);
+    if (Array.isArray(item)) return item.map(walk);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, inner]) => [redactSecrets(key, values), walk(inner)]));
+    return item;
+  };
+  return walk(value);
+}
+
 /** Key-sorted JSON, so that a definition sent with another key order is not reported as changed. */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -296,6 +308,62 @@ export function pinDiff(pinned: Pin, tool: ToolDefinition): { changed: PinPart[]
 }
 
 /** Delay before automatic retry number `failures + 1`: from 30 s, doubling, at most 10 minutes. */
+/** A function name the Responses API takes: letters, digits, `_` and `-`, at most 64 characters. */
+const OFFERED_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The name a runtime is offered for each tool of one server, by the tool's own name. A name the Responses API takes is
+ * offered as it is. In any other name, every other character becomes `_`; when the result repeats another tool's offered
+ * name, or the name is longer than 64 characters, it is cut to 55 characters and ends with `_` and the first 8 hex
+ * characters of the name's SHA-256. The App Server refuses a thread that is offered a tool with any other kind of name.
+ */
+export function offeredToolNames(tools: readonly string[]): Map<string, string> {
+  const plain = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, "_");
+  const uses = new Map<string, number>();
+  for (const tool of new Set(tools)) uses.set(plain(tool), (uses.get(plain(tool)) ?? 0) + 1);
+  return new Map(tools.map((tool) => {
+    if (OFFERED_NAME.test(tool)) return [tool, tool];
+    const candidate = plain(tool);
+    return [tool, OFFERED_NAME.test(candidate) && uses.get(candidate) === 1 ? candidate
+      : `${candidate.slice(0, 55)}_${createHash("sha256").update(tool).digest("hex").slice(0, 8)}`];
+  }));
+}
+
+const SCHEMA_MAPS = ["properties", "$defs", "definitions", "patternProperties"];
+const SCHEMA_VALUES = ["items", "additionalProperties", "not", "if", "then", "else", "propertyNames", "contains"];
+const SCHEMA_LISTS = ["anyOf", "oneOf", "allOf", "prefixItems"];
+
+/** Whether every keyword that holds a schema, a list or a type name in `schema` has that form, at any depth. */
+function wellFormedSchema(schema: unknown): boolean {
+  if (typeof schema === "boolean") return true;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const record = schema as Record<string, unknown>;
+  const strings = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (record.type !== undefined && typeof record.type !== "string" && !(strings(record.type) && (record.type as unknown[]).length > 0)) return false;
+  if (record.required !== undefined && !strings(record.required)) return false;
+  if (record.enum !== undefined && !Array.isArray(record.enum)) return false;
+  for (const key of SCHEMA_MAPS) {
+    const value = record[key];
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value) || !Object.values(value).every(wellFormedSchema))) return false;
+  }
+  for (const key of SCHEMA_VALUES) if (record[key] !== undefined && !wellFormedSchema(record[key])) return false;
+  for (const key of SCHEMA_LISTS) if (record[key] !== undefined && !(Array.isArray(record[key]) && (record[key] as unknown[]).every(wellFormedSchema))) return false;
+  return true;
+}
+
+/**
+ * A tool's description and input schema as a runtime is offered them. The Codex App Server refuses a whole thread when one
+ * offered tool has an input schema it cannot read; measured on it, that is a list in `items` (the older way to write a tuple)
+ * and a schema whose only type is `null`. A schema with such a form, or one that is not an object, is therefore offered as an
+ * open object, and the description then ends with the schema itself, so that the model can still fill the arguments in.
+ */
+export function offeredInput(description: string, inputSchema: unknown): { description: string; inputSchema: Record<string, unknown> } {
+  const record = inputSchema && typeof inputSchema === "object" && !Array.isArray(inputSchema) ? inputSchema as Record<string, unknown> : undefined;
+  const onlyNull = record?.type === "null" || (Array.isArray(record?.type) && record.type.every((type) => type === "null"));
+  if (record && !onlyNull && wellFormedSchema(record)) return { description, inputSchema: record };
+  return { description: `${description}${description ? "\n\n" : ""}参数按这份 JSON Schema 填写：${JSON.stringify(inputSchema ?? null)}`, inputSchema: { type: "object", additionalProperties: true } };
+}
+
 export function retryDelay(failures: number, base = RETRY_BASE_MS): number {
   return Math.min(base * 2 ** failures, RETRY_MAX_MS);
 }

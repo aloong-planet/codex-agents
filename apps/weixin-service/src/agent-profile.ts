@@ -16,6 +16,8 @@ export type ResolvedAgentProfile = Readonly<{
   instructions: string;
   /** Host tools offered to the turn: the profile allowlist ∩ the catalog. Module permissions still gate every call. */
   hostTools: readonly string[];
+  /** The MCP Catalog servers whose proxy tools an Executor may be offered (agent-dispatch::REQ-016/AC-03); the Coordinator and Team Leaders attach none. */
+  mcpServers: readonly string[];
   memoryScope: AgentMemoryScope;
 }>;
 
@@ -31,20 +33,20 @@ export function memoryAccountId(groupAccount: string, scope: AgentMemoryScope): 
   return `${DISPATCH_MEMORY_ACCOUNT_PREFIX}${createHash("sha256").update(JSON.stringify(key)).digest("hex")}`;
 }
 
-/** The one resolution point for a dispatch agent's instructions, host tools and memory scope in a definitions version. */
+/** The one resolution point for a dispatch agent's instructions, host tools, MCP servers and memory scope in a definitions version. */
 export function resolveAgentProfile(definitions: TeamDefinitions, agent: AgentRef, catalogToolIds: readonly string[]): ResolvedAgentProfile {
   // The Coordinator's session never receives business tools, whatever its profile lists (agent-dispatch::CON-003).
-  if (agent.role === "coordinator") return { instructions: definitions.coordinator.profile.instructions, hostTools: [], memoryScope: { kind: "group" } };
+  if (agent.role === "coordinator") return { instructions: definitions.coordinator.profile.instructions, hostTools: [], mcpServers: [], memoryScope: { kind: "group" } };
   // A Team Leader plans and summarizes; it holds no side-effecting tools, whatever its profile lists (agent-dispatch::REQ-002/AC-05).
   if (agent.role === "leader") {
     const team = definitions.teams.find(({ id }) => id === agent.teamId);
     if (!team) throw new Error("agent_profile_unknown");
-    return { instructions: team.leader.profile.instructions, hostTools: [], memoryScope: { kind: "leader", teamId: team.id } };
+    return { instructions: team.leader.profile.instructions, hostTools: [], mcpServers: [], memoryScope: { kind: "leader", teamId: team.id } };
   }
   const profile = definitions.teams.find(({ id }) => id === agent.teamId)?.executorProfiles.find(({ id }) => id === agent.profileId);
   if (!profile) throw new Error("agent_profile_unknown");
   const allowed = new Set(profile.hostTools);
-  return { instructions: profile.instructions, hostTools: catalogToolIds.filter((id) => allowed.has(id)),
+  return { instructions: profile.instructions, hostTools: catalogToolIds.filter((id) => allowed.has(id)), mcpServers: profile.mcpServers ?? [],
     memoryScope: { kind: "profile", teamId: agent.teamId, profileId: profile.id } };
 }
 
@@ -84,18 +86,31 @@ const HOST_TOOL_WORDS: ReadonlyArray<readonly [tool: string, words: string]> = [
   ["schedules.run_now", "立即执行定时任务"], ["schedules.retry_news", "重试日报任务"], ["schedules.delete", "删除定时任务"],
 ];
 
+/** How much of an MCP tool's description, and how many tools of one server, a Team Leader is told. */
+const MCP_DESCRIPTION_LIMIT = 80, MCP_TOOL_LIMIT = 20;
+/** An MCP server a preset's Executors can use now, with the tools it provides them. */
+export type McpCapability = Readonly<{ server: string; tools: ReadonlyArray<Readonly<{ name: string; description: string }>> }>;
+
 /**
  * What an Executor created from a preset can do now, in plain words (agent-dispatch::REQ-011/AC-01). `hostTools` is the preset's
  * resolved view in the request's definitions version. A tool is named when the preset still allows it (`stillAllowed`, undefined
  * once the preset is gone; agent-dispatch::REQ-017/AC-02) and the current module permissions grant it
  * (agent-dispatch::REQ-016/AC-02). Web search follows the Executor's runtime. A granted tool with no words is named by its ID.
+ * `mcp` are the servers the preset's Executors would be offered now, each with its usable tools: one phrase per server that has
+ * any names up to MCP_TOOL_LIMIT tools, each with the first MCP_DESCRIPTION_LIMIT characters of its description.
  */
 export function executorCapabilities(hostTools: readonly string[], stillAllowed: readonly string[] | undefined,
-  scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>, webSearch: boolean): string[] {
+  scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>, webSearch: boolean, mcp: readonly McpCapability[] = []): string[] {
   const kept = new Set(stillAllowed ?? []);
   const { offered } = effectiveHostTools(hostTools.filter((tool) => kept.has(tool)), scopes);
   const worded = new Set(HOST_TOOL_WORDS.map(([tool]) => tool));
+  const described = ({ name, description }: McpCapability["tools"][number]) => {
+    const characters = [...description.replace(/\s+/gu, " ").trim()];
+    return characters.length ? `${name}（${characters.length > MCP_DESCRIPTION_LIMIT ? `${characters.slice(0, MCP_DESCRIPTION_LIMIT).join("")}…` : characters.join("")}）` : name;
+  };
   return [...HOST_TOOL_WORDS.filter(([tool]) => offered.includes(tool)).map(([, words]) => words), ...offered.filter((tool) => !worded.has(tool)),
+    ...mcp.filter(({ tools }) => tools.length).map(({ server, tools }) =>
+      `通过 MCP 服务器「${server}」：${tools.slice(0, MCP_TOOL_LIMIT).map(described).join("、")}${tools.length > MCP_TOOL_LIMIT ? ` 等 ${tools.length} 个工具` : ""}`),
     ...(webSearch ? ["联网搜索"] : [])];
 }
 
@@ -104,9 +119,14 @@ export function executorCapabilities(hostTools: readonly string[], stillAllowed:
  * before the shared host. Turn bindings stay on the shared host, which keeps checking module permissions on every call.
  */
 const PROFILE_TOOL_REFUSED = "agent_profile_tool_refused";
-/** Whether a tool result is the profile tool host's refusal of a call outside the profile's allowlist. */
+/** Whether a tool result is a refusal of a call outside what the Executor's profile grants: a host tool, or an MCP proxy tool. */
 export function isProfileToolRefusal(result: DynamicToolResult): boolean {
   return !result.success && result.contentItems.some((item) => item.type === "inputText" && item.text.includes(PROFILE_TOOL_REFUSED));
+}
+/** The result of a call the host refused because the Executor's profile does not grant it. */
+export function profileToolRefusal(): DynamicToolResult {
+  return { success: false, contentItems: [{ type: "inputText",
+    text: JSON.stringify({ ok: false, error: { code: PROFILE_TOOL_REFUSED, retryable: false, action: "stop" } }) }] };
 }
 
 export class ProfileToolHost implements DynamicToolHost {
@@ -134,8 +154,7 @@ export class ProfileToolHost implements DynamicToolHost {
     const current = this.revocation.current ? this.revocation.current() : [...this.allowed];
     if (!context?.namespace || !this.allowed.has(id) || !current?.includes(id)) {
       try { this.revocation.refused?.(id); } catch { /* Reporting cannot turn a refusal into a call. */ }
-      return { success: false, contentItems: [{ type: "inputText",
-        text: JSON.stringify({ ok: false, error: { code: PROFILE_TOOL_REFUSED, retryable: false, action: "stop" } }) }] };
+      return profileToolRefusal();
     }
     return this.host.execute(tool, argumentsValue, context);
   }

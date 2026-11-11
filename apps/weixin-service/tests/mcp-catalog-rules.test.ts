@@ -12,8 +12,11 @@ import {
   normalizeHttp,
   normalizeStdio,
   normalizeTimeout,
+  offeredInput,
+  offeredToolNames,
   pinDiff,
   pinOf,
+  redactDeep,
   redactSecrets,
   retryDelay,
   toolStatus,
@@ -348,5 +351,56 @@ describe("import check (mcp-catalog::US-002/AC-01)", () => {
     ['{"mcpServers": {}}', "mcpServers 里没有服务器"],
   ])("refuses %s", (text, message) => {
     expect(() => checkImport(text, () => false, context)).toThrow(message);
+  });
+});
+
+// The name a runtime is offered for each tool of one server: the tool's own name when the Responses API takes it (letters,
+// digits, `_` and `-`, at most 64 characters), measured on the installed App Server, which refuses a thread whose tool has any
+// other name. Hash suffixes are the first 8 hex characters of the name's SHA-256, computed by hand with `shasum -a 256`.
+describe("offered tool names", () => {
+  it.each([
+    ["names the API takes stay as they are", ["lookup", "Create-Issue_2", "a".repeat(64)], ["lookup", "Create-Issue_2", "a".repeat(64)]],
+    ["other characters become _", ["admin.tools.list", "查询 天气"], ["admin_tools_list", "_____"]],
+    ["a name that would then repeat another gets a hash of its own name", ["a.b", "a_b", "a b"], ["a_b_2e7336dc", "a_b", "a_b_c8687a08"]],
+    ["a name past 64 characters is cut and gets its hash", ["t".repeat(70)], [`${"t".repeat(55)}_a75c6749`]],
+  ])("%s", (_case, tools, offered) => {
+    expect([...offeredToolNames(tools)]).toEqual(tools.map((tool, index) => [tool, offered[index]]));
+  });
+});
+
+// What the installed App Server did with each schema at thread start is in the opt-in case "offers an MCP proxy namespace"
+// (isolated-runtime-tools.test.ts) for the two refused forms; the accepted rows are forms it took in the same measurement.
+describe("the input schema a runtime is offered", () => {
+  const point = { type: "array", items: [{ type: "number" }, { type: "number" }] };
+  it.each([
+    ["an object with typed properties", { type: "object", properties: { q: { type: "string" } }, required: ["q"] }],
+    ["references, unions, type lists and unknown keywords", { type: "object", properties: { item: { $ref: "#/$defs/item" }, v: { anyOf: [{ type: "string" }, { type: ["number", "null"] }] }, any: true },
+      $defs: { item: { type: "object", additionalProperties: { type: "string" } } }, "x-custom": 1 }],
+    ["an empty schema", {}],
+  ])("offers %s as the server gave it", (_case, schema) => {
+    expect(offeredInput("Finds an item.", schema)).toEqual({ description: "Finds an item.", inputSchema: schema });
+  });
+
+  it.each([
+    ["a tuple written as a list in items", { type: "object", properties: { from: point } }],
+    ["such a tuple inside a union inside a definition", { type: "object", $defs: { target: { oneOf: [{ type: "string" }, point] } } }],
+    ["a schema whose only type is null", { type: "null" }],
+    ["a required that is not a list of names", { type: "object", required: "q" }],
+    ["no schema at all", undefined],
+    ["a schema that is a list", [{ type: "object" }]],
+  ])("offers %s as an open object and puts the schema in the description", (_case, schema) => {
+    expect(offeredInput("Drags.", schema)).toEqual({ description: `Drags.\n\n参数按这份 JSON Schema 填写：${JSON.stringify(schema ?? null)}`, inputSchema: { type: "object", additionalProperties: true } });
+  });
+
+  it("puts only the schema in the description of a tool that has none", () => {
+    expect(offeredInput("", { type: "null" }).description).toBe('参数按这份 JSON Schema 填写：{"type":"null"}');
+  });
+});
+
+// mcp-catalog::REQ-003/AC-01: no agent sees a server's saved secrets; a call's result is masked by REQ-001's rule.
+describe("masking every string of a call's structured result", () => {
+  it("masks secrets of 6 characters or more in values and keys at any depth, and leaves other values as they are", () => {
+    expect(redactDeep({ token: "tok-123456", rows: [{ note: "uses tok-123456 twice: tok-123456", n: 7, ok: true, none: null }], "tok-123456": "short abc" }, ["tok-123456", "abc"]))
+      .toEqual({ token: "***", rows: [{ note: "uses *** twice: ***", n: 7, ok: true, none: null }], "***": "short abc" });
   });
 });

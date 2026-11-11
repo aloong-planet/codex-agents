@@ -14,7 +14,8 @@ const definitions: TeamDefinitions = {
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },
   dispatchGroups: ["oc_alpha"],
   teams: [{ id: "bill", teamName: "生活团队", responsibility: "生活", leader: { name: "Bill", appId: "cli_2222222222222222", profile: { instructions: "负责人规则", hostTools: ["files.write"] } },
-    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] }],
+    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] },
+      { id: "executor-2", name: "路线核对", instructions: "", hostTools: [], mcpServers: ["amap", "github"] }],
     bindings: [{ chatId: "oc_alpha", state: "accepting" }] }],
 };
 const trusted: TrustedWorkflowTurn = { eventKey: "event-1", accountId: "account-1", target: "target-1", occurredAt: 1_788_200_000_000, originalTextRef: "text-ref-1", attachmentRefs: [] };
@@ -30,11 +31,14 @@ const offered = (tools: ProfileToolHost) => tools.definitions().flatMap((namespa
 describe("agent profile resolution", () => {
   it.each([
     ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "协调规则", hostTools: [], memoryScope: { kind: "group" } }],
+      { instructions: "协调规则", hostTools: [], mcpServers: [], memoryScope: { kind: "group" } }],
     ["a Team Leader with its own instructions, no host tools and its own memory, even when its profile lists tools", { role: "leader", teamId: "bill" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "负责人规则", hostTools: [], memoryScope: { kind: "leader", teamId: "bill" } }],
+      { instructions: "负责人规则", hostTools: [], mcpServers: [], memoryScope: { kind: "leader", teamId: "bill" } }],
     ["an Executor's host tools as its allowlist intersected with the catalog, and its profile's memory", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
-      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" } }],
+      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], mcpServers: [], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" } }],
+    // agent-dispatch::REQ-016/AC-03: the MCP servers are the ones this profile attaches in this definitions version, and no other profile's.
+    ["an Executor's MCP servers as its own profile attaches them", { role: "executor", teamId: "bill", profileId: "executor-2" } as const,
+      PRODUCTION_TOOL_IDS, { instructions: "", hostTools: [], mcpServers: ["amap", "github"], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-2" } }],
   ])("resolves %s", (_case, agent, catalog, expected) => {
     expect(resolveAgentProfile(definitions, agent, catalog)).toEqual(expected);
   });
@@ -137,6 +141,26 @@ describe("Executor capabilities in plain words", () => {
     ["a runtime without web search", PRODUCTION_TOOL_IDS, ["files.read"], READ_WRITE, false, ["读取授权目录里的文件"]],
   ] as const)("names, with %s, exactly what an Executor can do now", (_case, versionTools, stillAllowed, scopes, webSearch, expected) => {
     expect(executorCapabilities(versionTools, stillAllowed, scopes, webSearch)).toEqual(expected);
+  });
+});
+
+// agent-dispatch::REQ-011/AC-01: what an attached MCP server gives a preset's Executors joins the list, one phrase per server
+// that has a usable tool, after the host tools and before web search. The words are the tools' own names and descriptions.
+describe("Executor capabilities from attached MCP servers", () => {
+  const tool = (name: string, description: string) => ({ name, description });
+  it("names each server's tools with the start of their descriptions, after the host tools and before web search", () => {
+    expect(executorCapabilities(["files.read"], ["files.read"], [{ read: true, write: false }], true, [
+      { server: "amap", tools: [tool("route_plan", "Plans a route\nbetween two places."), tool("geocode", "")] },
+      { server: "github", tools: [tool("create_issue", "x".repeat(81))] },
+      { server: "docs-search", tools: [] },
+    ])).toEqual(["读取授权目录里的文件", "通过 MCP 服务器「amap」：route_plan（Plans a route between two places.）、geocode",
+      `通过 MCP 服务器「github」：create_issue（${"x".repeat(80)}…）`, "联网搜索"]);
+  });
+
+  it("names at most 20 tools of a server and counts all of them", () => {
+    const tools = Array.from({ length: 22 }, (_unused, index) => tool(`t${index + 1}`, ""));
+    expect(executorCapabilities([], [], [], false, [{ server: "big", tools }]))
+      .toEqual([`通过 MCP 服务器「big」：${tools.slice(0, 20).map(({ name }) => name).join("、")} 等 22 个工具`]);
   });
 });
 

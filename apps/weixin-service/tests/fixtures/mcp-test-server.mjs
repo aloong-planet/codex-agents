@@ -12,8 +12,13 @@
 //
 // Fixed tools: `env` (the process environment and working directory), `whoami` (pid and argv), `read_file` and
 // `write_file` (for the sandbox case).
+//
+// An extra tool answers `called <name>`, unless its `_meta` asks for more: `test/delayMs` waits that long first;
+// `test/structuredToken` also returns the SECRET_TOKEN in structured content, as a value, inside a list and as a key;
+// `test/failWithToken` fails the request with a message that holds the SECRET_TOKEN.
 import fs from "node:fs";
 import process from "node:process";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { Server } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -72,10 +77,17 @@ server.setRequestHandler("tools/call", async (request) => {
       case "write_file":
         fs.writeFileSync(args.path, args.text);
         return text("written");
-      default:
+      default: {
+        const meta = extraTools().find((tool) => tool.name === name)?._meta ?? {};
+        const token = process.env.SECRET_TOKEN ?? "(none)";
+        if (meta["test/delayMs"]) await delay(meta["test/delayMs"]);
+        if (meta["test/failWithToken"]) throw Object.assign(new Error(`upstream refused the token ${token}`), { rpc: true });
+        if (meta["test/structuredToken"]) return { ...text(`token ${token}`), structuredContent: { token, nested: { headers: [`Bearer ${token}`], count: 2 }, [token]: "by key" } };
         return text(`called ${name}`);
+      }
     }
   } catch (error) {
+    if (error.rpc) throw error;
     return { isError: true, content: [{ type: "text", text: `${error.code ?? "error"}: ${error.message}` }] };
   }
 });
