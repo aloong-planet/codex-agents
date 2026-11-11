@@ -1473,8 +1473,9 @@ it("keeps a supplement taken in while a request closes with a failed Assignment,
 });
 
 // What a kept supplement gets today when its request ends with every Assignment stopped (agent-dispatch failure mode "Requester
-// supplements a request while its Assignments run, and every one of them is then stopped, or supplements it while it closes
-// after a supplement turn that took no Assignment"). The row states today's handling.
+// supplements a request while its Assignments run, and every one of its Assignments is then stopped, through a replaced or a
+// cancelled choice; or supplements it while it closes after a supplement turn that took no Assignment, with every earlier
+// Assignment stopped"). The row states today's handling.
 it.each([
   ["a newer workflow replaced", "replaced"],
   ["the requester cancelled", "cancelled"],
