@@ -112,7 +112,9 @@ export class ChannelTurnAdapter implements AppServerTurnAdapter {
       ...(mediaPromptLines.length > 0 ? [`本轮${this.options.channelLabel}媒体外发规则与候选：`, ...mediaPromptLines] : []),
       ...(fileAccessPromptLines.length > 0
         ? [
-            "本轮本地文件工具可用目录如下。目录引用是 opaque 值，只能原样用于 files 工具的 scopeRefs；不要猜测本机绝对路径。",
+            "本轮本地文件工具可用目录如下，每行是「目录引用: 目录名称（权限）」。目录引用是 opaque 值，只能原样用于 files 工具的 scopeRefs；不要猜测本机绝对路径。",
+            "目录名称指这个授权目录本身，不是它里面的子目录。工具结果里的 relativePath 是文件在该目录之下的路径，displayPath 是「目录名称/relativePath」，只用于向用户说明位置。" +
+              "files.write 的 relativePath 和 include/exclude 里带 / 的 glob 都从该目录之下写起，不带目录名称：用户说某个授权目录里的 a/b.md 时，relativePath 写 a/b.md。",
             ...fileAccessPromptLines,
           ]
         : ["本轮没有已保存且可用的本地文件目录授权。"]),

@@ -919,6 +919,26 @@ it("runs a plan's three Assignments with one Executor each, each with its own wo
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 
+// A request that names the grant, as the real-model scenarios do: the Executor addresses its file by that name
+// (agent-dispatch::REQ-006/AC-03). The vault's directory and its label are both demo-vault.
+it("saves an Executor's file addressed by the grant's name at the grant's root and delivers it once", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-grant-name-")), business = mkdtempSync(join(tmpdir(), "dispatch-grant-name-files-"));
+  const vault = join(business, "demo-vault"), command = "授权目录 demo-vault 里的 discount-project 有个问题，请给出补丁，保存成文件发到群里";
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_grant_name", command, decision("jack", "给出 discount-project 的补丁"),
+      { modelToolCalls: writeAndSend("demo-vault/discount-project/review/fix.patch") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && (state.agentFixtureOutboxes?.jack?.media.length ?? 0) > 0);
+    console.log(JSON.stringify({ kind: "dispatch_grant_name", command, jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, runs: sendRuns(result) }));
+    expect(readFileSync(join(vault, "discount-project", "review", "fix.patch"), "utf8")).toBe("内容 demo-vault/discount-project/review/fix.patch");
+    expect(existsSync(join(vault, "demo-vault"))).toBe(false);
+    expect(result.agentFixtureOutboxes?.jack?.media.map((item) => (item as { fileName: string }).fileName)).toEqual(["fix.patch"]);
+    expect(sendRuns(result).map(({ status }) => status)).toEqual(["succeeded"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
 it("keeps the others when one fails, and reruns only it on retry", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-partial-")), business = mkdtempSync(join(tmpdir(), "dispatch-partial-files-"));
   let running: Running | undefined;

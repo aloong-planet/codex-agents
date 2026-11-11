@@ -115,7 +115,7 @@ Agent Loop 由 Codex Agent Runtime 通过 App Server 协议持有。微信宿主
 ### 4. 修改与创建
 
 26. `files.edit` 只操作一个已解析文本文件，要求读取和写入授权、`expectedSha256` 及可验证的精确替换；零匹配或非 `replaceAll` 的多匹配返回结构化冲突，不覆盖。
-27. `files.write` 使用 opaque scope reference 加相对路径。写入授权包含读取，创建不存在文件使用原子 create；覆盖现有文件仍要求 `expectedSha256`，不能覆盖未验证的内容。
+27. `files.write` 使用 opaque scope reference 加相对路径。相对路径以该 scope 的显示标签开头时，按 [workflow-module-permissions](workflow-module-permissions.md) 失败模式 21 判定它是否按名称指向授权目录本身。写入授权包含读取，创建不存在文件使用原子 create；覆盖现有文件仍要求 `expectedSha256`，不能覆盖未验证的内容。
     并发创建同名文件只能有一个创建者成功，失败者不得覆盖胜出内容。创建不同文件可共享尚不存在的父目录；创建父目录遭遇并发 `EEXIST` 时，重新确认该路径为非符号链接的目录并继续验证真实路径仍在授权范围内，不把所有错误视为成功。
 28. 路径穿越、绝对路径、符号链接逃逸、设备文件、socket、FIFO、目录和不可识别文件类型均被文件沙箱拒绝。
 29. 写入不包含删除、重命名、chmod、解压、安装或执行；同一回合允许多次本地修改，每次使用独立操作记录与聚合预算。
@@ -128,7 +128,7 @@ Agent Loop 由 Codex Agent Runtime 通过 App Server 协议持有。微信宿主
     覆盖结果明确返回 `metadataPreservation: { mode: "preserved", other: "not_guaranteed" }`；当前不承诺保留扩展属性、ACL、创建时间等其他元数据。权限位按原值设置，不受创建临时文件时的 umask 改写；失败时仅清理本次确已创建的临时文件。
     临时文件同步失败时不得替换目标，并清理本次临时文件。目标替换后的宿主文件/父目录同步失败时，不提交完成记录；LocalFileTools 边界将系统异常转换为 `local_file_mutation_failed`，不透传系统路径。此时目标可能已改变，失败不能解释为“原文件未变”；同操作恢复须再次完成同步屏障后才能登记完成，不能只凭摘要相符绕过同步。进程退出测试与文件系统 EIO 注入不等同于物理断电或磁盘介质损坏验证。
     同操作恢复时，在当前写入授权范围内精确检查日志所登记的临时文件；身份、内容和元数据仍匹配才清理，缺失可继续对账，被替换/修改或变为符号链接则返回内容冲突并保留，不按名称通配符扫描删除。旧日志通过可空字段迁移，未登记临时身份的旧记录仍走原目标摘要对账。临时文件创建至登记成功之间若被强杀，可能留下无法证明归属的残留；本版不自动清理这些未知残留，也不设置全盘垃圾回收。普通路径检查与删除之间仍存在操作系统级竞态，不宣称可抵御持续主动改换路径的本机对手。
-33. `files.edit/write` 返回新的 file reference、内容 hash、大小与修改时间；旧引用不能用于后续修改或发送。
+33. `files.edit/write` 返回新的 file reference、内容 hash、大小与修改时间，以及文件实际所在的 `relativePath` 与 `displayPath`；旧引用不能用于后续修改或发送。
 34. 二进制文件可以被查找和发送，但不能进入文本 `grep/read/edit`；`write` 新建文本统一使用 UTF-8，`edit` 保留已支持的 BOM 与换行形态。
 
 ### 5. 微信文件发送
@@ -374,6 +374,7 @@ metrics 使用低优先级排队：默认总队列仍为 256 条，其中预留 
 - 模型可见工具名不带内部版本后缀：`files.find`、`files.grep`、`files.read`、`files.edit`、`files.write`、`weixin.send_files`。Catalog 内部活动版本分别为 find/grep/read v2 与 edit/write/weixin.send_files v1；同一模型可见名称同一时刻只允许一个活动内部版本，版本参与 `toolContractHash`。旧 `files.send` 不再注册。
 - 工具 schema 同时面向宿主校验和实际 App Server 的模型可见声明。条件写入使用完整对象的联合结构，不能让必填参数退化成 `args: unknown`。参数纠正反馈指出 schema 已知的缺失字段，不回显未知键名或输入值；`files.write` 始终要求 scopeRef、相对路径、正文与显式 overwrite，覆盖仍必须带 expectedSha256。
 - 当前授权 scope 的 opaque reference、显示标签和读写能力作为有界 File Access Context 随可信回合注入；它不改变工具 schema，因此调整目录授权不改变 `toolContractHash`。收窄读取权限改用独立的 access context epoch 轮换关联 thread。
+- 显示标签是授权目录本身的名称，不是其中的子目录；File Access Context 向模型说明这一点，并说明 `files.write` 的相对路径和带 `/` 的 glob 从该目录之下写起、不带显示标签。find/grep 的每个结果项（含 grep 的 skipped 项）与 edit/write 的结果同时给出 `relativePath`（文件在授权根目录之下的路径，即 `files.write` 接受的形式）和 `displayPath`（`显示标签/relativePath`，只用于向用户说明位置）。这两个字段属于工具结果，不属于工具 schema，不参与 `toolContractHash`。
 - File Tools 是一个深 Module。它的外部 Interface 只接收结构化操作与可信访问快照；目录遍历、匹配、排序、cursor、预算、path containment、no-follow、reference 生命周期、内容窗口、原子替换和 CAS 均隐藏在实现内。
 - `files.find` 的工具说明描述“提取可能真实出现在名称或路径中的区分性词”和“零结果可改写重试”，不枚举要删除的中文词。fuzzy 匹配器只做通用 Unicode term 切分与相关度计算，不进行自然语言意图判断。
 - 每次文件工具调用记录 tool/version、执行语义、耗时、返回字节数、协议与领域结果、Owner 和实际错误码。find/grep 诊断保留完整查询参数（含非法字段和值）及既有完整性、数量摘要；其他工具继续只收集既有摘要，不新增文件正文或完整返回内容。

@@ -559,6 +559,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       fileRef: this.captureFile(session, entry, false, !scanComplete),
       scopeRef: entry.scopeRef,
       fileName: entry.fileName,
+      relativePath: entry.relativePath,
       displayPath: `${session.scopes.get(entry.scopeRef)!.label}/${entry.relativePath}`,
       kind: entry.kind,
       sizeBytes: entry.sizeBytes,
@@ -631,6 +632,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       fileRef: match.fileRef,
       scopeRef: match.scopeRef,
       fileName: match.fileName,
+      relativePath: match.relativePath,
       displayPath: `${session.scopes.get(match.scopeRef)!.label}/${match.relativePath}`,
       line: match.line,
       text: match.text,
@@ -643,6 +645,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       matches: selected,
       skipped: results.flatMap((result) => result.skipped.map((skipped) => ({
         scopeRef: skipped.scopeRef,
+        relativePath: skipped.relativePath,
         displayPath: `${session.scopes.get(skipped.scopeRef)!.label}/${skipped.relativePath}`,
         reason: skipped.reason,
       }))),
@@ -850,7 +853,8 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     if (!scope) throw new Error("local_file_reference_invalid");
     const sandbox = scope ? session.sandboxes.get(scope.moduleId) : undefined;
     if (!scope?.write || !sandbox) throw new Error("local_file_permission_denied");
-    const relativePath = requiredRelativePath(input.relativePath);
+    // Everything below, the operation journal's keys included, uses the path below the root.
+    const relativePath = pathBelowRoot(scope, requiredRelativePath(input.relativePath));
     const overwrite = input.overwrite;
     if (typeof overwrite !== "boolean") throw new Error("local_file_tool_arguments_invalid");
     if (overwrite && !scope.read) throw new Error("local_file_permission_denied");
@@ -963,7 +967,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
           modifiedAt: result.modifiedAt,
         }, true);
     session.files.get(fileRef)!.incompleteSearch = false;
-    return { fileRef, ...result,
+    return { fileRef, relativePath, displayPath: `${session.scopes.get(scopeRef)!.label}/${relativePath}`, ...result,
       ...(result.changed || result.created === false
         ? { metadataPreservation: { mode: "preserved", other: "not_guaranteed" } } : {}),
     };
@@ -1184,6 +1188,22 @@ function requiredRelativePath(value: unknown): string {
     throw new Error("local_file_tool_arguments_invalid");
   }
   return relativePath.replaceAll("\\", "/");
+}
+
+/**
+ * The path below the grant's root that a write addresses. Results show every file as `<label>/<path below the root>`, so a path
+ * that begins with the label addresses the grant by its name when the root holds no entry of that name. When it holds one, or
+ * that cannot be told, the path stays literal (workflow-module-permissions, failure mode 21).
+ */
+function pathBelowRoot(scope: ScopeBinding, relativePath: string): string {
+  const named = `${scope.label}/`;
+  if (!relativePath.startsWith(named)) return relativePath;
+  try {
+    fs.lstatSync(path.join(scope.directory, scope.label));
+    return relativePath;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? relativePath.slice(named.length) : relativePath;
+  }
 }
 
 function translateMutationError(error: unknown): Error {

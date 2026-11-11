@@ -126,3 +126,34 @@ it("protects main-owned state and configuration under broad grants and rechecks 
       initialOutbox: waiting.feishuFixtureMediaOutbox, pending, transcript: denied.codex.transcript, workflows: denied.workflows?.runs, outbox: denied.feishuFixtureMediaOutbox }));
   } finally { await running?.close(); rmSync(business, { recursive: true, force: true }); }
 }, 60000);
+
+// The main model's turns use the same file tools as a dispatch Executor's. The fixture vault's directory and its label are both
+// demo-vault, as a production grant's label is its directory's name.
+it("saves a private Weixin turn's file addressed by the grant's name at the grant's root, and reports where it landed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "grant-name-main-")), business = mkdtempSync(join(tmpdir(), "grant-name-main-files-"));
+  const vault = join(business, "demo-vault"), command = "在授权目录 demo-vault 里的 notes 下新建 by-name.md，写上「按名称保存」，然后发给我";
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const write = (relativePath: string, content: unknown) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath, content, overwrite: false } });
+  try {
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+    const before = await running.state();
+    await running.post("/api/fixture/workflow/inbound", { text: command, modelToolCalls: [
+      write("demo-vault/notes/by-name.md", "按名称保存"),
+      // What the model is told about the first write: the path below the root.
+      write("landed.txt", { $fixtureToolResult: { call: 0, path: ["relativePath"] } }),
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 0, path: ["fileRef"] } }] } },
+    ] });
+    const sent = await running.until((s) => s.weixinFixtureReplies?.at(-1)?.message === "文件已发送，请查收。" && (s.fixtureOutbox?.length ?? 0) > 0);
+    expect(readFileSync(join(vault, "notes", "by-name.md"), "utf8")).toBe("按名称保存");
+    expect(existsSync(join(vault, "demo-vault"))).toBe(false);
+    expect(readFileSync(join(vault, "landed.txt"), "utf8")).toBe("notes/by-name.md");
+    expect(sent.fixtureOutbox?.map(({ fileName }) => fileName)).toEqual(["by-name.md"]);
+    const runs = sent.workflows!.runs.filter((run) => !before.workflows?.runs.some((earlier) => earlier.runRef === run.runRef));
+    expect(runs.map(({ workflowId, status }) => ({ workflowId, status }))).toEqual([{ workflowId: "weixin.send-files", status: "succeeded" }]);
+    console.log(JSON.stringify({ kind: "grant_name_main_weixin", command, reply: sent.weixinFixtureReplies?.at(-1)?.message, runs, outbox: sent.fixtureOutbox }));
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
