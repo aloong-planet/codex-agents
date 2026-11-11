@@ -3,35 +3,33 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { config, start, type State } from "./real-main.js";
 
-// The shared real-main helper's reads, checked against a main that answers late. SIGSTOP holds main for a fixed time while a read
-// is in flight, as a loaded machine can: longer than the 1 s and 5 s the reads used to allow, shorter than processWaitLimitMs.
-type Running = Awaited<ReturnType<typeof start>>;
-const pauseMs = 6000;
-let directory: string | undefined, running: Running | undefined, mainPid: number;
-beforeAll(async () => {
-  directory = mkdtempSync(join(tmpdir(), "real-main-slow-read-"));
-  writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
-  running = await start(directory);
-  const children = execFileSync("pgrep", ["-P", String(process.pid), "-f", "src/main.ts"], { encoding: "utf8" }).trim().split("\n");
-  expect(children).toHaveLength(1);
-  mainPid = Number(children[0]);
-}, 30000);
-afterAll(async () => { await running?.close(); if (directory) rmSync(directory, { recursive: true, force: true }); });
-
-it.each([
-  { reader: "state()", read: (main: Running) => main.state() },
-  { reader: "get()", read: (main: Running) => main.get<State>("/api/state") },
-])("waits for a $reader read that main answers only after a 6 s pause", async ({ read }) => {
-  process.kill(mainPid, "SIGSTOP");
+// The shared real-main helper's reads, checked against a main that answers late. SIGSTOP holds main for 6 s while the reads are
+// in flight, as a loaded machine can: longer than the 1 s and 5 s they used to allow, shorter than processWaitLimitMs.
+// Node's fetch keeps a connection to a Node server open for 3 s after its last response (measured on Node 26.7.0), and a read sent
+// on a kept connection while main is stopped can be reset when main resumes. The case first waits until start()'s connections
+// have closed, so the reads open new ones and can fail only through their bounds.
+it("waits for state() and get() reads that main answers only after a 6 s pause", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "real-main-slow-read-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
   try {
-    const reading = read(running!);
-    const first = await Promise.race([reading.then(() => "answer", () => "failure"), delay(pauseMs).then(() => "pause")]);
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    running = await start(directory);
+    const children = execFileSync("pgrep", ["-P", String(process.pid), "-f", "src/main.ts"], { encoding: "utf8" }).trim().split("\n");
+    expect(children).toHaveLength(1);
+    const mainPid = Number(children[0]);
+    await delay(5000);
+    process.kill(mainPid, "SIGSTOP");
+    const reading = Promise.all([running.state(), running.get<State>("/api/state")]);
+    // Neither side of the race rejects, so main is always resumed before any assertion.
+    const first = await Promise.race([reading.then(() => "answer", () => "failure"), delay(6000).then(() => "pause")]);
     process.kill(mainPid, "SIGCONT");
-    expect((await reading).accounts.map((account) => account.accountId)).toEqual(["fixture-bot"]);
-    // Main was really held: the read was still waiting when the pause ended.
+    const [state, got] = await reading;
+    expect(state.accounts.map((account) => account.accountId)).toEqual(["fixture-bot"]);
+    expect(got.accounts.map((account) => account.accountId)).toEqual(["fixture-bot"]);
+    // Main was really held: both reads were still waiting when the pause ended.
     expect(first).toBe("pause");
-  } finally { process.kill(mainPid, "SIGCONT"); }
-}, 30000);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
