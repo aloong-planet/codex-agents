@@ -73,7 +73,7 @@ import { DurableInboundStore } from "./durable-inbound-store.js";
 import { DurableEffectLedger } from "./durable-effect-ledger.js";
 import { FixturePort } from "./fixture-port.js";
 import { FixtureAppServerTransport, type FixtureModelToolCallQueue } from "./fixture-app-server-transport.js";
-import { AgentDispatch } from "./agent-dispatch.js";
+import { AgentDispatch, pendingChoiceResult } from "./agent-dispatch.js";
 import { CodexDispatchClassifier, parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { assignmentSender, closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
@@ -1261,12 +1261,10 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       const cancelled = workflowEngine.get(request.runId)?.status === "cancelled";
       if (!result.handled) return { handled: false, ...(cancelled ? { cancelledRunRef: request.runId } : {}) };
       // A choice the message left as it was is still open, whatever the handling's outcome, so its Assignment still waits: a selection
-      // whose reference matches no open choice, or a signal the engine refused. The requester is asked to answer the open choice.
-      const open = !cancelled && workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId)
+      // whose reference matches no open choice, or a signal the engine could not take.
+      const open = workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId)
         .some((item) => item.signalRef === request.signalRef && item.revision === request.revision && item.expiresAt > Date.now());
-      const status = cancelled ? "cancelled" : result.outcome === "needs_input" || open ? "waiting" : result.outcome === "succeeded" ? "completed" : "failed";
-      return { handled: true, ...destination, runRef: request.runId,
-        result: { status, message: open && result.outcome !== "needs_input" ? "这条选择对应的选项已经结束；这项请求仍在等你选择，请按最新提示回复。" : result.reply } };
+      return { handled: true, ...destination, runRef: request.runId, result: pendingChoiceResult(result, { cancelled, open }) };
     },
     closeChoices: async (job, assignments) => {
       // Each Executor's run, found by the message that keys it, and the runs a supplement superseded: an Assignment that reran for the

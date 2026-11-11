@@ -50,6 +50,19 @@ const CHOICE_SUPERSEDED = "这次选择已被你的补充取代，不再生效�
 const goesOn = (job: Pick<DispatchJob, "status" | "cancelRequested">) => !job.cancelRequested && ["queued", "running", "waiting"].includes(job.status);
 
 /**
+ * What a host reports for a message its workflow handled while a choice of the requester was open, from the handling's outcome
+ * and reply and from the choice's run afterwards. A choice the message left open still waits, whatever the outcome: unless the
+ * workflow asked again itself, the requester is asked to answer that choice (agent-dispatch Implementation Decisions: Executor).
+ */
+export function pendingChoiceResult(handled: Readonly<{ outcome: "succeeded" | "needs_input" | "failed"; reply: string }>,
+  run: Readonly<{ cancelled: boolean; open: boolean }>): Pick<DispatchExecutionResult, "status" | "message"> {
+  if (run.cancelled) return { status: "cancelled", message: handled.reply };
+  if (handled.outcome === "needs_input") return { status: "waiting", message: handled.reply };
+  if (run.open) return { status: "waiting", message: "这条选择对应的选项已经结束；这项请求仍在等你选择，请按最新提示回复。" };
+  return { status: handled.outcome === "succeeded" ? "completed" : "failed", message: handled.reply };
+}
+
+/**
  * How an unfinished request involves a team: how many of its own Assignments are queued or running, how many of its own wait for the
  * requester, and the titles of the Assignments it waits with, or null when it waits with none.
  */

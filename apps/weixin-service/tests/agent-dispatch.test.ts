@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { AgentDispatch, boundedPrerequisites, failureCause, requestOutcome, teamInvolvement, type AssignmentFailure } from "../src/agent-dispatch.js";
+import { AgentDispatch, boundedPrerequisites, failureCause, pendingChoiceResult, requestOutcome, teamInvolvement, type AssignmentFailure } from "../src/agent-dispatch.js";
 import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { CodexTeamLeader, type TeamLeader } from "../src/agent-dispatch-leader.js";
 import type { CrossTeamInput, DispatchAgent, DispatchAssignment, DispatchClassificationInput, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob, DispatchPendingResult } from "../src/agent-dispatch-types.js";
@@ -505,6 +505,23 @@ it.each([
   [["cancelled"], true, "cancelled"],
 ] satisfies Array<[DispatchAssignment["status"][], boolean, string]>)("settles a request whose Assignments ended %j, with a part no team took: %s, as %s", (statuses, untaken, outcome) => {
   expect(requestOutcome(statuses, untaken)).toBe(outcome);
+});
+
+// What a host reports for a message its workflow handled while a choice was open (agent-dispatch failure mode "Requester answers
+// the choice an Assignment waits on with a selection whose reference matches no open choice, such as one copied from an earlier
+// prompt"): a choice the message left open still waits, whatever the handling's outcome.
+it.each([
+  ["succeeded", { cancelled: false, open: false }, { status: "completed", message: "工作流的回复。" }],
+  ["failed", { cancelled: false, open: false }, { status: "failed", message: "工作流的回复。" }],
+  ["needs_input", { cancelled: false, open: false }, { status: "waiting", message: "工作流的回复。" }],
+  // The workflow asked again on the same choice: its own reply goes out.
+  ["needs_input", { cancelled: false, open: true }, { status: "waiting", message: "工作流的回复。" }],
+  // The message left the choice as it was without the workflow asking again.
+  ["failed", { cancelled: false, open: true }, { status: "waiting", message: "这条选择对应的选项已经结束；这项请求仍在等你选择，请按最新提示回复。" }],
+  ["succeeded", { cancelled: false, open: true }, { status: "waiting", message: "这条选择对应的选项已经结束；这项请求仍在等你选择，请按最新提示回复。" }],
+  ["succeeded", { cancelled: true, open: false }, { status: "cancelled", message: "工作流的回复。" }],
+] as const)("reports a pending answer the workflow handled with %s, its run %j, as %j", (outcome, run, reported) => {
+  expect(pendingChoiceResult({ outcome, reply: "工作流的回复。" }, run)).toEqual(reported);
 });
 
 it("runs every Assignment of a plan at once, announces them in one start message, posts its decisions and closes with every result", async () => {

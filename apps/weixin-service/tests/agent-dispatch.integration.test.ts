@@ -53,7 +53,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 //   case across a restart builds the state such a stop leaves from a failed close; the stop itself is driven only at the dispatch engine.
 // - A message the pending-choice router takes as a new goal while the only open choice is a superseded one, or one of a cancelled
 //   request, replaces nothing and goes to the Coordinator. No case drives it through main: the fixture router never answers with a new
-//   goal. The dispatch engine's own guard is unit-tested. Retest condition: a fixture router that can answer with a new goal, or a live run.
+//   goal. The dispatch engine's own guard is unit-tested for a superseded choice; for a cancelled request's, what keeps the choice from
+//   being replaced is main's routing-only adapter alone. Retest condition: a fixture router that can answer with a new goal, or a live run.
 // - A new goal that replaces the open choice of a waiting Assignment ends only that Assignment. No case drives it through main, for the
 //   same reason; the dispatch engine's cases do. Retest condition: the same.
 // - A new goal that replaces the choice of a request stored before Assignments existed cancels that request, as it did before
