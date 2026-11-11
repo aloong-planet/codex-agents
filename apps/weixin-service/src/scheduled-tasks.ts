@@ -14,7 +14,7 @@ import type { SendTextResult } from "./channel-contract.js";
 import type { NotificationAddress, NotificationDestination, NotificationChannel, NotificationChannelState, OwnerNotificationRoute } from "./notification-channel.js";
 import type { TrustedWorkflowTurn, WorkflowToolRequest } from "./workflow-tool-host.js";
 import { SCHEDULE_TOOL_MEMBERS } from "./scheduled-task-tools.js";
-import { nextInstant, latestInstant, type Schedule } from "./scheduled-time.js";
+import { nextInstant, latestInstant, scheduleText, type Schedule } from "./scheduled-time.js";
 import { WorkflowToolCatalog } from "./workflow-tool-catalog.js";
 
 const catalog = new WorkflowToolCatalog(SCHEDULE_TOOL_MEMBERS);
@@ -46,6 +46,8 @@ export type ScheduledTasksOptions = {
   setTimer?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout> | number;
   clearTimer?: (timer: ReturnType<typeof setTimeout> | number) => void;
   onError?: (error: unknown) => void;
+  /** Called after every round of the scheduler, which every change to a task starts: what tasks exist may have changed. */
+  afterRound?: () => void;
   databasePath: string; now?: () => number;
   readOriginalText(ref: string): string | undefined;
 };
@@ -487,7 +489,12 @@ export class ScheduledTasks {
       const admittedTasks = new Set<string>();
       do { this.wakeRequested = false; await this.performTick(admittedTasks); }
       while (this.wakeRequested && !this.closed);
-    })().finally(() => { this.running = undefined; if (!this.closed && this.started) this.arm(); });
+    })().finally(() => {
+      this.running = undefined;
+      if (this.closed) return;
+      if (this.started) this.arm();
+      try { this.options.afterRound?.(); } catch (error) { this.options.onError?.(error); }
+    });
     this.running = work;
     return work;
   }
@@ -1419,16 +1426,8 @@ export class ScheduledTasks {
       if (task.deletedAt !== undefined) return { status: "error", code: "task_deleted", task: this.taskView(task) };
       if (task.revision !== args.expectedRevision) return { status: "conflict", code: "revision_conflict", task: this.taskView(task) };
       if (tool === "schedules.delete") {
-        const occurrences = this.occurrences().filter((item) => item.taskId === task.id);
-        if (occurrences.some((item) => item.execution === "running" || item.delivery === "sending") || this.notifications().some((item) => item.taskId === task.id && item.delivery === "sending")) {
-          return { status: "busy", code: "task_busy", action: "任务正在执行或提交，暂不能删除；请先停用，等待结果确定后再删除。" };
-        }
-        const deleted = { ...task, enabled: false, nextExecutionAt: null, deletedAt: this.now(), revision: task.revision + 1 };
-        delete deleted.blocker;
-        this.saveTask(deleted);
-        this.stopNewsRetries(deleted);
-        for (const item of occurrences) if (isPending(item)) this.saveOccurrence({ ...item, delivery: "cancelled", reason: "cancelled_by_task_deletion" });
-        for (const item of this.notifications()) if (item.taskId === task.id && item.delivery === "pending") this.saveNotification({ ...item, delivery: "suppressed" });
+        const deleted = this.erase(task);
+        if (!deleted) return { status: "busy", code: "task_busy", action: "任务正在执行或提交，暂不能删除；请先停用，等待结果确定后再删除。" };
         const receipt = { status: "deleted", task: this.taskView(deleted) };
         this.recordOperation(key, requestHash, receipt, trusted);
         return receipt;
@@ -1522,6 +1521,63 @@ export class ScheduledTasks {
       page.push(view); bytes += size;
     }
     return { tasks: page, total: tasks.length, ...(offset + page.length < tasks.length ? { nextOffset: offset + page.length } : {}) };
+  }
+
+  /** The tasks that would still send with this identity: not deleted, and not a one-time task already sent (team-management::US-004/AC-03). */
+  sentBy(senderAccountId: string): Array<{ id: string; name: string; when: string; accountId: string; target: string }> {
+    return this.tasks().filter((task) => task.notificationDestination?.senderAccountId === senderAccountId && !["deleted", "completed"].includes(this.taskLifecycle(task)))
+      .map((task) => ({ id: task.id, name: task.name, when: scheduleText(task.schedule, task.timezone),
+        accountId: task.notificationDestination!.accountId, target: task.notificationDestination!.target }));
+  }
+
+  /** Changes only the identity a task sends with; bodies and notices not yet submitted follow the task (team-management::REQ-005). */
+  reassign(taskId: string, from: string, to: string): "moved" | "busy" | "unknown" {
+    const result = this.transaction(() => {
+      const task = this.sender(taskId, from);
+      if (!task) return "unknown";
+      if (this.busy(task)) return "busy";
+      this.saveTask({ ...task, notificationDestination: { ...task.notificationDestination!, senderAccountId: to }, revision: task.revision + 1 });
+      for (const item of this.occurrences()) {
+        if (item.taskId === task.id && isPending(item) && item.deliveryDestination) this.saveOccurrence({ ...item, deliveryDestination: { ...item.deliveryDestination, senderAccountId: to } });
+      }
+      for (const item of this.notifications()) {
+        if (item.taskId === task.id && item.delivery === "pending" && item.deliveryDestination) this.saveNotification({ ...item, deliveryDestination: { ...item.deliveryDestination, senderAccountId: to } });
+      }
+      return "moved";
+    });
+    if (result === "moved" && this.started) this.wake();
+    return result;
+  }
+
+  /** Deletes a task that sends with this identity, as schedules.delete does: it never runs again and its history stays. */
+  remove(taskId: string, from: string): "deleted" | "busy" | "unknown" {
+    const result = this.transaction(() => {
+      const task = this.sender(taskId, from);
+      return !task ? "unknown" : this.erase(task) ? "deleted" : "busy";
+    });
+    if (result === "deleted") { this.pruneHistory(); if (this.started) this.wake(); }
+    return result;
+  }
+
+  private sender(taskId: string, senderAccountId: string): ScheduledTask | undefined {
+    return this.tasks().find((task) => task.id === taskId && task.deletedAt === undefined && task.notificationDestination?.senderAccountId === senderAccountId);
+  }
+
+  private busy(task: ScheduledTask): boolean {
+    return this.occurrences().some((item) => item.taskId === task.id && (item.execution === "running" || item.delivery === "sending")) ||
+      this.notifications().some((item) => item.taskId === task.id && item.delivery === "sending");
+  }
+
+  /** Inside a transaction. Returns nothing, and changes nothing, while the task is executing or submitting. */
+  private erase(task: ScheduledTask): ScheduledTask | undefined {
+    if (this.busy(task)) return undefined;
+    const deleted = { ...task, enabled: false, nextExecutionAt: null, deletedAt: this.now(), revision: task.revision + 1 };
+    delete deleted.blocker;
+    this.saveTask(deleted);
+    this.stopNewsRetries(deleted);
+    for (const item of this.occurrences()) if (item.taskId === task.id && isPending(item)) this.saveOccurrence({ ...item, delivery: "cancelled", reason: "cancelled_by_task_deletion" });
+    for (const item of this.notifications()) if (item.taskId === task.id && item.delivery === "pending") this.saveNotification({ ...item, delivery: "suppressed" });
+    return deleted;
   }
 
   private taskOccurrence(task: ScheduledTask): ScheduledOccurrence | undefined {

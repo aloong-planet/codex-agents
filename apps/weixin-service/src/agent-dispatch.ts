@@ -37,6 +37,7 @@ type AssignmentStatus = DispatchAssignment["status"];
 const ENDED: readonly AssignmentStatus[] = ["completed", "failed", "cancelled", "interrupted", "blocked"];
 const UNFINISHED: readonly AssignmentStatus[] = ["queued", "running", "waiting"];
 const INTERRUPTED = "服务中断，本次处理已停止。";
+const UNDETERMINED = "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。";
 /**
  * The Coordinator's reply to a control of a request that is no longer active, to an answer to a cancelled request's choice, and to
  * an answer to a superseded choice of a request that has ended.
@@ -44,6 +45,34 @@ const INTERRUPTED = "服务中断，本次处理已停止。";
 const REQUEST_ENDED = "这项请求已经结束或无法继续，请说明新的需求。";
 /** The Coordinator's reply to an answer to a choice that a supplement superseded, while the request goes on with the supplement. */
 const CHOICE_SUPERSEDED = "这次选择已被你的补充取代，不再生效；这项请求会按补充后的要求继续处理。";
+
+/**
+ * How an unfinished request involves a team: how many of its own Assignments are queued or running, how many of its own wait for the
+ * requester, and the titles of the Assignments it waits with, or null when it waits with none.
+ */
+export type TeamInvolvement = Readonly<{ active: number; awaitingRequester: number; waitingFor: readonly string[] | null }>;
+/** A request, or a group post still to be sent, that keeps a team's removal from its group pending (team-management::US-004). */
+export type TeamWork = TeamInvolvement & Readonly<{ requestId: string; summary: string; accountId: string; target: string; requester: string }>;
+/**
+ * Whether an unfinished request still involves `teamId`, and how (team-management::US-004/AC-02, AC-04). The lead team is
+ * involved until the request ends, because it closes it. Another team is involved from the attempt that gives it work until its
+ * Team Leader has closed its Assignments in that attempt. A proposal has no Assignment and involves no team. The lead waits
+ * with every waiting Assignment of the request, another team only with its own.
+ */
+export function teamInvolvement(job: Pick<DispatchJob, "agentId" | "status" | "attempt" | "reports">,
+  assignments: ReadonlyArray<Pick<DispatchAssignment, "teamId" | "status" | "attempt" | "title">>, teamId: string): TeamInvolvement | undefined {
+  if (job.status !== "queued" && job.status !== "running" && job.status !== "waiting") return undefined;
+  const lead = job.agentId === teamId;
+  const own = assignments.filter((assignment) => assignment.teamId === teamId);
+  if (!lead) {
+    if (!own.some(({ attempt }) => attempt === job.attempt)) return undefined;
+    if (!own.some(({ status }) => UNFINISHED.includes(status)) && job.reports?.[teamId]?.attempt === job.attempt) return undefined;
+  }
+  const waiting = (lead ? assignments : own).filter(({ status }) => status === "waiting");
+  return { active: own.filter(({ status }) => status === "queued" || status === "running").length,
+    awaitingRequester: own.filter(({ status }) => status === "waiting").length,
+    waitingFor: waiting.length ? waiting.map(({ title }) => title) : null };
+}
 
 /** How an Assignment failed, as far as the host knows it. */
 export type AssignmentFailure = Readonly<{ kind: "reported"; toolRefused: boolean }> | Readonly<{ kind: "error"; error: unknown }> | Readonly<{ kind: "shutdown" }>;
@@ -224,6 +253,8 @@ export class AgentDispatch {
      * reports a message addressed to that choice as held.
      */
     pending?(event: InboundContent, held: (runRef: string) => boolean): Promise<DispatchPendingResult>;
+    /** Called when work that may have involved a team has ended: after startup, the queued messages of a conversation, a request's worker and a cross-team closing. */
+    workChanged?(): void;
     /**
      * Closes every choice the request's Executors left open, so that no later answer resumes work its requester cancelled or
      * superseded with a supplement. `assignments` are the request's own; a request stored before Assignments existed has none.
@@ -269,6 +300,7 @@ export class AgentDispatch {
     for (const row of this.database.prepare("SELECT id, payload FROM dispatch_notice WHERE state = 'queued' ORDER BY sequence").all()) {
       await this.deliverNotice(String(row.id), JSON.parse(String(row.payload)) as Notice);
     }
+    this.changed();
     this.kick();
   }
 
@@ -296,6 +328,27 @@ export class AgentDispatch {
       byRequest.set(String(row.request_id), list);
     }
     return this.jobs().map((job) => ({ job, assignments: this.assignments(job.id), posts: byRequest.get(job.id) ?? [] }));
+  }
+
+  /**
+   * What still involves `teamId`, one entry per request: each unfinished request under `teamInvolvement`, and each request with
+   * a group post under the team's identity that is recorded but not yet sent. The second keeps a team's identity until its last
+   * closing has gone out: a post is cancelled once its sender left the definitions.
+   */
+  involving(teamId: string): TeamWork[] {
+    const work = new Map<string, TeamWork>();
+    for (const job of this.jobs()) {
+      const involvement = teamInvolvement(job, this.assignments(job.id), teamId);
+      if (involvement) work.set(job.id, { requestId: job.id, summary: job.summary, accountId: job.event.accountId, target: job.event.target, requester: job.event.senderId ?? "", ...involvement });
+    }
+    for (const row of this.database.prepare("SELECT id, payload, request_id FROM dispatch_notice WHERE state IN ('queued', 'sending') ORDER BY sequence").all()) {
+      const notice = JSON.parse(String(row.payload)) as Notice;
+      const requestId = String(row.request_id ?? row.id);
+      if (notice.agentId !== teamId || work.has(requestId)) continue;
+      work.set(requestId, { requestId, summary: this.job(requestId)?.summary ?? "", accountId: notice.event.accountId, target: notice.event.target,
+        requester: notice.event.senderId ?? "", active: 0, awaitingRequester: 0, waitingFor: null });
+    }
+    return [...work.values()];
   }
 
   /**
@@ -364,7 +417,7 @@ export class AgentDispatch {
       const target = String(row.target);
       if (this.intake.has(target)) continue;
       const operation = this.processInputs(target).catch(() => this.failure("dispatch_intake_failed"))
-        .finally(() => { this.intake.delete(target); });
+        .finally(() => { this.intake.delete(target); this.changed(); });
       this.intake.set(target, operation);
     }
     for (const job of this.jobs()) {
@@ -373,7 +426,7 @@ export class AgentDispatch {
       })) continue;
       const abort = new AbortController();
       const operation = this.execute(job, abort.signal).catch(() => this.failure("dispatch_execution_record_failed"))
-        .finally(() => { this.workers.delete(job.id); this.kick(); });
+        .finally(() => { this.workers.delete(job.id); this.changed(); this.kick(); });
       this.workers.set(job.id, { operation, abort });
     }
   }
@@ -387,13 +440,14 @@ export class AgentDispatch {
       this.database.prepare("UPDATE dispatch_input SET state = 'classifying' WHERE id = ?").run(event.key);
       // Only teams accepting work in this group can be routed to or named; a mention of another team confers no priority.
       const accepting = new Set(this.options.roster(event).map(({ id }) => id));
-      const agents = this.options.agents().filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
-      const mentioned = event.mentionedAgentIds?.filter((id) => agents.some((agent) => agent.id === id));
+      let agents = this.options.agents().filter(({ id }) => id === COORDINATOR_ID || accepting.has(id));
+      let mentioned = event.mentionedAgentIds?.filter((id) => agents.some((agent) => agent.id === id));
       if ((mentioned?.length ?? 0) > 1) {
         await this.coordinate(event, bindingHash, "你点名了多个 Agent。这项事务希望由谁独立负责？");
         this.finishInput(event.key); continue;
       }
-      const input = { event: mentioned ? { ...event, mentionedAgentIds: mentioned } : event, agents: agents.map(({ id, name, responsibility }) => ({ id, name, responsibility })),
+      const offer = () => ({ event: mentioned ? { ...event, mentionedAgentIds: mentioned } : event, agents: agents.map(({ id, name, responsibility }) => ({ id, name, responsibility })) });
+      let input = { ...offer(),
         requests: this.jobs().filter((job) => job.event.target === event.target && job.event.senderId === event.senderId)
           .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })),
         memory: this.options.memory.recall(this.options.memoryScope, event, event.text) };
@@ -447,7 +501,18 @@ export class AgentDispatch {
           await this.deliverNotice(`${event.key}:pending`, shown);
           this.finishInput(event.key); this.kick(); continue;
         }
-        const decision = parseDispatchDecision(await this.options.classifier.classify(input), input);
+        let decision = parseDispatchDecision(await this.options.classifier.classify(input), input);
+        // A team that stopped accepting work in the group while the message was being classified is offered no longer, and a
+        // mention of it confers no priority: the message is classified again among the teams still accepting, as one arriving
+        // now would be (agent-dispatch::REQ-015/AC-01). The offer only shrinks, so this ends.
+        while (!this.closing && this.eligible(event, bindingHash)) {
+          const still = new Set(this.options.roster(event).map(({ id }) => id));
+          if (agents.every(({ id }) => id === COORDINATOR_ID || still.has(id))) break;
+          agents = agents.filter(({ id }) => id === COORDINATOR_ID || still.has(id));
+          mentioned = mentioned?.filter((id) => agents.some((agent) => agent.id === id));
+          input = { ...input, ...offer() };
+          decision = parseDispatchDecision(await this.options.classifier.classify(input), input);
+        }
         if (!this.eligible(event, bindingHash) || this.closing) { this.finishInput(event.key); continue; }
         if (decision.kind === "dispatch" || decision.kind === "propose") {
           const agent = agents.find((candidate) => candidate.id === decision.agentId)!;
@@ -458,8 +523,18 @@ export class AgentDispatch {
             // The request's ID is its message key, so these posts belong to the request saved below.
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation, requestId: event.key });
             if (!informed.ok) { this.finishInput(event.key); continue; }
+            // The explanation took time. A team that stopped accepting work in the group meanwhile takes no request: the
+            // Coordinator announces no reassignment and asks what is wanted instead.
+            const left = () => !this.options.roster(event).some(({ id }) => id === agent.id);
+            if (left()) { await this.coordinate(event, bindingHash, UNDETERMINED); this.finishInput(event.key); continue; }
             const reassigned = await this.coordinate(event, bindingHash, `已将这项需求转派给 ${agent.name}。`, event.key);
             if (!reassigned.ok) { this.finishInput(event.key); continue; }
+            // So did that notice, the Coordinator's one reply to this message: for a team that left during it, the
+            // Coordinator asks in a post of its own.
+            if (left()) {
+              await this.deliverNotice(`${event.key}:scope:unavailable`, { event, bindingHash, agentId: coordinator.id, senderAccountId: coordinator.senderAccountId, text: UNDETERMINED });
+              this.finishInput(event.key); continue;
+            }
           }
           if (!this.job(event.key)) this.save({ id: event.key, event, bindingHash, agentId: agent.id, senderAccountId: agent.senderAccountId,
             summary: decision.summary, status: decision.kind === "propose" ? "proposed" : "queued", attempt: 0 });
@@ -467,7 +542,9 @@ export class AgentDispatch {
             `要不要请 ${agent.name} 帮你${decision.summary}？请回复这条建议确认，或告诉我暂时不用。`, event.key);
         } else if (decision.kind === "confirm" || decision.kind === "decline") {
           const job = this.job(decision.requestId!);
-          if (!job || job.status !== "proposed" || job.event.senderId !== event.senderId || job.event.target !== event.target || !this.eligible(job.event, job.bindingHash)) {
+          // A proposal is confirmed only for a team that still accepts work in the group; declining it needs no team.
+          const available = decision.kind === "decline" || (job !== undefined && this.options.roster(job.event).some(({ id }) => id === job.agentId));
+          if (!job || job.status !== "proposed" || job.event.senderId !== event.senderId || job.event.target !== event.target || !this.eligible(job.event, job.bindingHash) || !available) {
             await this.coordinate(event, bindingHash, "这条建议现在无法确认，请说明要处理的事务。");
           } else {
             job.status = decision.kind === "confirm" ? "queued" : "cancelled";
@@ -537,6 +614,8 @@ export class AgentDispatch {
             if (previous?.state === "rejected" && retried.every((notice) => notice.state === "rejected")) {
               await this.deliverNotice(`${originalId}:retry:${event.key}`, JSON.parse(String(previous.payload)) as Notice);
             } else await this.coordinate(event, bindingHash, "这条汇报已被接收或发送结果无法确认，不能自动重发。业务操作不会重新执行。");
+          } else if ((job.status === "failed" || job.status === "partially_failed" || job.status === "partially_unassigned") && !this.retryable(job)) {
+            await this.coordinate(event, bindingHash, "无法继续这项请求，请说明需要处理的事务。");
           } else if (job.status === "failed" || job.status === "partially_failed" || job.status === "partially_unassigned") {
             // A retry reruns the failed and interrupted Assignments of every team, each with its Executor, and then the dependents
             // they left not started, in dependency order, and asks the Coordinator again for the parts no team took. A request that
@@ -558,11 +637,22 @@ export class AgentDispatch {
           await this.coordinate(event, bindingHash, decision.message || "你指的是哪件事，希望得到什么结果？确认后我会交给合适的 Agent。");
         }
       } catch {
-        if (!this.closing && this.eligible(event, bindingHash)) await this.coordinate(event, bindingHash, "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。");
+        if (!this.closing && this.eligible(event, bindingHash)) await this.coordinate(event, bindingHash, UNDETERMINED);
       }
       this.finishInput(event.key);
       this.kick();
     }
+  }
+
+  /**
+   * Whether a retry of the request may run: its lead team, which plans or answers again and closes it, and every team whose
+   * Assignment the retry would rerun must still accept work in the request's group. A team that stopped accepting work there
+   * is draining or was removed, and takes no work back (agent-dispatch::REQ-015/AC-01, team-management::US-004/AC-01).
+   */
+  private retryable(job: DispatchJob): boolean {
+    const accepting = new Set(this.options.roster(job.event).map(({ id }) => id));
+    return [job.agentId, ...this.assignments(job.id).filter(({ status }) => status === "failed" || status === "interrupted" || status === "blocked").map(({ teamId }) => teamId)]
+      .every((id) => accepting.has(id));
   }
 
   private async execute(job: DispatchJob, signal: AbortSignal): Promise<void> {
@@ -641,8 +731,12 @@ export class AgentDispatch {
       accepting(job.agentId);
       const plan = await this.options.leader.plan(this.leaderInput(job, team), 0);
       cancelled();
+      // The request holds its lead's removal, but a lead that stopped accepting work during its plan turn, or while the parts it
+      // asked for were placed, gets no new Assignment either.
+      accepting(job.agentId);
       const added = toPlanned(plan.assignments, job.agentId);
       const placed = await this.place(job, plan.help, added.length, views, signal);
+      accepting(job.agentId);
       this.addAssignments(job, views, { added: [...added, ...placed.added], affected: [], decisions: { texts: plan.decisions, byTeam: placed.decisions },
         parts: placed.parts, needs: placed.needs });
       return;
@@ -661,10 +755,13 @@ export class AgentDispatch {
     for (const teamId of relayed) {
       const view = this.options.team(teamId, job.definitionsVersion!);
       if (!view) throw new Error("dispatch_team_unavailable");
+      // A team that stopped accepting work in the group answers no supplement, and the answer of one that stopped during its
+      // turn is not used, whether it adds Assignments or only reruns some: the attempt fails, and so does a retry of it.
+      accepting(teamId);
       const theirs = this.leaderView(job.id, teamId);
       const reply = await this.options.leader.supplement(this.leaderInput(job, view, this.crossRelay(job, teamId)), shown(theirs), text, assignments.length + added.length);
       cancelled();
-      if (reply.assignments.length) accepting(teamId);
+      accepting(teamId);
       affected.push(...reply.affected.map((position) => theirs[position - 1]!.id));
       added.push(...toPlanned(reply.assignments, teamId, theirs));
       byTeam[teamId] = reply.decisions;
@@ -672,6 +769,11 @@ export class AgentDispatch {
       views.set(teamId, view);
     }
     const placed = await this.place(job, answer.help, assignments.length + added.length, views, signal);
+    // A relayed team's Assignments are of an earlier attempt until this division is stored, so they did not hold its removal
+    // through the turns that followed its own.
+    for (const teamId of relayed) accepting(teamId);
+    // Nor does the lead get the Assignments its answer adds, if it stopped accepting work during those turns.
+    if (answer.assignments.length) accepting(job.agentId);
     for (const [teamId, texts] of Object.entries(placed.decisions)) byTeam[teamId] = [...(byTeam[teamId] ?? []), ...texts];
     this.addAssignments(job, views, { added: [...added, ...placed.added], affected, decisions: { texts: answer.decisions, byTeam },
       parts: [...(job.parts ?? []), ...placed.parts], needs: [...(job.needs ?? []), ...needs, ...placed.needs] });
@@ -680,7 +782,8 @@ export class AgentDispatch {
   /**
    * Places the parts the lead asked other teams to take (agent-dispatch::REQ-013/AC-02): the Coordinator chooses among the
    * teams accepting work in the group, and each chosen team's Team Leader plans its part. `planned` counts the request's
-   * Assignments so far, for the ceiling. A part the Coordinator places with no team, or whose decision is invalid, is not taken.
+   * Assignments so far, for the ceiling. A part the Coordinator places with no team, or whose decision is invalid, or whose team
+   * stops accepting work in the group before its plan is returned, is not taken.
    * A cross-team Team Leader's own help requests are not placed; they are kept as needs for the lead (agent-dispatch::REQ-013/AC-01).
    */
   private async place(job: DispatchJob, help: readonly LeaderHelp[], planned: number, views: Map<string, DispatchTeamView>, signal: AbortSignal) {
@@ -703,7 +806,13 @@ export class AgentDispatch {
       if (signal.aborted) throw new Error("dispatch_cancelled");
     }
     placed.parts = help.map((part, index) => ({ ...part, attempt: job.attempt, teamId: decisions[index]!.agentId, summary: decisions[index]!.summary }));
-    for (const teamId of [...new Set(placed.parts.map(({ teamId: id }) => id).filter((id): id is string => id !== null))]) {
+    const chosen = [...new Set(placed.parts.map(({ teamId: id }) => id).filter((id): id is string => id !== null))];
+    // Until its plan is stored, a chosen team has no Assignment of the request, and nothing holds its removal from the group.
+    const accepts = (teamId: string) => this.options.roster(job.event).some(({ id }) => id === teamId);
+    const left = new Set<string>();
+    for (const teamId of chosen) {
+      // One that stopped accepting work there since it was offered plans nothing, and has left even if it accepts work again later.
+      if (!accepts(teamId)) { left.add(teamId); continue; }
       const view = this.options.team(teamId, job.definitionsVersion!)!;
       const plan = await this.options.leader.plan(this.leaderInput(job, view, this.crossRelay(job, teamId, placed.parts)), planned + placed.added.length);
       if (signal.aborted) throw new Error("dispatch_cancelled");
@@ -712,7 +821,12 @@ export class AgentDispatch {
       placed.needs.push(...plan.help.map((need) => ({ teamId, ...need })));
       views.set(teamId, view);
     }
-    return placed;
+    // One that stopped during a plan turn, its own or a later team's, has its plan dropped. Either way its parts are not taken.
+    for (const teamId of chosen) if (!accepts(teamId)) left.add(teamId);
+    if (!left.size) return placed;
+    for (const teamId of left) delete placed.decisions[teamId];
+    return { ...placed, added: placed.added.filter(({ teamId }) => !left.has(teamId)), needs: placed.needs.filter(({ teamId }) => !left.has(teamId)),
+      parts: placed.parts.map((part) => part.teamId !== null && left.has(part.teamId) ? { ...part, teamId: null, summary: "" } : part) };
   }
 
   /**
@@ -988,7 +1102,7 @@ export class AgentDispatch {
         `${text}\n结果经 ${this.coordinator().name} 交回 ${this.agentName(job.agentId)} 汇总。`), requestId } };
       this.transaction(() => { (job.reports ??= {})[teamId] = { attempt: job.attempt, text }; this.save(job); this.queueNotice(post.id, post.notice); });
       await this.deliverNotice(post.id, post.notice);
-    } finally { this.closingTeams.delete(key); }
+    } finally { this.closingTeams.delete(key); this.changed(); }
   }
 
   /**
@@ -1214,6 +1328,7 @@ export class AgentDispatch {
   private save(job: DispatchJob) { this.database.prepare("INSERT INTO dispatch_job VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload").run(job.id, JSON.stringify(job)); }
   private finishInput(id: string) { this.database.prepare("UPDATE dispatch_input SET state = 'completed' WHERE id = ?").run(id); }
   private eligible(event: InboundContent, bindingHash: string): boolean { return this.options.authorized(event) && this.options.bindingHash(event) === bindingHash; }
+  private changed() { if (this.closing) return; try { this.options.workChanged?.(); } catch { this.failure("dispatch_work_change_failed"); } }
   private failure(code: string) { try { this.options.report(code); } catch { /* Diagnostics cannot change task outcomes. */ } }
 }
 

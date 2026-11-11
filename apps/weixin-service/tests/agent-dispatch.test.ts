@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { AgentDispatch, boundedPrerequisites, failureCause, requestOutcome, type AssignmentFailure } from "../src/agent-dispatch.js";
+import { AgentDispatch, boundedPrerequisites, failureCause, requestOutcome, teamInvolvement, type AssignmentFailure } from "../src/agent-dispatch.js";
 import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { CodexTeamLeader, type TeamLeader } from "../src/agent-dispatch-leader.js";
-import type { CrossTeamInput, DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob, DispatchPendingResult } from "../src/agent-dispatch-types.js";
+import type { CrossTeamInput, DispatchAgent, DispatchAssignment, DispatchClassificationInput, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob, DispatchPendingResult } from "../src/agent-dispatch-types.js";
 import { FixtureTeamLeader } from "../src/fixture-team-leader.js";
 import type { DispatchMemoryTurn } from "../src/agent-dispatch.js";
 import type { AgentMemoryScope } from "../src/agent-profile.js";
@@ -64,23 +64,26 @@ type Capture = { scope: AgentMemoryScope } & DispatchMemoryTurn;
  * request for the team it names. `rejected` lists delivery operations refused once; `outcome` answers any other delivery it
  * returns a result for, and the rest are accepted; `failingCapture` names a memory scope kind whose captures reject; `pending`
  * stands in for the workflow's pending-choice handling; a send whose message `sending` gives a promise for ends only when that
- * promise does.
+ * promise does; `classifying` sees each classification's input as its turn starts; `authorized` says whether senders are still
+ * authorized, which they are by default.
  */
 function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecutor, deliveries: Array<{ sender: string; message: string; id: string }>,
   options: { roster?: readonly string[]; captures?: Capture[]; rejected?: Set<string>; failingCapture?: AgentMemoryScope["kind"]; sending?: (message: string) => Promise<void> | undefined;
     outcome?: (delivery: Parameters<DispatchDelivery>[0]) => SendTextResult | Promise<SendTextResult> | undefined;
     pending?: (event: InboundContent, held: (runRef: string) => boolean) => Promise<DispatchPendingResult>; closeChoices?: (job: DispatchJob, assignments: readonly DispatchAssignment[]) => Promise<void>;
     profile?: { name: string; noun?: string }; completedWork?: string;
-    delivered?: (message: string) => void; assign?: DispatchClassifier["assign"]; definitionsVersion?: () => number; agents?: DispatchAgent[]; team?: typeof team;
-    revision?: () => string; teams?: (definitionsVersion: number) => readonly string[] } = {}) {
+    delivered?: (message: string) => void | Promise<void>; assign?: DispatchClassifier["assign"]; definitionsVersion?: () => number; agents?: DispatchAgent[]; team?: typeof team;
+    revision?: () => string; teams?: (definitionsVersion: number) => readonly string[];
+    workChanged?: () => void; classifying?: (input: DispatchClassificationInput) => void; authorized?: () => boolean } = {}) {
   const roster = options.roster ?? accepting;
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
     agents: () => options.agents ?? agents, leader, executor, definitionsVersion: options.definitionsVersion ?? (() => 1), revision: options.revision ?? (() => "r1"),
     teams: options.teams ?? (() => ["alice", "bill", "jack"]),
     team: (id, version) => { const view = (options.team ?? team)(id, version); return view && options.profile ? { ...view, profiles: [{ id: "executor-1", capabilities: [], ...options.profile }] } : view; },
     roster: () => roster.map((id) => ({ id, name: team(id)!.leader.teamName, responsibility: team(id)!.leader.responsibility })),
-    classifier: { classify: async ({ event: inbound }) => {
-      const [kind, argument] = inbound.text.split(":");
+    classifier: { classify: async (input) => {
+      options.classifying?.(input);
+      const inbound = input.event, [kind, argument] = inbound.text.split(":");
       classified.push(argument === undefined ? "dispatch" : kind!);
       if (argument === undefined) return { kind: "dispatch", agentId: inbound.text, requestId: null, summary: `${inbound.text} 的请求`, message: "" };
       if (kind === "propose") return { kind: "propose", agentId: argument, requestId: null, summary: "整理商品文案", message: "" };
@@ -88,7 +91,7 @@ function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecut
     }, assign: options.assign ?? (async () => { throw new Error("cross_team_not_expected"); }) },
     delivery: async (delivery) => {
       const { senderAccountId, message, operationId } = delivery;
-      deliveries.push({ sender: senderAccountId, message, id: operationId }); options.delivered?.(message);
+      deliveries.push({ sender: senderAccountId, message, id: operationId }); await options.delivered?.(message);
       const sent = options.sending?.(message);
       if (sent) await sent;
       if (options.rejected?.delete(operationId)) return { ok: false, reason: "rejected", acceptedSegments: 0 };
@@ -99,7 +102,8 @@ function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecut
       options.captures?.push({ scope, ...turn });
     } },
     ...(options.pending ? { pending: options.pending } : {}), ...(options.closeChoices ? { closeChoices: options.closeChoices } : {}),
-    authorized: () => true, bindingHash: () => "binding-alpha", completedWork: () => options.completedWork ?? "",
+    ...(options.workChanged ? { workChanged: options.workChanged } : {}),
+    authorized: () => options.authorized?.() ?? true, bindingHash: () => "binding-alpha", completedWork: () => options.completedWork ?? "",
     presentation: () => undefined, presented: () => {}, report: () => {},
   });
   open.push(dispatch);
@@ -1294,11 +1298,11 @@ const leadPlan = { assignments: three.assignments.slice(0, 2), decisions: [] as 
 const billPlan = { assignments: [{ profileId: "executor-1", title: "编写脚本", brief: "写上架脚本" }, { profileId: "executor-2", title: "核对接口", brief: "核对上架接口" }],
   decisions: [] as string[], help: [] as Array<{ title: string; brief: string }> };
 type TeamTurns = Record<string, { plans?: unknown[]; supplement?: unknown; closing?: unknown }>;
-/** Fixture Team Leaders answering from `turns` by team; `onPlan` sees each plan turn's team as it starts. */
-function teamLeaders(turns: TeamTurns, onPlan?: (teamId: string) => void) {
+/** Fixture Team Leaders answering from `turns` by team; `onPlan` and `onSupplement` see each such turn's team as it starts. */
+function teamLeaders(turns: TeamTurns, onPlan?: (teamId: string) => void, onSupplement?: (teamId: string) => void) {
   return new FixtureTeamLeader({
     leaderPlan: (_message, teamId) => { onPlan?.(teamId); const plans = turns[teamId]?.plans; return plans?.length ? structuredClone(plans.length > 1 ? plans.shift() : plans[0]) : undefined; },
-    leaderSupplement: (_message, teamId) => next(turns[teamId]?.supplement), leaderClosing: (_message, teamId) => next(turns[teamId]?.closing) });
+    leaderSupplement: (_message, teamId) => { onSupplement?.(teamId); return next(turns[teamId]?.supplement); }, leaderClosing: (_message, teamId) => next(turns[teamId]?.closing) });
 }
 /** The next of a list of injected outputs, one per turn, the last repeating; a single value repeats. */
 function next(value: unknown) {
@@ -1508,6 +1512,397 @@ it("posts a cross-team failure under its own Team Leader, and a retry reruns it 
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
   expect(runs.slice(4)).toEqual(["编写脚本:1"]);
   expect(posts(deliveries).slice(6)).toEqual(["cli_bill: 我安排执行者 3（能力档 1）处理：编写脚本。完成后经 Sam 交回 Alice 汇总。", `cli_bill: ${BILL_CLOSED}`, "cli_alice: ALICE_CLOSING"]);
+});
+
+// Removal and deletion (team-management::US-004): what keeps a team's removal pending, and what a team that left may still do.
+type Involved = Parameters<typeof teamInvolvement>;
+const part = (teamId: string, status: DispatchAssignment["status"], attempt = 0, title = "处理请求") => ({ teamId, status, attempt, title });
+it.each<[string, Involved[0], Involved[1], string, ReturnType<typeof teamInvolvement>]>([
+  ["no team in a proposal", { agentId: "alice", status: "proposed", attempt: 0 }, [], "alice", undefined],
+  ["no team once the request ended", { agentId: "alice", status: "partially_failed", attempt: 0 }, [part("alice", "failed"), part("bill", "completed")], "alice", undefined],
+  ["its lead with the Assignments it still runs", { agentId: "alice", status: "running", attempt: 0 },
+    [part("alice", "queued"), part("alice", "running"), part("alice", "completed"), part("bill", "running")], "alice", { active: 2, awaitingRequester: 0, waitingFor: null }],
+  ["its lead before it divided the request and until it closed it", { agentId: "alice", status: "queued", attempt: 0 }, [], "alice", { active: 0, awaitingRequester: 0, waitingFor: null }],
+  ["its lead with another team's waiting Assignment", { agentId: "alice", status: "waiting", attempt: 0 },
+    [part("alice", "completed"), part("bill", "waiting", 0, "编写脚本")], "alice", { active: 0, awaitingRequester: 0, waitingFor: ["编写脚本"] }],
+  ["its lead with its own waiting Assignments beside the ones it still runs", { agentId: "alice", status: "running", attempt: 0 },
+    [part("alice", "running"), part("alice", "waiting", 0, "选择文件"), part("alice", "waiting", 0, "确认预算"), part("bill", "waiting", 0, "编写脚本")], "alice",
+    { active: 1, awaitingRequester: 2, waitingFor: ["选择文件", "确认预算", "编写脚本"] }],
+  ["another team with its own running Assignment only", { agentId: "alice", status: "running", attempt: 0 },
+    [part("alice", "waiting", 0, "整理文案"), part("bill", "running"), part("bill", "completed")], "bill", { active: 1, awaitingRequester: 0, waitingFor: null }],
+  ["another team with its own waiting Assignment", { agentId: "alice", status: "running", attempt: 0 },
+    [part("alice", "running"), part("bill", "waiting", 0, "编写脚本")], "bill", { active: 0, awaitingRequester: 1, waitingFor: ["编写脚本"] }],
+  ["another team whose Assignments ended until its Team Leader closed them in this attempt", { agentId: "alice", status: "running", attempt: 1, reports: { bill: { attempt: 0, text: "旧收尾" } } },
+    [part("alice", "running", 1), part("bill", "completed", 1)], "bill", { active: 0, awaitingRequester: 0, waitingFor: null }],
+  ["no other team that closed its Assignments in this attempt", { agentId: "alice", status: "running", attempt: 1, reports: { bill: { attempt: 1, text: "收尾" } } },
+    [part("alice", "running", 1), part("bill", "completed", 1)], "bill", undefined],
+  ["no other team whose work ended in an earlier attempt", { agentId: "alice", status: "running", attempt: 1 }, [part("alice", "running", 1), part("bill", "completed", 0)], "bill", undefined],
+  ["no team without an Assignment in it", { agentId: "alice", status: "running", attempt: 0 }, [part("alice", "running"), part("bill", "running")], "jack", undefined],
+])("a request involves %s", (_case, job, assignments, teamId, expected) => {
+  expect(teamInvolvement(job, assignments, teamId)).toEqual(expected);
+});
+
+it("keeps a team involved until its closing has gone out, and reports each end of work as it happens", async () => {
+  const sending = deferred(), release = deferred(), leadGate = deferred();
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    if (assignment.teamId === "alice") await leadGate.promise;
+    return { status: "completed", message: "完成" };
+  }, close: () => {} };
+  const observed: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), teamLeaders(crossTurns()), executor, deliveries, { assign: toBill,
+    workChanged: () => { observed.push(`alice ${dispatch.involving("alice").length}, bill ${dispatch.involving("bill").length}`); },
+    delivered: async (message) => { if (message === BILL_CLOSED) { sending.resolve(); await release.promise; } } });
+  await dispatch.start();
+  expect(observed).toEqual(["alice 0, bill 0"]);
+  dispatch.admit(event("one", "alice"));
+  await sending.promise;
+  // Bill's Assignments ended and its closing is recorded but not sent: deleting its team now would cancel the post.
+  const work = { requestId: "one", summary: "alice 的请求", accountId: "cli_sam", target: "feishu.group.oc_alpha", requester: "ou_owner" };
+  expect(dispatch.involving("bill")).toEqual([{ ...work, active: 0, awaitingRequester: 0, waitingFor: null }]);
+  observed.splice(0);
+  release.resolve();
+  // The cross-team closing reports the change while the lead's Executors still run.
+  await vi.waitFor(() => expect(observed).toEqual(["alice 1, bill 0"]), { timeout: 2000, interval: 10 });
+  expect(dispatch.involving("alice")).toEqual([{ ...work, active: 2, awaitingRequester: 0, waitingFor: null }]);
+  leadGate.resolve();
+  await vi.waitFor(() => expect(observed.at(-1)).toBe("alice 0, bill 0"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]?.status).toBe("completed");
+});
+
+it("reports the end of a waiting request that a message of its requester cancels", async () => {
+  const executor: DispatchExecutor = { run: async () => ({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }), close: () => {} };
+  const observed: number[] = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, [], { workChanged: () => { observed.push(dispatch.involving("alice").length); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  expect(dispatch.involving("alice")).toEqual([expect.objectContaining({ requestId: "one", active: 0, awaitingRequester: 1, waitingFor: ["处理请求"] })]);
+  dispatch.admit(event("two", "cancel:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(observed.at(-1)).toBe(0), { timeout: 2000, interval: 10 });
+});
+
+// Decision 2026-11-11 (a): a team that stopped accepting work in the group takes none back, whether it drains there or was removed.
+it.each([
+  ["its lead team drains", "alice", false],
+  ["a team whose Assignment it would rerun was removed", "bill", true],
+] as const)("requeues nothing on a retry when %s, and the Coordinator says the request cannot continue", async (_case, leaving, removed) => {
+  const runs: string[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    runs.push(`${assignment.title}:${assignment.attempt}`);
+    return assignment.title === "编写脚本" ? { status: "failed", message: "接口文档无法访问" } : { status: "completed", message: "完成" };
+  }, close: () => {} };
+  const roster = [...accepting], current = [...agents];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), teamLeaders(crossTurns()), executor, deliveries, { assign: toBill, roster, agents: current });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("partially_failed"), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(dispatch.involving("alice")).toEqual([]), { timeout: 2000, interval: 10 });
+  roster.splice(roster.indexOf(leaving), 1);
+  if (removed) current.splice(current.findIndex(({ id }) => id === leaving), 1);
+  const before = { runs: [...runs], assignments: dispatch.getState().jobs[0]?.assignments };
+  dispatch.admit(event("two", "retry:one"));
+  await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe("cli_sam: 无法继续这项请求，请说明需要处理的事务。"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]).toEqual(expect.objectContaining({ status: "partially_failed", attempt: 0, assignments: before.assignments }));
+  expect(runs).toEqual(before.runs);
+});
+
+// Decision 2026-11-11 (h): a proposal is confirmed only for a team that still accepts work in the group; declining it needs no team.
+it("queues nothing when a proposal is confirmed after its team stopped accepting work, and it can still be declined", async () => {
+  const runs: string[] = [], roster = [...accepting];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; }, close: () => {} },
+    deliveries, { roster });
+  await dispatch.start();
+  dispatch.admit(event("one", "propose:alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("proposed"), { timeout: 2000, interval: 10 });
+  roster.splice(roster.indexOf("alice"), 1);
+  dispatch.admit(event("two", "confirm:one"));
+  await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe("cli_sam: 这条建议现在无法确认，请说明要处理的事务。"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]).toEqual(expect.objectContaining({ status: "proposed", attempt: 0, assignments: [] }));
+  dispatch.admit(event("three", "decline:one"));
+  await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe("cli_sam: 好的，这条建议暂不处理。"), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]?.status).toBe("cancelled");
+  expect(runs).toEqual([]);
+});
+
+// Decision 2026-11-11 (i): a supplement is relayed only to a team that still accepts work in the group.
+it("runs no turn for a part's team that stopped accepting work when a supplement affects its part: the attempt fails under the lead, and so does a retry", async () => {
+  const turns = crossTurns();
+  turns.alice!.supplement = { affected: [], assignments: [], decisions: [], parts: [1], help: [] };
+  turns.bill!.supplement = { affected: [2], assignments: [], decisions: [], parts: [], help: [] };
+  const leader = teamLeaders(turns);
+  const gate = deferred();
+  const runs: string[] = [], roster = [...accepting];
+  const executor: DispatchExecutor = { run: async (_job, assignment) => { runs.push(`${assignment.title}:${assignment.attempt}`); await gate.promise; return { status: "completed", message: "完成" }; }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { assign: toBill, roster });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toHaveLength(4), { timeout: 2000, interval: 10 });
+  roster.splice(roster.indexOf("bill"), 1);
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  const unavailable = () => posts(deliveries).filter((post) => post === "cli_alice: 负责团队当前不可用，本次未能继续处理。已完成的操作不会自动重复，请补充信息后明确让我重试。");
+  await vi.waitFor(() => expect([dispatch.getState().jobs[0]?.status, unavailable().length]).toEqual(["failed", 1]), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("three", "retry:one"));
+  await vi.waitFor(() => expect([dispatch.getState().jobs[0]?.status, unavailable().length]).toEqual(["failed", 2]), { timeout: 2000, interval: 10 });
+  expect(leaderTurns(leader, "supplement", "bill")).toEqual([]);
+  expect(runs).toHaveLength(4);
+});
+
+/** Takes a team out of a case's roster, as the owner unchecking the group, or deleting the team, does. */
+const leaves = (roster: string[], teamId: string) => { const index = roster.indexOf(teamId); if (index >= 0) roster.splice(index, 1); };
+const UNAVAILABLE = "cli_alice: 负责团队当前不可用，本次未能继续处理。已完成的操作不会自动重复，请补充信息后明确让我重试。";
+
+// A team has no Assignment of a request while one of its parts is being placed with it, so nothing holds its removal then: a
+// team that stops accepting work in the group meanwhile takes nothing (agent-dispatch::REQ-015/AC-01, REQ-017/AC-03).
+it.each([
+  ["the Coordinator places the part: its Team Leader plans nothing", "assign", 0],
+  ["its Team Leader plans the part: the plan is dropped", "plan", 1],
+] as const)("leaves a part untaken when its team stops accepting work in the group while %s", async (_case, during, planTurns) => {
+  const roster = [...accepting], turns = crossTurns();
+  // Bill's plan carries a need of its own, so a plan whose need was kept would show in the lead's relay.
+  turns.bill!.plans = [{ ...billPlan, help: [{ title: "申请接口权限", brief: "上架接口需要授权" }] }];
+  const leader = teamLeaders(turns, (teamId) => { if (during === "plan" && teamId === "bill") leaves(roster, "bill"); });
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; }, close: () => {} },
+    deliveries, { roster, assign: async () => { if (during === "assign") leaves(roster, "bill"); return toBill(); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("partially_unassigned"), { timeout: 2000, interval: 10 });
+  expect(leaderTurns(leader, "plan", "bill")).toHaveLength(planTurns);
+  expect(posts(deliveries)).toEqual(["cli_alice: 我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格\n完成后会在本群汇报。",
+    "cli_alice: ALICE_CLOSING\n自动上架脚本没有团队承接，本次未处理；有团队可以承接后，可以明确要求重试。"]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ teamId }) => teamId)).toEqual(["alice", "alice"]);
+  expect(runs).toEqual(["整理文案", "核对价格"]);
+  expect(leaderTurns(leader, "close", "alice")[0]?.relay).toEqual({ parts: [{ title: HELP.title, team: null }] });
+});
+
+it.each([
+  ["that stops accepting work while another team's Team Leader plans its own part: its plan is dropped", "plan", 1],
+  ["that stopped while the Coordinator placed the parts and accepts work again while another team's Team Leader plans: it planned nothing", "placement", 0],
+] as const)("leaves untaken the part of a team %s, and runs only the other part", async (_case, window, planTurns) => {
+  const turns = crossTurns();
+  turns.alice!.plans = [{ ...leadPlan, help: [HELP, PHOTO] }];
+  turns.bill!.plans = [{ ...billPlan, help: [{ title: "申请接口权限", brief: "上架接口需要授权" }] }];
+  turns.jack = { plans: [{ assignments: [{ profileId: "executor-1", title: "拍摄商品", brief: "白底" }], decisions: [], help: [] }], closing: { message: "JACK_CLOSING" } };
+  const roster = ["alice", "bill", "jack"];
+  // Bill's Team Leader would plan first and Jack's next. Bill's team leaves the roster during Jack's turn, or leaves it while the
+  // Coordinator places the parts and is back on it during Jack's turn.
+  const leader = teamLeaders(turns, (teamId) => { if (teamId !== "jack") return; if (window === "plan") leaves(roster, "bill"); else roster.push("bill"); });
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; }, close: () => {} },
+    deliveries, { roster, assign: async () => { if (window === "placement") leaves(roster, "bill"); return [{ part: 1, agentId: "bill", summary: "S1" }, { part: 2, agentId: "jack", summary: "S2" }]; } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("partially_unassigned"), { timeout: 2000, interval: 10 });
+  expect(roster).toEqual(window === "plan" ? ["alice", "jack"] : ["alice", "jack", "bill"]);
+  expect(leaderTurns(leader, "plan", "bill")).toHaveLength(planTurns);
+  expect(posts(deliveries)).toEqual(["cli_alice: 我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格\n商品拍照需要其他团队支持，已请 Sam 协调。\n完成后会在本群汇报。",
+    "cli_sam: 应 Alice 请求，商品拍照交给 Jack 队；完成后经 Sam 交回 Alice 汇总。", "cli_jack: 我安排执行者 3（能力档 1）处理：拍摄商品。完成后经 Sam 交回 Alice 汇总。",
+    "cli_jack: JACK_CLOSING\n结果经 Sam 交回 Alice 汇总。", "cli_alice: ALICE_CLOSING\n自动上架脚本没有团队承接，本次未处理；有团队可以承接后，可以明确要求重试。"]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ teamId }) => teamId)).toEqual(["alice", "alice", "jack"]);
+  expect(runs).toEqual(["整理文案", "核对价格", "拍摄商品"]);
+  expect(leaderTurns(leader, "close", "alice")[0]?.relay).toEqual({ parts: [{ title: HELP.title, team: null }, { title: PHOTO.title, team: "Jack 团队", report: "JACK_CLOSING" }] });
+});
+
+it("posts nothing of a dropped plan when its team, which already took a part of the request, stops accepting work while it plans another", async () => {
+  const turns = crossTurns();
+  // The supplement reruns one of the lead's Assignments and asks for a second part, which the Coordinator places with Bill's team again.
+  turns.alice!.supplement = { affected: [1], assignments: [], decisions: [], parts: [], help: [PHOTO] };
+  turns.bill!.plans = [structuredClone(billPlan), { assignments: [{ profileId: "executor-1", title: "拍摄商品", brief: "白底" }], decisions: ["再拍照"], help: [] }];
+  const roster = [...accepting];
+  let billPlans = 0;
+  const leader = teamLeaders(turns, (teamId) => { if (teamId === "bill" && ++billPlans === 2) leaves(roster, "bill"); });
+  const gate = deferred();
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, { run: async (_job, assignment) => { runs.push(`${assignment.title}:${assignment.attempt}`); if (assignment.attempt === 0) await gate.promise;
+    return { status: "completed", message: "完成" }; }, close: () => {} }, deliveries, { roster, assign: toBill });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toHaveLength(4), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]).toEqual(expect.objectContaining({ attempt: 1, status: "partially_unassigned" })), { timeout: 2000, interval: 10 });
+  expect(leaderTurns(leader, "plan", "bill")).toHaveLength(2);
+  expect(runs.slice(4)).toEqual(["整理文案:1"]);
+  // Bill's team started and closed its first part; its application is frozen in the request, and posts nothing for the dropped plan.
+  expect(posts(deliveries).filter((post) => post.startsWith("cli_bill: "))).toEqual([`cli_bill: ${BILL_START}`, `cli_bill: ${BILL_CLOSED}`]);
+});
+
+// The request holds its lead team's removal, but a lead that stops accepting work in the group while its request is being divided
+// gets no new Assignment there either (agent-dispatch::REQ-015/AC-01; the dispatcher's reading of 2026-11-11).
+it.each([
+  ["its own Team Leader plans the request: no part is placed", "plan", 0],
+  ["the Coordinator places a part it asked for", "assign", 1],
+] as const)("fails a new request under its lead team, with no Assignment, when that team stops accepting work while %s", async (_case, during, asked) => {
+  const roster = [...accepting];
+  const leader = teamLeaders(crossTurns(), (teamId) => { if (during === "plan" && teamId === "alice") leaves(roster, "alice"); });
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  let placements = 0;
+  const dispatch = dispatchWith(directory(), leader, { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; }, close: () => {} },
+    deliveries, { roster, assign: async () => { placements += 1; if (during === "assign") leaves(roster, "alice"); return toBill(); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("failed"), { timeout: 2000, interval: 10 });
+  expect(posts(deliveries)).toEqual([UNAVAILABLE]);
+  expect(dispatch.getState().jobs[0]?.assignments).toEqual([]);
+  expect(placements).toBe(asked);
+  expect(runs).toEqual([]);
+});
+
+it("fails the attempt, and stores nothing its lead team's supplement answer adds, when that team stops accepting work while a relayed team's Team Leader answers", async () => {
+  const turns = crossTurns();
+  turns.alice!.supplement = { affected: [], assignments: [{ profileId: "executor-1", title: "补充文案", brief: "补一段说明" }], decisions: [], parts: [1], help: [] };
+  turns.bill!.supplement = { affected: [2], assignments: [], decisions: [], parts: [], help: [] };
+  const roster = [...accepting];
+  const leader = teamLeaders(turns, undefined, (teamId) => { if (teamId === "bill") leaves(roster, "alice"); });
+  const gate = deferred();
+  const runs: string[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment) => { runs.push(`${assignment.title}:${assignment.attempt}`); await gate.promise; return { status: "completed", message: "完成" }; }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { roster, assign: toBill });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toHaveLength(4), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect([dispatch.getState().jobs[0]?.status, posts(deliveries).filter((post) => post === UNAVAILABLE).length]).toEqual(["failed", 1]), { timeout: 2000, interval: 10 });
+  expect(leaderTurns(leader, "supplement", "bill")).toHaveLength(1);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ title }) => title)).toEqual(["整理文案", "核对价格", "编写脚本", "核对接口"]);
+  expect(runs).toEqual(["整理文案:0", "核对价格:0", "编写脚本:0", "核对接口:0"]);
+});
+
+it("lets a lead team that stopped accepting work rerun its own Assignment for a supplement that adds none", async () => {
+  const roster = [...accepting];
+  const gate = deferred();
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), { run: async (_job, assignment) => { runs.push(`${assignment.title}:${assignment.attempt}`); if (assignment.attempt === 0) await gate.promise;
+    return { status: "completed", message: "完成" }; }, close: () => {} }, deliveries, { roster });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toEqual(["处理请求:0"]), { timeout: 2000, interval: 10 });
+  leaves(roster, "alice");
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]).toEqual(expect.objectContaining({ attempt: 1, status: "completed" })), { timeout: 2000, interval: 10 });
+  expect(runs).toEqual(["处理请求:0", "处理请求:1"]);
+});
+
+// Decision 2026-11-11 (i), for a team that leaves once the division of the supplement has begun: its earlier Assignments are of
+// an earlier attempt, so nothing holds its removal until the division is stored.
+it.each([
+  ["its Team Leader answers the relayed supplement: the division stops there", "supplement", 1],
+  ["the Coordinator places a part the supplement asks for", "assign", 2],
+] as const)("fails the attempt under the lead, and reruns nothing, when a part's team stops accepting work while %s", async (_case, during, asked) => {
+  const turns = crossTurns();
+  turns.alice!.supplement = { affected: [], assignments: [], decisions: [], parts: [1], help: [PHOTO] };
+  // Bill's answer adds nothing: it only reruns one of Bill's Assignments.
+  turns.bill!.supplement = { affected: [2], assignments: [], decisions: [], parts: [], help: [] };
+  // Jack's team accepts work too, so the Coordinator is asked to place the supplement's part whenever the division gets that far.
+  const roster = ["alice", "bill", "jack"];
+  const leader = teamLeaders(turns, undefined, (teamId) => { if (during === "supplement" && teamId === "bill") leaves(roster, "bill"); });
+  const gate = deferred();
+  const runs: string[] = [];
+  const executor: DispatchExecutor = { run: async (_job, assignment) => { runs.push(`${assignment.title}:${assignment.attempt}`); await gate.promise; return { status: "completed", message: "完成" }; }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  let placements = 0;
+  // The first placement is the request's own part; the second is the part the supplement asks for, which no team takes.
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { roster, assign: async () => {
+    if (++placements === 1) return toBill();
+    leaves(roster, "bill"); return [{ part: 1, agentId: null, summary: "" }];
+  } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(runs).toHaveLength(4), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "supplement:one"));
+  await vi.waitFor(() => expect(classified).toContain("supplement"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  gate.resolve();
+  await vi.waitFor(() => expect([dispatch.getState().jobs[0]?.status, posts(deliveries).filter((post) => post === UNAVAILABLE).length]).toEqual(["failed", 1]), { timeout: 2000, interval: 10 });
+  expect(leaderTurns(leader, "supplement", "bill")).toHaveLength(1);
+  expect(placements).toBe(asked);
+  expect(runs).toEqual(["整理文案:0", "核对价格:0", "编写脚本:0", "核对接口:0"]);
+});
+
+// A team that stops accepting work in the group while a message is being classified is offered no longer: the message is
+// classified again among the teams still accepting, as one arriving now would be (agent-dispatch::REQ-015/AC-01).
+it.each([
+  ["one addressed to it creates no request", event("one", "bill"), [undefined, undefined],
+    ["cli_sam: 我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"], []],
+  ["one mentioning it is routed as a message that mentions no team", event("one", "alice", { mentionedAgentIds: ["bill"] }), [["bill"], []],
+    [`cli_alice: ${start(1)}`, "cli_alice: LEADER_CLOSING_1"], ["alice:completed"]],
+] as const)("classifies a message again when a team stops accepting work in the group meanwhile: %s", async (_case, inbound, mentions, expected, requests) => {
+  const roster = [...accepting];
+  const offers: Array<{ agents: string[]; mentioned: readonly string[] | undefined }> = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), { run: async () => ({ status: "completed", message: "完成" }), close: () => {} }, deliveries,
+    { roster, classifying: ({ agents: offered, event: seen }) => { offers.push({ agents: offered.map(({ id }) => id), mentioned: seen.mentionedAgentIds }); leaves(roster, "bill"); } });
+  await dispatch.start();
+  dispatch.admit(inbound);
+  await vi.waitFor(() => expect(posts(deliveries)).toEqual(expected), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(posts(deliveries)).toEqual(expected);
+  expect(offers).toEqual([{ agents: ["sam", "alice", "bill"], mentioned: mentions[0] }, { agents: ["sam", "alice"], mentioned: mentions[1] }]);
+  expect(dispatch.getState().jobs.map(({ agentId, status }) => `${agentId}:${status}`)).toEqual(requests);
+});
+
+it.each([
+  ["the service began to stop", "stopping"],
+  ["its sender lost the authorization to use the group", "unauthorized"],
+] as const)("does not classify a message again for a team that left when, meanwhile, %s", async (_case, meanwhile) => {
+  const roster = [...accepting];
+  const offers: string[][] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  let authorized = true, stopped: Promise<void> | undefined;
+  const dispatch = dispatchWith(directory(), closingLeader(), { run: async () => ({ status: "completed", message: "完成" }), close: () => {} }, deliveries,
+    { roster, authorized: () => authorized, classifying: ({ agents: offered }) => {
+      offers.push(offered.map(({ id }) => id)); leaves(roster, "bill");
+      if (meanwhile === "stopping") stopped = dispatch.close(); else authorized = false;
+    } });
+  await dispatch.start();
+  dispatch.admit(event("one", "bill"));
+  await vi.waitFor(() => expect(offers).toHaveLength(1), { timeout: 2000, interval: 10 });
+  await (stopped ?? new Promise((resolve) => setTimeout(resolve, 20)));
+  expect(offers).toEqual([["sam", "alice", "bill"]]);
+  expect(posts(deliveries)).toEqual([]);
+});
+
+// Decision 2026-11-11: the two notices of a reassignment take time, so the team it names is checked again after each of them.
+const EXPLAINED = "这项需求属于 Bill 的职责。我请 Sam 重新分派，由他独立处理。", REASSIGNED = "已将这项需求转派给 Bill。";
+const UNDETERMINED = "cli_sam: 我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。";
+it.each([
+  ["the mentioned team explains: the Coordinator announces no reassignment", EXPLAINED, [`cli_alice: ${EXPLAINED}`, UNDETERMINED]],
+  ["the Coordinator announces the reassignment", REASSIGNED, [`cli_alice: ${EXPLAINED}`, `cli_sam: ${REASSIGNED}`, UNDETERMINED]],
+] as const)("saves no request for a team that stops accepting work in the group while %s, and the Coordinator asks what is wanted", async (_case, during, expected) => {
+  const roster = [...accepting];
+  const runs: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), { run: async (_job, assignment) => { runs.push(assignment.title); return { status: "completed", message: "完成" }; }, close: () => {} },
+    deliveries, { roster, delivered: (message) => { if (message === during) leaves(roster, "bill"); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "bill", { mentionedAgentIds: ["alice"] }));
+  await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(UNDETERMINED), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(posts(deliveries)).toEqual(expected);
+  expect(dispatch.getState().jobs).toEqual([]);
+  expect(runs).toEqual([]);
 });
 
 it("posts a cross-team Assignment's pending choice under its own Team Leader, who closes its part once the choice is resolved", async () => {

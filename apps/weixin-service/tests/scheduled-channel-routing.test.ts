@@ -2,8 +2,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { ScheduledTasks } from "../src/scheduled-tasks.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ScheduledTasks, type ScheduledTasksOptions } from "../src/scheduled-tasks.js";
 import { OwnerNotificationRoute, type NotificationChannel, type NotificationDestination } from "../src/notification-channel.js";
 import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 
@@ -155,6 +155,105 @@ describe("scheduled channel routing", () => {
     expect(await call(current, "list", {}, { ...currentTurn, target: "foreign" })).toEqual({ status: "error", code: "target_disabled" });
     expect(current.memoryContext(scope.accountId, [feishu.target])).toEqual([{ id: created.task.id, name: "喝水", revision: 1, template }]);
   }
+  // A dispatch group's tasks are created in turns that carry the sending Team Leader application (team-management::US-004/AC-03, REQ-005).
+  const alpha = { accountId: "feishu.app", target: "feishu.group.alpha", channel: "feishu" as const };
+  const beta = { accountId: "feishu.app", target: "feishu.group.beta", channel: "feishu" as const };
+  const alice = "cli_aaaaaaaaaaaaaaaa", bill = "cli_bbbbbbbbbbbbbbbb";
+  function groups(options: Partial<ScheduledTasksOptions> = {}) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "scheduled-sender-"));
+    cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));
+    const state = { now: Date.parse("2026-10-30T00:00:00Z"), context: true };
+    const outbox: Array<{ target: string; senderAccountId?: string; message: string }> = [];
+    const service = new ScheduledTasks({ databasePath: path.join(root, "tasks.sqlite"), now: () => state.now, readOriginalText: (ref) => `每小时提醒${ref === "source" ? "喝水" : ref}`,
+      notificationRoute: new OwnerNotificationRoute({ memoryAccountId: scope.accountId, scope, selected: feishu, destinations: [{ ...scope, channel: "weixin" }, feishu],
+        groups: [{ memoryAccountId: "feishu.group.memory-alpha", destination: alpha }, { memoryAccountId: "feishu.group.memory-beta", destination: beta }] }),
+      channel: {
+        state: () => ({ enabled: true, credentialStatus: "usable", credentialGeneration: "ready", contextGeneration: state.context ? "ready" : null }),
+        send: async ({ target, senderAccountId, message, beforeSubmit }) => {
+          expect(beforeSubmit()).toBe(true); outbox.push({ target, ...(senderAccountId ? { senderAccountId } : {}), message }); return { ok: true };
+        },
+      }, ...options });
+    cleanup.push(() => service.close());
+    const hourly = async (name: string, group: typeof alpha, senderAccountId: string, schedule: Record<string, unknown> = { intervalSeconds: 3600 }) => (await call(service, "create",
+      { name, instruction: name, reminderText: name, reminderMode: "verbatim", sourceText: `每小时提醒${name}`, timezone: "Asia/Shanghai", ...schedule },
+      { ...trusted, ...group, senderAccountId, eventKey: `create-${name}`, originalTextRef: name }) as { task: { id: string } }).task.id;
+    return { service, state, outbox, hourly };
+  }
+  it("lists the tasks an identity still sends, and a moved task changes only who sends it", async () => {
+    const { service, state, outbox, hourly } = groups();
+    const water = await hourly("喝水", alpha, alice), stretch = await hourly("伸展", beta, alice);
+    await hourly("对账", alpha, bill);
+    const once = await hourly("开会", alpha, alice, { at: "2026-10-30T08:30:00+08:00" });
+    const dropped = await hourly("午休", alpha, alice);
+    expect(await call(service, "delete", { reference: dropped, expectedRevision: 1, sourceText: "每小时提醒喝水" }, { ...trusted, ...alpha, senderAccountId: alice, eventKey: "drop" })).toMatchObject({ status: "deleted" });
+    const listed = () => service.sentBy(alice).sort((a, b) => a.name.localeCompare(b.name));
+    expect(listed()).toEqual([
+      { id: stretch, name: "伸展", when: "每小时", accountId: "feishu.app", target: "feishu.group.beta" },
+      { id: water, name: "喝水", when: "每小时", accountId: "feishu.app", target: "feishu.group.alpha" },
+      { id: once, name: "开会", when: "2026-10-30 08:30", accountId: "feishu.app", target: "feishu.group.alpha" },
+    ]);
+    state.now += 3_600_000; await service.tick();
+    expect(outbox.filter(({ senderAccountId }) => senderAccountId === alice).map(({ message }) => message).sort()).toEqual(["伸展", "喝水", "开会"]);
+    // The one-time task has been sent and will never send again, so it no longer counts.
+    expect(listed().map(({ name }) => name)).toEqual(["伸展", "喝水"]);
+
+    // The next body is cached while the conversation cannot take it; the move re-addresses it with the task.
+    state.context = false; state.now += 3_600_000; await service.tick();
+    const turn = { ...trusted, ...alpha, senderAccountId: alice, eventKey: "inspect" };
+    const before = await call(service, "inspect", { reference: water }, turn) as { task: Record<string, unknown>; history: Array<Record<string, unknown>> };
+    expect(before.history.map(({ delivery }) => delivery)).toEqual(["pending_inbound", "accepted"]);
+    expect(service.reassign("missing", alice, bill)).toBe("unknown");
+    expect(service.reassign(water, bill, alice)).toBe("unknown");
+    expect(service.reassign(water, alice, bill)).toBe("moved");
+    expect(listed().map(({ name }) => name)).toEqual(["伸展"]);
+    expect(service.sentBy(bill).map(({ name }) => name).sort()).toEqual(["喝水", "对账"]);
+    const after = await call(service, "inspect", { reference: water }, turn) as typeof before;
+    expect(after.task).toEqual({ ...before.task, revision: 2, notificationDestination: { ...alpha, senderAccountId: bill } });
+    expect(before.task).toMatchObject({ revision: 1, notificationDestination: { ...alpha, senderAccountId: alice }, schedule: { kind: "interval", everySeconds: 3600 } });
+    expect(after.history).toEqual([{ ...before.history[0], deliveryDestination: { ...alpha, senderAccountId: bill } }, before.history[1]]);
+    expect(after.history[1]).toMatchObject({ delivery: "accepted", deliveryDestination: { ...alpha, senderAccountId: alice } });
+    outbox.length = 0; state.context = true; await service.tick();
+    expect(outbox.filter(({ message }) => message === "喝水")).toEqual([{ target: "feishu.group.alpha", senderAccountId: bill, message: "喝水" }]);
+    state.now += 3_600_000; await service.tick();
+    expect(outbox.filter(({ message }) => message === "喝水")).toEqual(Array(2).fill({ target: "feishu.group.alpha", senderAccountId: bill, message: "喝水" }));
+  });
+  it("refuses to move or delete a task that is generating, and a deleted task keeps its history and never sends again", async () => {
+    let finish: (() => void) | undefined;
+    const { service, state, outbox, hourly } = groups({ renderReminder: async (task) => { if (task.name === "喝水") await new Promise<void>((resolve) => { finish = resolve; }); return task.instruction; } });
+    const water = await hourly("喝水", alpha, alice);
+    await hourly("对账", alpha, bill);
+    state.now += 3_600_000;
+    const ticking = service.tick();
+    try {
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      expect(service.reassign(water, alice, bill)).toBe("busy");
+      expect(service.remove(water, alice)).toBe("busy");
+      expect(service.sentBy(alice).map(({ id }) => id)).toEqual([water]);
+    } finally { finish?.(); await ticking; }
+    expect(service.remove(water, bill)).toBe("unknown");
+    expect(service.remove(water, alice)).toBe("deleted");
+    expect(service.sentBy(alice)).toEqual([]);
+    expect(await call(service, "inspect", { reference: water }, { ...trusted, ...alpha, senderAccountId: alice, eventKey: "inspect" })).toMatchObject({
+      task: { lifecycle: "deleted", enabled: false, nextExecutionAt: null, revision: 2 }, history: [{ delivery: "accepted", body: "喝水" }] });
+    expect(service.remove(water, alice)).toBe("unknown");
+    outbox.length = 0; state.now += 3_600_000; await service.tick();
+    expect(outbox.map(({ message }) => message)).toEqual(["对账"]);
+  });
+  it("reports the end of each round, by when a one-time task that ran is no longer sent by its identity, and a failing listener stops nothing", async () => {
+    const rounds: string[][] = [], errors: unknown[] = [];
+    let fail = false;
+    const { service, state, outbox, hourly } = groups({ onError: (error) => errors.push(error), afterRound: () => {
+      rounds.push(service.sentBy(alice).map(({ name }) => name));
+      if (fail) throw new Error("listener_failed");
+    } });
+    await hourly("开会", alpha, alice, { at: "2026-10-30T08:30:00+08:00" });
+    await service.tick();
+    state.now = Date.parse("2026-10-30T08:30:00+08:00"); fail = true;
+    await service.tick();
+    expect(rounds).toEqual([["开会"], []]);
+    expect(errors).toEqual([new Error("listener_failed")]);
+    expect(outbox.map(({ message }) => message)).toEqual(["开会"]);
+  });
   it("keeps a selected conversation intent owned by its existing scheduled task", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "scheduled-owner-route-"));
     cleanup.push(() => fs.rmSync(root, { recursive: true, force: true }));

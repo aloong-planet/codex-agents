@@ -1,7 +1,7 @@
 # Agent console
 
 > Status: specified; login, local-only access, the console shell with its 「本机」 section and the team overview with its records and storage tab are implemented, with the console pages 团队管理 ([team management](team-management.md)) and MCP 管理 ([MCP catalog](mcp-catalog.md)); Skill 管理 and the private conversations are not.
-> Pending: the sidebar has no Skill 管理 entry and no 私人任务 section yet, and the overview has no private scope, so it shows group requests only (agent-console::US-002/AC-01, AC-02, US-003/AC-01, US-004/AC-04). A team's card shows no 「删除中」 marker, because no team can be deleted yet (US-003/AC-02; [team management](team-management.md)). No chat button or record chat action exists yet (US-006).
+> Pending: the sidebar has no Skill 管理 entry and no 私人任务 section yet, and the overview has no private scope, so it shows group requests only (agent-console::US-002/AC-01, AC-02, US-003/AC-01, US-004/AC-04). No chat button or record chat action exists yet (US-006).
 > Related: [agent dispatch](agent-dispatch.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [channel boundaries](channel-switching.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: no storage exists for Team Leader chats or private requests.
 
@@ -130,6 +130,7 @@ The service appends an entry to a local audit file for each of these events:
 
 - a saved change to a team, a group binding, an Agent Profile, an MCP server or tool, or a skill;
 - a saved change to the dispatch groups, with the groups before and after;
+- a team's deletion, the unbinding that completes a team's removal from a group, and a scheduled task that a removal lists being moved to another team or deleted;
 - an onboarding action;
 - a browser authorization or revocation;
 - a refused MCP call.

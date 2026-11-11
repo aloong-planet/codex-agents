@@ -12,7 +12,7 @@ import { test } from "./fixtures.js";
 // check that the page, the API and the service are wired together.
 // QR creation runs against the fake platform, whose scan the journeys end through the fixture route: no Feishu tenant is called,
 // and whether Feishu accepts the automatic configuration and release of a QR-created application stays live acceptance.
-// Not built yet (decision D1), so not driven here: MCP binding, skills, and team deletion with its removal panel.
+// Not built yet (decision D1), so not driven here: MCP binding and skills.
 const SAM_APP = "cli_0123456789abcdef";
 const SECRET_SENTINEL = "page-secret-SENTINEL-7d21";
 const LONG = { timeout: 15_000 };
@@ -42,6 +42,51 @@ const editor = (page: Page) => page.locator("[data-editor]");
 const field = (page: Page, name: string) => editor(page).getByRole("textbox", { name, exact: true });
 const listItem = (page: Page, title: string) => page.locator(".atm-list-item", { hasText: title });
 const groupRow = (page: Page, name: string) => editor(page).locator(".atm-group-row", { hasText: name });
+
+type Removal = { tasks: Array<{ id: string; name: string }> };
+type TeamsView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
+  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string; removal?: Removal }> }> };
+type ServiceState = { agentDispatch?: { jobs: Array<{ id: string; status: string; assignments: Array<{ teamId: string; status: string }> }> }; fixtureModelRequests?: unknown[]; channels?: { feishu?: { ready?: boolean } };
+  workflowModulePermissions?: { modules: Array<{ moduleId: string; revision: number; scopes: Array<{ scopeId: string }> }> } };
+const read = async <T>(server: Server, pathname: string) => await (await fetch(`${server.url}${pathname}`, { headers: { cookie: server.cookie } })).json() as T;
+const serviceState = (server: Server) => read<ServiceState>(server, "/api/state");
+const jobStatuses = async (server: Server) => (await serviceState(server)).agentDispatch?.jobs.map(({ status }) => status);
+/** The fixture Coordinator's decision to dispatch a request to `agentId`. */
+const dispatchTo = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
+/** A text message in 银河护卫队 with the fixture Coordinator's decision for it; `extra` adds fixture inputs for the turns it starts. */
+const groupMessage = (server: Server, messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {},
+  from = { sender: "ou_owner", pathname: "/api/fixture/inbound" }) => post(server, from.pathname, {
+  event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: from.sender } },
+    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+      content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision, ...extra });
+/** Saves a team bound to `groups` only, with everything else as the service has it, and returns the view after the save. */
+async function bindTo(server: Server, teamId: string, groups: string[]) {
+  const view = await read<TeamsView>(server, "/api/teams");
+  const team = view.teams.find(({ id }) => id === teamId)!;
+  const saved = await post(server, "/api/teams/save", { basedOn: view.version, team: { id: teamId, teamName: team.teamName, responsibility: team.responsibility, leader: team.leader, groups,
+    executorProfiles: team.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools })) } });
+  return saved.view as TeamsView;
+}
+/** Has Bill's Executor create a one-time scheduled task in 银河护卫队 that falls due a month from now, long after the case. */
+async function scheduleAsBill(server: Server, messageId: string, name: string) {
+  const text = `稍后在本群提醒，原文：${name}`;
+  await groupMessage(server, messageId, text, dispatchTo("bill", name), { modelToolCalls: [{ namespace: "schedules", tool: "create",
+    arguments: { name, instruction: name, reminderText: name, reminderMode: "verbatim", at: new Date(Date.now() + 30 * 86_400_000).toISOString(), sourceText: text } }] });
+  await expect.poll(async () => (await jobStatuses(server))?.at(-1), LONG).toBe("completed");
+}
+/** Sends Bill a request whose Executor turn stays open until `release`, and returns once that turn has started. */
+async function holdBill(server: Server, messageId: string) {
+  const before = (await serviceState(server)).fixtureModelRequests?.length ?? 0;
+  await groupMessage(server, messageId, "请帮我规划周末一日行程", dispatchTo("bill", "规划周末一日行程"), { modelHold: true });
+  await expect.poll(async () => {
+    const now = await serviceState(server);
+    return [now.agentDispatch?.jobs.at(-1)?.status, (now.fixtureModelRequests?.length ?? 0) - before];
+  }, LONG).toEqual(["running", 1]);
+}
+const release = (server: Server, messageId: string, pathname = "/api/fixture/inbound") => post(server, pathname, { modelControl: { messageId, action: "release" } });
+const removalSteps = (page: Page) => editor(page).locator(".atm-removal-steps > li");
+const ERROR_COLOUR = "rgb(178, 58, 49)";
+const colour = (line: Locator) => line.evaluate((element) => getComputedStyle(element).color);
 
 test.describe("with Feishu dispatch", () => {
   test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
@@ -200,7 +245,8 @@ test.describe("with Feishu dispatch", () => {
     await testInfo.attach("profile-tools", { body: await page.screenshot(), contentType: "image/png" });
   });
 
-  test("removes a team from a group where it takes work: it stops at once, Sam announces the departure and the preview drops it", async ({ page }, testInfo) => {
+  // team-management::US-004/AC-01, AC-05: with nothing to wait for, the removal completes with the save.
+  test("removes an idle team from a group with the save: the page says it is unbound, Sam's departure notice stays and the preview drops it", async ({ page }, testInfo) => {
     await page.goto("/console/teams");
     await listItem(page, "Alice · 运营团队").click();
     // Imported from the local configuration, Alice takes work in both groups without recorded checks: both steps show done, and
@@ -210,12 +256,150 @@ test.describe("with Feishu dispatch", () => {
     await groupRow(page, "产品讨论组").getByRole("checkbox").uncheck();
     await expect(groupRow(page, "产品讨论组")).toContainText("保存后移除");
     await editor(page).getByRole("button", { name: "保存", exact: true }).click();
-    await expect(groupRow(page, "产品讨论组")).toContainText("移除中 · 停止接单");
-    await expect(groupRow(page, "产品讨论组").getByRole("checkbox")).toBeDisabled();
+    await expect(editor(page).locator(".atm-done-note")).toHaveText("已从产品讨论组移除并解绑，历史记录保留。");
+    await expect(editor(page).locator(".atm-removal")).toHaveCount(0);
+    await expect(groupRow(page, "产品讨论组")).not.toContainText("移除");
+    await expect(groupRow(page, "产品讨论组").getByRole("checkbox")).not.toBeChecked();
+    await expect(groupRow(page, "产品讨论组").getByRole("checkbox")).toBeEnabled();
     await expect(groupRow(page, "产品讨论组").locator(".atm-announce"))
       .toHaveText(/Sam 的公告：「Alice（运营团队）已离开本群，不再接新的事务；进行中的事务会做完。」 · 飞书已接收/, LONG);
     await expect(editor(page).locator(".atm-roster-preview")).toContainText("产品讨论组：Sam 可分派给 Bill、Jack");
-    await testInfo.attach("group-removal", { body: await page.screenshot(), contentType: "image/png" });
+    await expect(listItem(page, "Alice · 运营团队").locator(".atm-list-meta")).toHaveText("银河护卫队 · 1 个能力档 · 0 项分工进行中");
+    await editor(page).locator(".atm-done-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("group-removal-idle", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  // team-management::US-004/AC-01..AC-03, AC-05, REQ-005: the four steps follow the service, a scheduled task is handed to a team
+  // that takes work in that group, and the removal completes by itself when the Assignment ends.
+  test("shows a removal's four steps, moves the team's scheduled task to a team taking work in that group, and unbinds once the Assignment ends", async ({ page, fixtureServer }, testInfo) => {
+    await scheduleAsBill(fixtureServer, "om_removal_task", "带伞提醒");
+    await holdBill(fixtureServer, "om_removal_held");
+    // Jack keeps taking work in 产品讨论组 only, so it must not be offered a task of 银河护卫队.
+    await bindTo(fixtureServer, "jack", ["oc_beta"]);
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    await groupRow(page, "银河护卫队").getByRole("checkbox").uncheck();
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(groupRow(page, "银河护卫队")).toContainText("移除中 · 停止接单");
+    await expect(groupRow(page, "银河护卫队").getByRole("checkbox")).toBeDisabled();
+    await expect(groupRow(page, "产品讨论组").getByRole("checkbox")).toBeChecked();
+    await expect(editor(page).locator(".atm-removal-h")).toHaveText("银河护卫队 · 移除进行中");
+    await expect(removalSteps(page)).toHaveText([
+      "停止接单Sam 已不再分派给 Bill，并在银河护卫队公告它离开；各负责人的团队通讯录已更新。已完成",
+      "进行中的分工 · 1 项做完后由 Bill 在群里收尾。等待中",
+      /^用 Bill 身份发送的定时任务 · 1 项每项转给银河护卫队里其他接单的团队，或删除，才能完成移除。转给后只换发送身份，计划和内容不变。需处理带伞提醒\d{4}-\d{2}-\d{2} \d{2}:\d{2} · 用 Bill 的身份发送/,
+      "等待发起人确认的事务 · 0 项已全部结束。已完成"]);
+    await expect(editor(page).locator(".atm-removal-note")).toHaveText("以上都结束后自动从银河护卫队解绑，历史记录保留。");
+    const move = editor(page).getByRole("combobox", { name: "把「带伞提醒」转给其他团队" });
+    await expect(move.locator("option")).toHaveText(["转给…", "Alice · 运营团队"]);
+    await testInfo.attach("removal-steps", { body: await page.screenshot(), contentType: "image/png" });
+
+    await move.selectOption({ label: "Alice · 运营团队" });
+    await expect(editor(page).locator(".atm-done-note")).toHaveText("已把「带伞提醒」转给 Alice：之后用 Alice 的身份发送，计划和内容不变。");
+    await expect(removalSteps(page).nth(2)).toHaveText("用 Bill 身份发送的定时任务 · 0 项已全部处理。已完成");
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 1 项做完后由 Bill 在群里收尾。等待中");
+    // Handing a task over is done at once; it is not an edit waiting for a save.
+    await expect(page.locator("#atm-savebar")).not.toContainText("有未保存的修改");
+    await editor(page).locator(".atm-removal-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-task-moved", { body: await page.screenshot(), contentType: "image/png" });
+
+    await release(fixtureServer, "om_removal_held");
+    await expect(editor(page).locator(".atm-done-note")).toHaveText("已从银河护卫队移除并解绑，历史记录保留。", LONG);
+    await expect(editor(page).locator(".atm-removal")).toHaveCount(0);
+    await expect(groupRow(page, "银河护卫队").getByRole("checkbox")).toBeEnabled();
+    await expect(groupRow(page, "银河护卫队").getByRole("checkbox")).not.toBeChecked();
+    await editor(page).locator(".atm-done-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-complete", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  // The page shows a view up to one poll old. Each refusal here is of an action taken on such a view after the service moved on:
+  // the page's reads of the team view are answered with the view it already has, and the changes go to the service directly.
+  test("says in one error line what a refused task move, task deletion or team deletion did not do", async ({ page, fixtureServer }, testInfo) => {
+    await scheduleAsBill(fixtureServer, "om_refused_task", "带伞提醒");
+    const draining = await bindTo(fixtureServer, "bill", ["oc_beta"]);
+    const task = draining.teams.find(({ id }) => id === "bill")!.bindings.find(({ chatId }) => chatId === "oc_alpha")!.removal!.tasks[0]!;
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    const move = editor(page).getByRole("combobox", { name: "把「带伞提醒」转给其他团队" });
+    await expect(move).toBeVisible();
+    const shown = await (await fetch(`${fixtureServer.url}/api/teams`, { headers: { cookie: fixtureServer.cookie } })).text();
+    await page.route("**/api/teams", (route) => route.request().method() === "GET" ? route.fulfill({ contentType: "application/json", body: shown }) : route.fallback());
+
+    await bindTo(fixtureServer, "alice", ["oc_beta"]);
+    await move.selectOption({ label: "Alice · 运营团队" });
+    const line = editor(page).locator(".atm-removal .atm-action-err");
+    await expect(line).toHaveText("没有转交「带伞提醒」：Alice 已不在该群接单，请重新选择。");
+    expect(await colour(line)).toBe(ERROR_COLOUR);
+    await expect(editor(page).locator(".atm-done-note")).toHaveCount(0);
+    await editor(page).locator(".atm-removal-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-move-refused", { body: await page.screenshot(), contentType: "image/png" });
+
+    await post(fixtureServer, "/api/teams/tasks/delete", { teamId: "bill", taskId: task.id });
+    await editor(page).locator(".atm-removal-items").getByRole("button", { name: "删除", exact: true }).click();
+    await expect(editor(page).locator(".atm-removal-items .acf-inline-confirm")).toContainText("删除后不再执行，已有的执行记录保留。");
+    await editor(page).locator(".atm-removal-items").getByRole("button", { name: "确认删除" }).click();
+    await expect(line).toHaveText("没有删除「带伞提醒」：这项定时任务已不存在，请刷新页面。");
+
+    await post(fixtureServer, "/api/teams/delete", { teamId: "jack" });
+    await listItem(page, "Jack · 技术团队").click();
+    await editor(page).getByRole("button", { name: "删除团队" }).click();
+    await editor(page).locator(".acf-danger").getByRole("button", { name: "确认删除" }).click();
+    const refused = editor(page).locator(".acf-danger .atm-action-err");
+    await expect(refused).toHaveText("没有开始删除：这个团队已不存在，请刷新页面。");
+    expect(await colour(refused)).toBe(ERROR_COLOUR);
+    await expect(editor(page).getByRole("button", { name: "删除团队" })).toBeVisible();
+    await refused.scrollIntoViewIfNeeded();
+    await testInfo.attach("deletion-refused", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  // team-management::US-004/AC-01, REQ-001/AC-02, agent-console::US-003/AC-02.
+  test("deletes a team: it stops taking work and is marked 删除中 on the overview until its Assignment ends, and an idle team is deleted at once", async ({ page, fixtureServer }, testInfo) => {
+    await holdBill(fixtureServer, "om_delete_held");
+    await page.goto("/console/teams");
+    await expect(page.locator("#atm-count")).toHaveText("4 个");
+    await listItem(page, "Bill · 生活团队").click();
+    const danger = editor(page).locator(".acf-danger");
+    await expect(danger).toContainText("删除后先停止接单，进行中的分工做完再移除。");
+    await danger.getByRole("button", { name: "删除团队" }).click();
+    await expect(danger.locator(".acf-inline-confirm")).toContainText("删除后 Sam 立即停止分派给 Bill；进行中的 1 项分工做完后从所有群移除，并在群里公告。用它身份发送的定时任务要先转给其他团队或删除。历史记录保留。");
+    await testInfo.attach("deletion-confirm", { body: await page.screenshot(), contentType: "image/png" });
+    await danger.getByRole("button", { name: "确认删除" }).click();
+    await expect(listItem(page, "Bill · 生活团队")).toContainText("停止接单 · 做完后移除");
+    await expect(danger.locator(".atm-deleting-note")).toHaveText("已停止接单：Sam 不再分派给 Bill。下面各群的阻塞都处理完后，团队才会被移除。");
+    // 产品讨论组 had nothing to wait for, so only 银河护卫队 still has a removal in progress.
+    await expect(danger.locator(".atm-removal-h")).toHaveText(["银河护卫队 · 移除进行中"]);
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 1 项做完后由 Bill 在群里收尾。等待中");
+    await expect(danger.getByRole("button", { name: "删除团队" })).toHaveCount(0);
+    for (const box of await editor(page).locator("[data-group]").all()) await expect(box).toBeDisabled();
+    await expect(groupRow(page, "银河护卫队").locator(".atm-announce"))
+      .toHaveText(/Sam 的公告：「Bill（生活团队）已离开本群，不再接新的事务；进行中的事务会做完。」 · 飞书已接收/, LONG);
+    await testInfo.attach("deletion-in-progress", { body: await page.screenshot(), contentType: "image/png" });
+
+    const overview = await page.context().newPage();
+    await overview.goto(`${fixtureServer.url}/console`);
+    const card = (name: string) => overview.locator(".ats-card", { has: overview.locator(".ats-name strong", { hasText: new RegExp(`^${name}$`) }) });
+    await expect(card("Bill").locator(".ats-card-head .acv2-badge")).toHaveText("删除中");
+    await expect(card("Alice")).toBeVisible();
+    await expect(card("Alice").locator(".ats-card-head .acv2-badge")).toHaveCount(0);
+    await testInfo.attach("overview-deleting", { body: await overview.screenshot(), contentType: "image/png" });
+    await overview.close();
+
+    await release(fixtureServer, "om_delete_held");
+    const titles = page.locator(".atm-list-item strong");
+    await expect(titles).toHaveText(["Sam · 总协调", "Alice · 运营团队", "Jack · 技术团队"], LONG);
+    await expect(page.locator("#atm-count")).toHaveText("3 个");
+    await expect(danger.locator(".atm-done-note")).toHaveText("删除完成：Bill 已从所有群移除，Sam 不再分派给它；历史记录保留。");
+    await expect(editor(page).locator(".atm-editor-title")).toContainText("已删除 · 历史保留");
+    await expect(editor(page).getByRole("button", { name: "保存", exact: true })).toBeDisabled();
+    await danger.locator(".atm-done-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("deletion-complete", { body: await page.screenshot(), contentType: "image/png" });
+
+    await listItem(page, "Alice · 运营团队").click();
+    await danger.getByRole("button", { name: "删除团队" }).click();
+    await expect(danger.locator(".acf-inline-confirm")).toContainText("删除后 Sam 立即停止分派给 Alice；没有进行中的分工，从所有群移除，并在群里公告。");
+    await danger.getByRole("button", { name: "确认删除" }).click();
+    await expect(danger.locator(".atm-done-note")).toHaveText("删除完成：Alice 已从所有群移除，Sam 不再分派给它；历史记录保留。");
+    await expect(titles).toHaveText(["Sam · 总协调", "Jack · 技术团队"]);
   });
 
   // QR creation (team-management::US-002/AC-01, AC-03, AC-04). The fake platform creates cli_c0de000000000001 when its scan is confirmed.
@@ -388,6 +572,100 @@ test.describe("with Feishu dispatch", () => {
   });
 });
 
+// A request waits for its requester only after an Executor asked them to choose, which the fixture Executor does with the file
+// tools: those need both channels running and the notes module granted.
+test.describe("with Feishu dispatch beside WeChat", () => {
+  test.use({ fixtureStart: { channelConfiguration: { owner, taskScope: dispatchChannel.taskScope, enabledChannels: ["weixin", "feishu"],
+    feishu: { ...dispatchChannel.feishu, groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }] } },
+  env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify(GROUP_NAMES) } } });
+
+  const asOwner = { sender: "ou_owner", pathname: "/api/fixture/feishu/inbound" }, asMember = { sender: "ou_colleague", pathname: "/api/fixture/feishu/inbound" };
+  /** An Executor turn that finds two notes and asks its requester to choose, which leaves its Assignment waiting. */
+  const choose = { modelToolCalls: [
+    { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+    { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+      candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }] };
+  /** Grants the notes module, which the choice above reads. */
+  async function grantNotes(server: Server) {
+    await expect.poll(async () => (await serviceState(server)).channels?.feishu?.ready, LONG).toBe(true);
+    const notes = (await serviceState(server)).workflowModulePermissions!.modules.find(({ moduleId }) => moduleId === "notes")!;
+    await post(server, "/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map(({ scopeId }) => ({ scopeId, read: true, write: true })) });
+  }
+  const assignmentStatuses = async (server: Server) => (await serviceState(server)).agentDispatch?.jobs.map(({ assignments }) => assignments.map(({ teamId, status }) => `${teamId}:${status}`).join(","));
+
+  // team-management::US-004/AC-02, AC-04.
+  test("counts a removal's waiting Assignments with the ones in progress, lists their requests with their requesters without a way to answer for them, and drops one when its requester cancels", async ({ page, fixtureServer }, testInfo) => {
+    await grantNotes(fixtureServer);
+    await groupMessage(fixtureServer, "om_owner_choice", "列出 Agent 笔记让我选发哪个", dispatchTo("alice", "选择并发送运营笔记"), choose, asOwner);
+    await expect.poll(() => jobStatuses(fixtureServer), LONG).toEqual(["waiting"]);
+    await groupMessage(fixtureServer, "om_member_choice", "也列出 Agent 笔记让我选", dispatchTo("alice", "为同事选择运营笔记"), choose, asMember);
+    await expect.poll(() => jobStatuses(fixtureServer), LONG).toEqual(["waiting", "waiting"]);
+    await groupMessage(fixtureServer, "om_owner_held", "整理本周运营数据", dispatchTo("alice", "整理本周运营数据"), { modelHold: true }, asOwner);
+    await expect.poll(() => assignmentStatuses(fixtureServer), LONG).toEqual(["alice:waiting", "alice:waiting", "alice:running"]);
+    const [mine, theirs] = (await serviceState(fixtureServer)).agentDispatch!.jobs;
+
+    // One running and two waiting: the list row, the deletion confirmation and the removal's second step all count three.
+    await page.goto("/console/teams");
+    const row = listItem(page, "Alice · 运营团队").locator(".atm-list-meta"), danger = editor(page).locator(".acf-danger");
+    await listItem(page, "Alice · 运营团队").click();
+    await expect(row).toContainText(" · 3 项分工进行中");
+    await danger.getByRole("button", { name: "删除团队" }).click();
+    await expect(danger.locator(".acf-inline-confirm")).toContainText("进行中的 3 项分工做完后从所有群移除");
+    await danger.getByRole("button", { name: "取消", exact: true }).click();
+    await groupRow(page, "银河护卫队").getByRole("checkbox").uncheck();
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 3 项做完后由 Alice 在群里收尾。其中 2 项在等发起人回复，见第 4 步。等待中");
+    const waiting = removalSteps(page).nth(3);
+    await expect(waiting).toContainText("等待发起人确认的事务 · 2 项只有发起人能确认或取消；本人发起的请在群里回复，其他成员的等他们回复。等待中");
+    await expect(waiting.locator(".atm-removal-items > li")).toHaveText([
+      `${mine!.id.slice(0, 8)} 选择并发送运营笔记发起人：本人 · 选择并发送运营笔记`, `${theirs!.id.slice(0, 8)} 为同事选择运营笔记发起人：群成员 · 为同事选择运营笔记`]);
+    expect(await waiting.locator(".atm-removal-items a").evaluateAll((links) => links.map((link) => link.getAttribute("href"))))
+      .toEqual([`/console?request=${mine!.id}`, `/console?request=${theirs!.id}`]);
+    await expect(waiting.locator("button, select, input")).toHaveCount(0);
+    await editor(page).locator(".atm-removal-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-running-and-waiting", { body: await page.screenshot(), contentType: "image/png" });
+
+    // Only the two waiting ones are left: all three still say the same number, and the step points at the fourth.
+    await release(fixtureServer, "om_owner_held", asOwner.pathname);
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 2 项其中 2 项在等发起人回复，见第 4 步。等待中", LONG);
+    await expect(row).toContainText(" · 2 项分工进行中");
+    await danger.getByRole("button", { name: "删除团队" }).click();
+    await expect(danger.locator(".acf-inline-confirm")).toContainText("进行中的 2 项分工做完后从所有群移除");
+    await danger.getByRole("button", { name: "取消", exact: true }).click();
+    await editor(page).locator(".atm-removal-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-waiting", { body: await page.screenshot(), contentType: "image/png" });
+
+    await groupMessage(fixtureServer, "om_owner_cancel", "取消", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" }, {}, asOwner);
+    await expect(waiting.locator(".atm-removal-items > li")).toHaveText([`${theirs!.id.slice(0, 8)} 为同事选择运营笔记发起人：群成员 · 为同事选择运营笔记`], LONG);
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 1 项其中 1 项在等发起人回复，见第 4 步。等待中");
+    await expect(groupRow(page, "银河护卫队")).toContainText("移除中 · 停止接单");
+  });
+
+  // team-management::US-004/AC-02, AC-04: the second step counts only the leaving team's own Assignments.
+  test("counts no Assignment for a leaving team whose request waits with another team's Assignment only, and still lists that request", async ({ page, fixtureServer }, testInfo) => {
+    await grantNotes(fixtureServer);
+    await groupMessage(fixtureServer, "om_cross_choice", "规划周末行程，再请运营选一篇笔记发我", dispatchTo("bill", "规划行程并发送笔记"), {
+      leaderPlan: { assignments: [{ profileId: "executor-1", title: "规划周末行程", brief: "一日行程" }], decisions: [], help: [{ title: "选择并发送笔记", brief: "列出 Agent 笔记供选择" }] },
+      crossTeamDecision: { assignments: [{ part: 1, agentId: "alice", summary: "选择并发送笔记" }] },
+      teamTurns: { alice: { leaderPlan: { assignments: [{ profileId: "executor-1", title: "选择运营笔记", brief: "列出 Agent 笔记供选择" }], decisions: [], help: [] } } },
+      executorTurns: { 选择运营笔记: choose } }, asOwner);
+    await expect.poll(() => assignmentStatuses(fixtureServer), LONG).toEqual(["bill:completed,alice:waiting"]);
+    const [request] = (await serviceState(fixtureServer)).agentDispatch!.jobs;
+
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    await groupRow(page, "银河护卫队").getByRole("checkbox").uncheck();
+    await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+    await expect(removalSteps(page).nth(1)).toHaveText("进行中的分工 · 0 项已全部结束。已完成");
+    await expect(removalSteps(page).nth(3).locator(".atm-removal-items > li")).toHaveText([`${request!.id.slice(0, 8)} 规划行程并发送笔记发起人：本人 · 选择运营笔记`]);
+    await expect(listItem(page, "Bill · 生活团队").locator(".atm-list-meta")).toContainText(" · 0 项分工进行中");
+    await expect(listItem(page, "Alice · 运营团队").locator(".atm-list-meta")).toContainText(" · 1 项分工进行中");
+    await editor(page).locator(".atm-removal-note").scrollIntoViewIfNeeded();
+    await testInfo.attach("removal-waits-with-another-team", { body: await page.screenshot(), contentType: "image/png" });
+  });
+});
+
 // agent-console::REQ-005/AC-04: a group's name comes from Feishu, where any member can rename the group, and a leader's and a
 // team's name are typed by the owner. The onboarding block draws them in its rows, their reasons and the test message's
 // confirmation; they must appear as the text they are, and never become page elements.
@@ -419,7 +697,7 @@ test.describe("with names that hold markup", () => {
 // The dispatch-group form (agent-console::US-009). The file write and its refusals are covered by
 // tests/dispatch-group-settings.test.ts and the restart by tests/team-management.integration.test.ts; these journeys check the page.
 // Coverage gap: the page's request states are driven for proposed and running only. Holding a request queued or waiting needs a
-// queue behind it or an Executor's pending choice, which no team-management fixture gives; the module test covers all four states.
+// queue behind it or an Executor's pending choice, which that journey's fixture does not give; the module test covers all four states.
 const channelFile = (server: Server) => path.join(server.directory, "channel.json");
 const readChannel = (server: Server) => JSON.parse(readFileSync(channelFile(server), "utf8")) as { feishu: { dispatch?: { groupChatIds: string[] } } };
 const dcGroup = (scope: Page | Locator, name: string) => scope.locator(".atm-dc-group", { hasText: name }).getByRole("checkbox");
@@ -485,15 +763,10 @@ test.describe("with Feishu dispatch, choosing its groups", () => {
     expect(readChannel(fixtureServer).feishu.dispatch).toBeUndefined();
     // Then a proposal waits for its author in 银河护卫队, and a second request runs there, held at its start message, so that group
     // cannot stay unchecked. The running request's summary carries markup, which the page must show as text.
-    const groupMessage = (messageId: string, text: string, dispatchDecision: unknown) => post(fixtureServer, "/api/fixture/inbound", {
-      event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
-        message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
-          content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision });
-    await groupMessage("om_dc_proposal", "周末可能想去附近玩玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
+    await groupMessage(fixtureServer, "om_dc_proposal", "周末可能想去附近玩玩", { kind: "propose", agentId: "bill", requestId: null, summary: "安排周末出行", message: "" });
     await post(fixtureServer, "/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
-    await groupMessage("om_dc_running", "帮我核对预算和行程", { kind: "dispatch", agentId: "bill", requestId: null, summary: "核对 <b>预算</b> & 行程", message: "" });
-    await expect.poll(async () => (await (await fetch(`${fixtureServer.url}/api/state`, { headers: { cookie: fixtureServer.cookie } })).json() as
-      { agentDispatch?: { jobs: Array<{ status: string }> } }).agentDispatch?.jobs.map(({ status }) => status), LONG).toEqual(["proposed", "running"]);
+    await groupMessage(fixtureServer, "om_dc_running", "帮我核对预算和行程", dispatchTo("bill", "核对 <b>预算</b> & 行程"));
+    await expect.poll(() => jobStatuses(fixtureServer), LONG).toEqual(["proposed", "running"]);
     await drawer.getByRole("button", { name: "保存", exact: true }).click();
     await expect(drawer.locator(".atm-save-err")).toHaveText("无法保存银河护卫队还有 2 项未结束的派单事务，结束后才能取消勾选：安排周末出行等待发起人确认核对 <b>预算</b> & 行程处理中");
     await expect(drawer.locator(".atm-dc-busy b")).toHaveCount(0);

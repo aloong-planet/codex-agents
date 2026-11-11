@@ -79,7 +79,7 @@ import { assignmentSender, closeDispatchRuntime, CodexDispatchExecutor, DISPATCH
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
 import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
-import { TeamManagement } from "./team-management.js";
+import { TeamManagement, type TeamManagementOptions } from "./team-management.js";
 import { TeamAnnouncements } from "./team-announcements.js";
 import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
 import { DispatchGroupSettings, unfinishedRequestsByGroup } from "./dispatch-group-settings.js";
@@ -93,7 +93,7 @@ import { DISPATCH_MEMORY_ACCOUNT_PREFIX, executorCapabilities, memoryAccountId, 
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { ConsoleAudit } from "./console-audit.js";
-import { ConsoleOverview } from "./console-overview.js";
+import { ConsoleOverview, displayId } from "./console-overview.js";
 import { createConsoleRoutes } from "./console-routes.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { NewsArchive } from "./news-archive.js";
@@ -237,6 +237,9 @@ let teamManagement: TeamManagement | undefined;
 // Set once the dispatch applications exist; a roster change before that has nothing to start.
 let applyRoster: (roster: Readonly<FeishuDispatchConfiguration>) => void = () => {};
 let countActiveAssignments: () => Readonly<Record<string, number>> = () => ({});
+// What holds a team's removal from a group (team-management::US-004): set once the dispatch and the scheduled tasks exist.
+let teamWork: TeamManagementOptions["work"] = () => [];
+let senderTasks: TeamManagementOptions["tasks"] = { sentBy: () => [], move: () => "unknown", delete: () => "unknown" };
 // Penny's application, read from its configuration at startup; no team may use it (ADR-0025, team-management::REQ-002).
 let pennyApplicationId: string | undefined;
 // With dispatch, the entry carries the registry's roster, so every reader sees the Coordinator and the teams with an application.
@@ -260,6 +263,8 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
       announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
       audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(), moduleScopes,
       activeAssignments: () => countActiveAssignments(),
+      work: (teamId) => teamWork(teamId),
+      tasks: { sentBy: (appId) => senderTasks.sentBy(appId), move: (...task) => senderTasks.move(...task), delete: (...task) => senderTasks.delete(...task) },
       rosterChanged: (roster) => applyRoster(roster),
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
       report: (code) => process.stderr.write(`${code}\n`) });
@@ -703,7 +708,17 @@ const scheduledTasks = new ScheduledTasks({
   ...(notificationRoute ? { notificationRoute } : {}),
   channel: notificationChannel,
   onError: () => process.stderr.write("定时任务状态暂不可用；已停止本轮推进，请检查本地存储。\n"),
+  // A task that was deleted in the conversation, or ran for the last time, no longer holds its sender's removal.
+  afterRound: () => { try { teamManagement?.settle(); } catch { process.stderr.write("team_removal_settle_failed\n"); } },
 });
+senderTasks = {
+  sentBy: (appId) => scheduledTasks.sentBy(appId).flatMap(({ id, name, when, accountId, target }) => {
+    const chatId = feishuConfiguration?.owner.deliveryTarget(accountId, target);
+    return chatId ? [{ id, name, when, chatId }] : [];
+  }),
+  move: (taskId, from, to) => scheduledTasks.reassign(taskId, from, to),
+  delete: (taskId, from) => scheduledTasks.remove(taskId, from),
+};
 const workflowToolGateway = new WorkflowToolGateway(
   workflowToolCatalog,
   [
@@ -1124,6 +1139,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       const chatId = configuration.owner.deliveryTarget(event.accountId, event.target);
       return chatId ? acceptingTeams(teams.current().definitions, chatId) : [];
     },
+    // A removal completes once nothing of the team's is left in its group (team-management::US-004/AC-02).
+    workChanged: () => teams.settle(),
     bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory, memoryScope: coordinatorProfile.memoryScope,
     completedWork: (job, assignments) => {
       const files = localFileTools.dispatchEvidence(job.id);
@@ -1184,6 +1201,11 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   codexLeader?.compactSupersededHomes();
   channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
     () => teams.roster().agents);
+  teamWork = (teamId) => dispatch.involving(teamId).flatMap(({ requestId, summary, accountId, target, requester, active, awaitingRequester, waitingFor }) => {
+    const chatId = configuration.owner.deliveryTarget(accountId, target);
+    return chatId ? [{ chatId, requestId, label: displayId(requestId), summary, active, awaitingRequester, waitingFor,
+      requester: configuration.owner.accepts({ ...configuration.owner.conversationAddress(), senderId: requester, conversationType: "private" }) ? "owner" as const : "member" as const }] : [];
+  });
   countActiveAssignments = () => {
     const counts: Record<string, number> = {};
     for (const { teamId, status } of dispatch.getState().jobs.flatMap(({ assignments }) => assignments)) {

@@ -15,8 +15,17 @@ import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type Definitions
 /** A console input that is not a team definition at all; the page never sends one. */
 export class TeamInputError extends Error {}
 
-/** Who made a change: an authorized browser, or the service itself (startup onboarding). */
+/** A scheduled task that cannot be moved or deleted now, because it is executing or sending. */
+export class TeamTaskBusyError extends Error {}
+
+/** Who made a change: an authorized browser, or the service itself (startup onboarding, a removal that completes). */
 export type TeamActor = Readonly<{ browser?: ConsoleBrowser }>;
+
+/** A request, or a group post still to be sent, that involves a team in a chat (agent-dispatch's `TeamWork`, as the console names it). */
+export type TeamWorkItem = Readonly<{ chatId: string; requestId: string; label: string; summary: string; requester: "owner" | "member";
+  active: number; awaitingRequester: number; waitingFor: readonly string[] | null }>;
+/** A scheduled task as a removal lists it. */
+export type SenderTask = Readonly<{ id: string; name: string; when: string; chatId: string }>;
 
 export type TeamManagementOptions = Readonly<{
   registry: TeamRegistry;
@@ -31,6 +40,14 @@ export type TeamManagementOptions = Readonly<{
   moduleScopes(): ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>;
   /** Active Assignments (queued, running or waiting) by team, counted once per view. */
   activeAssignments(): Readonly<Record<string, number>>;
+  /** What still involves a team, one entry per request (team-management::US-004/AC-02, AC-04). */
+  work(teamId: string): readonly TeamWorkItem[];
+  /** Scheduled tasks by the application they send with (team-management::US-004/AC-03, REQ-005). */
+  tasks: Readonly<{
+    sentBy(appId: string): readonly SenderTask[];
+    move(taskId: string, fromAppId: string, toAppId: string): "moved" | "busy" | "unknown";
+    delete(taskId: string, fromAppId: string): "deleted" | "busy" | "unknown";
+  }>;
   /** Called when the roster (applications and their secrets) changes, so that main can start new sending applications. */
   rosterChanged(roster: Readonly<FeishuDispatchConfiguration>): void;
   /** Applications no team may use, such as Penny's, each with the reason the save bar shows. */
@@ -43,6 +60,8 @@ export type TeamManagementOptions = Readonly<{
 
 const joinText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已加入本群，负责：${team.responsibility}`;
 const leaveText = (team: TeamDefinition) => `${team.leader.name}（${team.teamName}）已离开本群，不再接新的事务；进行中的事务会做完。`;
+// Why a deletion or a removal's task action was refused. The page shows each after naming the action that did not happen.
+const TEAM_GONE = "这个团队已不存在，请刷新页面。", TASK_GONE = "这项定时任务已不存在，请刷新页面。";
 const testText = (team: TeamDefinition) => `这是 ${team.leader.name}（${team.teamName}）的测试消息，用来确认可以在本群发言。`;
 
 /**
@@ -128,8 +147,65 @@ export class TeamManagement {
     }
     this.refreshRoster();
     this.deliver();
+    this.settle();
     void this.runOnboarding(teamId, options.actor, false);
     return teamId;
+  }
+
+  /**
+   * Starts deleting a team (team-management::US-004/AC-01): it stops accepting work in every group at once, the Coordinator
+   * announces in each that it left, and the team leaves the definitions when its last removal completes.
+   */
+  deleteTeam(teamId: unknown, actor: TeamActor): void {
+    const before = this.current().definitions.teams.find(({ id }) => id === teamId);
+    if (typeof teamId !== "string" || (!before && teamId !== COORDINATOR_ID)) throw new TeamInputError(TEAM_GONE);
+    const { version, started, removed } = this.options.registry.deleteTeam(teamId);
+    if (before && !before.deleting) {
+      this.audit(actor, { event: "team_delete_started", team: teamId, teamName: before.teamName, version: version.version, groups: started });
+      this.auditBindings(before, version.definitions.teams.find(({ id }) => id === teamId), version.version, actor);
+      if (removed) this.audit(actor, { event: "team_deleted", team: teamId, teamName: before.teamName, version: version.version });
+      for (const chatId of started) this.options.announcements.enqueue({ chatId, teamId, kind: "leave", text: leaveText(before) });
+    }
+    this.refreshRoster();
+    this.deliver();
+    this.settle();
+  }
+
+  /**
+   * Completes every removal nothing holds any more (team-management::US-004/AC-02): a team is unbound from a group it drains in
+   * once no request, group post or scheduled task of its own is left there, and a team being deleted then leaves the definitions.
+   * Called whenever that may have changed: after a save or a deletion, when dispatch work ends, after a scheduler round, at startup.
+   */
+  settle(): void {
+    const draining = this.current().definitions.teams.filter(({ bindings }) => bindings.some(({ state }) => state === "draining"));
+    if (!draining.length) return;
+    const held = new Map(draining.map((team) => [team.id, new Set([...this.options.work(team.id), ...this.tasksOf(team)].map(({ chatId }) => chatId))]));
+    const { unbound, deleted } = this.options.registry.settleRemovals((teamId, chatId) => held.get(teamId)?.has(chatId) === false);
+    if (!unbound.length && !deleted.length) return;
+    const { version } = this.current();
+    for (const { teamId, chatId } of unbound) this.audit({}, { event: "team_binding_changed", team: teamId, group: chatId, version, from: "draining", to: "removed" });
+    for (const teamId of deleted) this.audit({}, { event: "team_deleted", team: teamId, teamName: draining.find(({ id }) => id === teamId)?.teamName, version });
+    this.refreshRoster();
+  }
+
+  /** Moves a scheduled task a removal lists to another team that accepts work in the task's group (team-management::REQ-005). */
+  moveTask(teamId: unknown, taskId: unknown, to: unknown, actor: TeamActor): void {
+    const { team, task } = this.removalTask(teamId, taskId);
+    const { definitions } = this.current();
+    const target = definitions.teams.find(({ id }) => id === to);
+    if (!target) throw new TeamInputError("所选团队已不存在，请重新选择。");
+    if (target.id === team.id || !acceptingTeams(definitions, task.chatId).some(({ id }) => id === target.id)) throw new TeamInputError(`${target.leader.name} 已不在该群接单，请重新选择。`);
+    this.taskChanged(this.options.tasks.move(task.id, team.leader.appId, target.leader.appId));
+    this.audit(actor, { event: "team_task_moved", team: team.id, task: task.id, name: task.name, group: task.chatId, to: target.id });
+    this.settle();
+  }
+
+  /** Deletes a scheduled task a removal lists; its execution history stays (team-management::US-004/AC-03). */
+  deleteTask(teamId: unknown, taskId: unknown, actor: TeamActor): void {
+    const { team, task } = this.removalTask(teamId, taskId);
+    this.taskChanged(this.options.tasks.delete(task.id, team.leader.appId));
+    this.audit(actor, { event: "team_task_deleted", team: team.id, task: task.id, name: task.name, group: task.chatId });
+    this.settle();
   }
 
   /** Saves Sam's responsibility and instructions, the only parts the console may change (team-management::REQ-001/AC-01). */
@@ -203,6 +279,12 @@ export class TeamManagement {
     const names = await this.groupNames.of(definitions.dispatchGroups);
     const scopes = this.options.moduleScopes();
     const active = this.options.activeAssignments();
+    const removal = (team: TeamDefinition, work: readonly TeamWorkItem[], tasks: readonly SenderTask[], chatId: string) => {
+      const here = work.filter((item) => item.chatId === chatId);
+      return { active: here.reduce((sum, item) => sum + item.active, 0), awaitingRequester: here.reduce((sum, item) => sum + item.awaitingRequester, 0), closing: here.filter((item) => !item.active && !item.waitingFor).length,
+        tasks: tasks.filter((task) => task.chatId === chatId).map(({ id, name, when }) => ({ id, name, when })),
+        waiting: here.flatMap(({ requestId, label, summary, requester, waitingFor }) => waitingFor ? [{ requestId, label, summary, requester, waitingFor: [...waitingFor] }] : []) };
+    };
     const latest = new Map<string, TeamsView["teams"][number]["announcements"][string]>();
     for (const { chatId, teamId, kind, state, text: message } of this.options.announcements.list()) latest.set(`${teamId}\n${chatId}`, { kind, state, text: message });
     return {
@@ -214,9 +296,11 @@ export class TeamManagement {
         responsibility: definitions.coordinator.responsibility, instructions: definitions.coordinator.profile.instructions, appId: definitions.coordinator.appId },
       teams: definitions.teams.map((team) => {
         const record = team.leader.appId ? this.options.registry.onboarding(team.leader.appId) : { joins: {} };
+        const draining = team.bindings.some(({ state }) => state === "draining");
+        const work = draining ? this.options.work(team.id) : [], tasks = draining ? this.tasksOf(team) : [];
         const creation = this.options.registry.creation(team.id);
         const link = this.onboarding.creationLink(team.id);
-        return { id: team.id, teamName: team.teamName, responsibility: team.responsibility,
+        return { id: team.id, teamName: team.teamName, responsibility: team.responsibility, deleting: team.deleting === true,
           leader: { name: team.leader.name, appId: team.leader.appId, instructions: team.leader.profile.instructions },
           secretStored: Boolean(team.leader.appId) && this.options.registry.hasSecret(team.leader.appId),
           method: team.leader.method ?? "existing",
@@ -225,7 +309,8 @@ export class TeamManagement {
           ...(record.configure ? { configure: record.configure } : {}), ...(record.publish ? { publish: record.publish } : {}),
           tests: team.leader.appId ? { ...this.options.registry.testMessages(team.leader.appId) } : {}, testMessage: testText(team),
           ...(record.credentials ? { credentials: record.credentials } : {}),
-          bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}) })),
+          bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}),
+            ...(state === "draining" ? { removal: removal(team, work, tasks, chatId) } : {}) })),
           profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => {
             const effective = effectiveHostTools(hostTools, scopes);
             return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted };
@@ -235,6 +320,25 @@ export class TeamManagement {
       }),
       preview: Object.fromEntries(definitions.dispatchGroups.map((chatId) => [chatId, acceptingTeams(definitions, chatId).map(({ id }) => id)])),
     };
+  }
+
+  /** The scheduled tasks that send with the team's identity. */
+  private tasksOf(team: TeamDefinition): readonly SenderTask[] {
+    return team.leader.appId ? this.options.tasks.sentBy(team.leader.appId) : [];
+  }
+
+  /** A task one of the team's removals lists: it sends with the team's identity in a group the team drains in. */
+  private removalTask(teamId: unknown, taskId: unknown): Readonly<{ team: TeamDefinition; task: SenderTask }> {
+    const team = this.current().definitions.teams.find(({ id }) => id === teamId);
+    if (!team) throw new TeamInputError(TEAM_GONE);
+    const task = this.tasksOf(team).find(({ id, chatId }) => id === taskId && team.bindings.some((binding) => binding.chatId === chatId && binding.state === "draining"));
+    if (!task) throw new TeamInputError(TASK_GONE);
+    return { team, task };
+  }
+
+  private taskChanged(result: "moved" | "deleted" | "busy" | "unknown"): void {
+    if (result === "busy") throw new TeamTaskBusyError("team_task_busy");
+    if (result === "unknown") throw new TeamInputError(TASK_GONE);
   }
 
   /** Asks for a team's QR code on behalf of `actor`; the audit names who asked, and later what the scan led to. */
@@ -304,18 +408,23 @@ export class TeamManagement {
     // `method` is given for a new team and whenever the save changed how the team gets its application.
     if (changed.length) this.audit(actor, { event: "team_changed", team: after.id, version, changed, ...(before === undefined ? { teamName: after.teamName } : {}), ...(method ? { method } : {}) });
     if (secretWritten) this.audit(actor, { event: "team_secret_written", team: after.id, appId: after.leader.appId, version });
-    const states = (team: TeamDefinition | undefined) => new Map((team?.bindings ?? []).map(({ chatId, state }) => [chatId, state]));
-    const old = states(before), now = states(after);
-    for (const chatId of new Set([...old.keys(), ...now.keys()])) {
-      if (old.get(chatId) !== now.get(chatId)) this.audit(actor, { event: "team_binding_changed", team: after.id, group: chatId, version,
-        from: old.get(chatId) ?? null, to: now.get(chatId) ?? null });
-    }
+    this.auditBindings(before, after, version, actor);
     const profiles = new Map((before?.executorProfiles ?? []).map((profile) => [profile.id, JSON.stringify(profile)]));
     for (const profile of after.executorProfiles) {
       if (profiles.get(profile.id) !== JSON.stringify(profile)) this.audit(actor, { event: "team_profile_saved", team: after.id, profile: profile.id, version });
       profiles.delete(profile.id);
     }
     for (const profile of profiles.keys()) this.audit(actor, { event: "team_profile_removed", team: after.id, profile, version });
+  }
+
+  /** One entry per binding whose state differs; a team that is new, or gone, has no binding on that side. */
+  private auditBindings(before: TeamDefinition | undefined, after: TeamDefinition | undefined, version: number, actor: TeamActor): void {
+    const states = (team: TeamDefinition | undefined) => new Map((team?.bindings ?? []).map(({ chatId, state }) => [chatId, state]));
+    const old = states(before), now = states(after);
+    for (const chatId of new Set([...old.keys(), ...now.keys()])) {
+      if (old.get(chatId) !== now.get(chatId)) this.audit(actor, { event: "team_binding_changed", team: (after ?? before)!.id, group: chatId, version,
+        from: old.get(chatId) ?? null, to: now.get(chatId) ?? null });
+    }
   }
 
   private audit(actor: TeamActor, entry: Record<string, unknown>): void {
@@ -331,6 +440,8 @@ export type TeamsView = Readonly<{
   coordinator: { id: string; name: string; teamName: string; responsibility: string; instructions: string; appId: string };
   teams: Array<{
     id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string }; secretStored: boolean;
+    /** The team is being deleted: it is saved no more and leaves the list with its last removal (team-management::US-004). */
+    deleting: boolean;
     /** How the team gets its application, as saved. */
     method: OnboardingMethod;
     /** QR creation (step 1): its state, why it needs action, the created application, and until when the code that waits for its scan is valid. */
@@ -339,7 +450,7 @@ export type TeamsView = Readonly<{
     configure?: OnboardingOutcome; publish?: OnboardingOutcome;
     /** Step 6: the latest test message of the team's application in each group it sent one to, and the text a new one would carry. */
     tests: Record<string, TestMessageOutcome>; testMessage: string;
-    credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome }>;
+    credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome; removal?: RemovalView }>;
     profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[] }>;
     activeAssignments: number;
     announcements: Record<string, { kind: "join" | "leave"; state: string; text: string }>;
@@ -347,6 +458,16 @@ export type TeamsView = Readonly<{
   /** Per group, the teams the Coordinator can dispatch to there (team-management::US-001/AC-03). */
   preview: Record<string, string[]>;
 }>;
+
+/**
+ * What a removal still waits for in one group (team-management::US-004/AC-02 to AC-05): the team's queued and running
+ * Assignments, its own Assignments that wait for their requester, the requests it has yet to close or whose group post is yet
+ * to go out, the scheduled tasks that send with its identity, and the requests that wait for their requester, each with the
+ * titles of the waiting Assignments. `active` and `awaitingRequester` together are the group's share of the team's
+ * `activeAssignments`.
+ */
+export type RemovalView = { active: number; awaitingRequester: number; closing: number; tasks: Array<{ id: string; name: string; when: string }>;
+  waiting: Array<{ requestId: string; label: string; summary: string; requester: "owner" | "member"; waitingFor: string[] }> };
 
 const outcome = ({ status, reason }: OnboardingOutcome) => reason ? `${status}:${reason}` : status;
 function object(value: unknown): Record<string, unknown> {
