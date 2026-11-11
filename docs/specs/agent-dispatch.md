@@ -424,7 +424,7 @@ It places each part with one of those teams or with none, and writes a summary f
 - each cross-team Team Leader's latest report;
 - the needs that cross-team Team Leaders reported;
 - each cross-team Team Leader's application, frozen when its team first takes a part, as the lead's is at admission. A cross-team Assignment, post or delivery under a replaced application fails instead of going out under another identity (agent-dispatch::REQ-008/AC-04);
-- the workflow runs whose choices a supplement superseded. An Assignment that reruns for the supplement is keyed by the supplement and gets a run of its own, so the superseded run is found only here. A waiting Assignment stored without a run of its own waits on the request's run, and that run is the one kept. A request whose supplement was recorded before these runs were kept has none.
+- the workflow runs whose choices a supplement superseded. An Assignment that reruns for the supplement is keyed by the supplement and gets a run of its own, so the superseded run is found only here. A waiting Assignment that keeps no run, because its Executor asked back without a workflow run, adds none. A request whose supplement was recorded before these runs were kept has none.
 
 The existing transition rules carry over to Assignments:
 
