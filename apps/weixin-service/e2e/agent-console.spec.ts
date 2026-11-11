@@ -468,8 +468,17 @@ test.describe("with Feishu dispatch", () => {
     const record = drawer.locator(".acv2-record", { hasText: "商品 D 上架" });
     await record.locator(".acv2-record-button").click();
     await expect(record.locator(".ats-chat-actions button")).toHaveText(["与 Alice 私聊讨论", "与 Bill 私聊讨论"]);
-    await record.locator(".ats-chat-actions button", { hasText: "Bill" }).click();
     const running = (await jobs(fixtureServer))[1]!.id;
+    // Opening a conversation for the first time, as Alice's here, keeps the request selected once the conversation has loaded.
+    await record.locator(".ats-chat-actions button", { hasText: "Alice" }).click();
+    await expect(page.locator("#ats-drawer-title")).toHaveText("与 Alice 私聊");
+    await expect(page.locator("#ats-chat-task option")).toHaveCount(3);
+    await expect(page.locator("#ats-chat-task")).toHaveValue(running);
+    await expect(page.locator(".ats-chat-context p")).toHaveText("来源：银河护卫队 · 发起人：本人");
+    await page.keyboard.press("Escape");
+    await card("Alice").locator(".ats-name").click();
+    await record.locator(".acv2-record-button").click();
+    await record.locator(".ats-chat-actions button", { hasText: "Bill" }).click();
     await expect(page.locator("#ats-drawer-title")).toHaveText("与 Bill 私聊");
     await expect(page.locator("#ats-chat-task")).toHaveValue(running);
     await expect(page.locator(".ats-chat-context p")).toHaveText("来源：银河护卫队 · 发起人：本人");
@@ -505,14 +514,35 @@ test.describe("with Feishu dispatch", () => {
   test("renders a leader's reply as Markdown, says when a reply is on its way or did not come, and keeps a 2,000-row table inside its message on a phone", async ({ page, fixtureServer }, testInfo) => {
     const rows = Array.from({ length: 2000 }, (_, index) => `| ${index + 1} | 商品 ${index + 1} | 九成新 |`).join("\n");
     const markdown = `### 本周计划\n- **先**写文案\n- 再拍主图，用 \`npm test\` 核对\n\n[价格表](https://example.com/prices) [脚本](javascript:alert(1)) [本机](file:///etc/hosts)\n\n![商品主图](https://example.com/d.png)\n\n<img src="https://example.com/x.png"><script>window.leaked = true</script>\n\n| 序号 | 商品 | 说明：九成新、附件齐全、可以当天发货、外地包邮、支持验货 |\n| --- | --- | --- |\n${rows}`;
+    // A request whose title (the Coordinator's summary of a member's words) and result carry markup.
+    const markup = '<img src="https://example.com/t.png" onerror="window.leaked = true">';
+    await inbound(fixtureServer, "oc_alpha", "om_markup", "帮我写商品 F 的文案", "alice", `商品 F ${markup}`, { leaderClosing: { message: `商品 F 收尾：${markup}` } });
+    await expect.poll(async () => (await jobs(fixtureServer))[0]?.status, { timeout: processWaitLimitMs }).toBe("completed");
     await privateReply(fixtureServer, "alice", { reply: JSON.stringify({ message: markdown }), hold: true });
+    // The conversation cannot be read once: it says so, and the next read that succeeds clears the notice.
+    let refused = false;
+    await page.route("**/api/private-chats/alice", async (route) => {
+      if (refused) { await route.continue(); return; }
+      refused = true;
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "请求失败" }) });
+    });
     await page.goto("/console");
     const alice = page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: /^Alice$/ }) });
     await alice.locator(".ats-chat-launch").click();
+    const unread = page.locator('.ats-chat-notice[role="alert"]');
+    await expect(unread).toHaveText("暂时读不到这段私聊，请稍后再试。");
+    await expect(unread).toHaveCount(0, { timeout: processWaitLimitMs });
+    await page.unroute("**/api/private-chats/alice");
+    // Titles, results and the owner's own words are plain text in the conversation (REQ-005/AC-04).
+    const request = (await jobs(fixtureServer))[0]!.id;
+    await expect(page.locator("#ats-chat-task option").nth(1)).toHaveText(`群 · 商品 F ${markup} · 已完成`);
+    await page.locator("#ats-chat-task").selectOption(request);
+    await expect(page.locator(".ats-chat-preview")).toContainText(`商品 F 收尾：${markup}`);
     const input = page.locator("#ats-chat-input"), send = page.locator("#ats-chat-send");
     await expect(send).toBeDisabled();
-    await input.fill("这周的上新计划？");
+    await input.fill(`这周的上新计划？${markup}`);
     await send.click();
+    await expect(page.locator(".ats-chat-self .ats-chat-bubble")).toHaveText(`这周的上新计划？${markup}`);
     // While the reply is on its way, the conversation says so and takes no other message (D6).
     await expect(page.locator(".ats-chat-wait")).toHaveText("Alice正在回复…");
     await input.fill("还有一件事");

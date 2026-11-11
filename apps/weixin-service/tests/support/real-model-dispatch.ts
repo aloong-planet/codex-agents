@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { EXECUTOR_RUNTIME_HOME } from "../../src/agent-dispatch-executor.js";
 import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { ISOLATED_RUNTIME_KINDS } from "../../src/isolated-runtime-kinds.js";
+import { type PrivateChat, settledChat } from "./private-chat.js";
 import { allowNotes, dispatchConfig, start, type State } from "./real-main.js";
 
 /**
@@ -26,8 +27,6 @@ export type TeamId = keyof typeof TEAMS;
 
 /** A message the owner sent: in the group, or, with `to`, in the console's private conversation with that agent about `requestId`. */
 export type ScenarioMessage = { messageId: string; senderId: string; text: string; mention?: TeamId; to?: string; requestId?: string | null };
-/** A private conversation as the console shows it (agent-console::US-006). */
-export type PrivateChat = { pending: boolean; requests: string[]; messages: Array<{ role: "owner" | "agent"; text: string; requestId: string | null; state?: string; reason?: string }> };
 export type GroupPost = { identity: string; chatId: string; message: string; acceptedAt: number };
 export type DeliveredFile = { identity: string; chatId: string; kind: string; fileName: string; bytesBase64: string };
 export type RunRecord = {
@@ -235,13 +234,7 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
       async converse(agentId, text, requestId, timeoutMs) {
         messages.push({ messageId: `console:${agentId}:${messages.length + 1}`, senderId: OWNER, text, to: agentId, requestId });
         await service.post(`/api/private-chats/${agentId}/messages`, { text, requestId });
-        const deadline = Date.now() + timeoutMs;
-        for (;;) {
-          const chat = await service.get<PrivateChat>(`/api/private-chats/${agentId}`);
-          if (!chat.pending) return chat;
-          if (Date.now() > deadline) throw new Error(`timed out after ${timeoutMs} ms waiting for ${agentId}'s private reply`);
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
+        return await settledChat((route) => service.get<PrivateChat>(route), agentId, timeoutMs, 500);
       },
       async until(what, predicate, timeoutMs) {
         try { return await service.until(predicate, timeoutMs); }

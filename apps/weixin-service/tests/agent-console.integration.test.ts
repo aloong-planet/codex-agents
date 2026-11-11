@@ -23,6 +23,7 @@ import { parseChannelStartupConfiguration } from "../src/channel-startup-config.
 import { groupMemoryAccount, seedEvent, seedMemory } from "./support/memory.js";
 import { signalProcessGroup } from "./support/process-group.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
+import { type PrivateChat, settledChat } from "./support/private-chat.js";
 import { config, decision, groupMessage, start } from "./support/real-main.js";
 
 const SERVICE_DIRECTORY = fileURLToPath(new URL("../", import.meta.url));
@@ -255,18 +256,9 @@ describe("team overview and private conversation APIs against the running servic
     expect(audit.at(-1)).toMatchObject({ by: "browser", browser: { id: ownerId }, event: "browser_revoked", browsers: [{ id: otherId }] });
   }, 60_000);
 
-  type Chat = { agent: { id: string; name: string }; pending: boolean; requests: string[];
-    messages: Array<{ role: "owner" | "agent"; text: string; requestId: string | null; state?: string; reason?: string }> };
-  /** The owner's conversation with `agentId` once its last message has its reply, polled like the console page polls it. */
-  async function answered(service: Awaited<ReturnType<typeof running>>, agentId: string): Promise<Chat> {
-    const deadline = Date.now() + processWaitLimitMs;
-    for (;;) {
-      const chat = await service.get<Chat>(`/api/private-chats/${encodeURIComponent(agentId)}`);
-      if (!chat.pending) return chat;
-      if (Date.now() > deadline) throw new Error(`no reply from ${agentId}: ${JSON.stringify(chat)}`);
-      await delay(30);
-    }
-  }
+  type Chat = PrivateChat;
+  /** The owner's conversation with `agentId` once its last message has its reply. */
+  const answered = (service: Awaited<ReturnType<typeof running>>, agentId: string) => settledChat((route) => service.get<Chat>(route), agentId, processWaitLimitMs);
 
   it("lets the owner chat with Sam and every defined Team Leader, before onboarding and while the team is being deleted, and with nobody else", async () => {
     const directory = dispatchDirectory();

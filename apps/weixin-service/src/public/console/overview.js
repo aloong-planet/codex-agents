@@ -422,7 +422,9 @@
 
   // ── Private conversations (agent-console::US-006) ──
   const chatState = (agentId) => {
-    if (!chats.has(agentId)) chats.set(agentId, { draft: "", requestId: "", view: null, error: "", loaded: "" });
+    // `awaiting`: a record's chat action selected `requestId`, which stays selected until a view read after it shows whether the
+    // conversation can select it. `error` is a refused send's reason, `loadError` that the conversation could not be read.
+    if (!chats.has(agentId)) chats.set(agentId, { draft: "", requestId: "", awaiting: false, view: null, error: "", loadError: "", loaded: "" });
     return chats.get(agentId);
   };
   function setMode(next) {
@@ -436,7 +438,7 @@
     if (!chatable(agentId)) return;
     if (trigger) lastTrigger = trigger;
     const state = chatState(agentId);
-    if (requestId) state.requestId = requestId;
+    if (requestId) { state.requestId = requestId; state.awaiting = true; }
     trail = []; expandedRequest = null; selected = nodeOf(agentId); chatAgent = agentId;
     setMode("chat");
     $("ats-drawer").hidden = false;
@@ -458,11 +460,12 @@
       if (response.status === 401) { location.reload(); return; }
       if (!response.ok) throw new Error(String(response.status));
       const text = await response.text();
-      if (text === state.loaded) return;
-      state.loaded = text; state.view = JSON.parse(text);
+      if (text === state.loaded && !state.awaiting && !state.loadError) return;
+      // A read that succeeds settles a preselected request and clears a failed read's notice.
+      state.loaded = text; state.view = JSON.parse(text); state.awaiting = false; state.loadError = "";
     } catch {
       if (state.view) return;
-      state.error = "暂时读不到这段私聊，请稍后再试。";
+      state.loadError = "暂时读不到这段私聊，请稍后再试。";
     }
     if (mode === "chat" && chatAgent === agentId && !$("ats-drawer").hidden) renderChatLog();
   }
@@ -470,7 +473,11 @@
   const chatRequests = (state) => (state.view?.requests ?? []).map(findRequest).filter(Boolean);
   function chatContext(state) {
     const options = chatRequests(state);
-    if (state.requestId && !options.some((r) => r.id === state.requestId)) state.requestId = "";
+    if (state.requestId && !options.some((r) => r.id === state.requestId)) {
+      // Until the conversation's view is read, a request a record's chat action selected stays offered and selected.
+      const preselected = state.awaiting ? findRequest(state.requestId) : null;
+      if (preselected) options.push(preselected); else state.requestId = "";
+    }
     const r = state.requestId ? findRequest(state.requestId) : null;
     return `<label>关联事务<select id="ats-chat-task" aria-label="关联本人发起的事务"><option value="">新的私聊</option>${options.map((x) => `<option value="${esc(x.id)}"${x.id === state.requestId ? " selected" : ""}>群 · ${esc(x.title)} · ${esc(STATUS[x.status]?.[0] ?? x.status)}</option>`).join("")}</select></label><p>${r ? `来源：${esc(groupName(r.chatId))} · 发起人：本人` : "可直接讨论，或在上方选择本人发起的事务；私聊内容不进入群记录。"}</p>`;
   }
@@ -487,7 +494,7 @@
       return bubble + after;
     }).join("");
     const preview = r ? `<div class="ats-chat-preview">${esc(STATUS[r.status]?.[0] ?? r.status)} · ${r.assignments.length} 项分工<br>${esc(resultText(r))}${r.status === "completed" ? "<br>全部执行者已结束，历史记录保留。" : ""}</div>` : "";
-    const error = state.error ? `<p class="ats-chat-notice" role="alert">${esc(state.error)}</p>` : "";
+    const error = state.error || state.loadError ? `<p class="ats-chat-notice" role="alert">${esc(state.error || state.loadError)}</p>` : "";
     return `${messages}${preview}${error}${r ? "" : '<p class="ats-chat-empty">告诉我你想完成什么，或在上方选择已有事务继续讨论。</p>'}`;
   }
   const canSend = (state) => Boolean(state.draft.trim()) && !state.view?.pending;

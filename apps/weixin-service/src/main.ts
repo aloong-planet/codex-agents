@@ -979,6 +979,13 @@ const codexService = conversationRouter ? new ConversationService(
 );
 let fixtureLeaderRequests: FixtureTeamLeader["requests"] | undefined;
 let fixtureDispatchTurns: (() => DispatchTurnRecord[]) | undefined;
+// Which stored requests are the owner's and which group each belongs to: only those the owner sent in a group the running service
+// dispatches in. The team overview and the private conversations read requests through this one scope.
+const ownerScope = {
+  groups: () => feishuConfiguration?.dispatch?.groupChatIds ?? [],
+  chatIdOf: (accountId: string, target: string) => feishuConfiguration?.owner.deliveryTarget(accountId, target),
+  owner: (senderId: string) => Boolean(feishuConfiguration?.owner.accepts({ ...feishuConfiguration.owner.conversationAddress(), senderId, conversationType: "private" })),
+};
 // The owner's private conversations with Sam and each Team Leader (agent-console::US-006); they exist only with dispatch.
 let privateConversations: PrivateConversations | undefined;
 let fixturePrivateTurns: FixturePrivateReplier["turns"] | undefined;
@@ -1257,8 +1264,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   privateConversations = new PrivateConversations(path.join(path.dirname(privateStatePath), "private-conversations.sqlite"), {
     definitions: () => teams.current().definitions,
     records: () => dispatch.records(),
-    scope: { groups: () => configuration.dispatch?.groupChatIds ?? [], chatIdOf: (accountId, target) => configuration.owner.deliveryTarget(accountId, target),
-      owner: (senderId) => configuration.owner.accepts({ ...configuration.owner.conversationAddress(), senderId, conversationType: "private" }) },
+    scope: ownerScope,
     names: { label: displayId, groups: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}),
       // A team that only older requests used keeps its leader's name from the definitions version the request ran under.
       agent: (agentId, version) => {
@@ -1383,10 +1389,8 @@ const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigura
 // The team overview's read projection over the running service's dispatch records; Penny contributes only its state (agent-console::REQ-003).
 const consoleOverview = new ConsoleOverview({ storageRoot: consoleStateDirectory,
   ...(agentDispatch && teamManagement ? { records: () => agentDispatch.records(), teams: teamManagement } : {}),
-  groups: () => feishuConfiguration?.dispatch?.groupChatIds ?? [],
+  ...ownerScope,
   names: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}),
-  chatIdOf: (accountId, target) => feishuConfiguration?.owner.deliveryTarget(accountId, target),
-  owner: (senderId) => Boolean(feishuConfiguration?.owner.accepts({ ...feishuConfiguration.owner.conversationAddress(), senderId, conversationType: "private" })),
   penny: () => ({ configured: pennyConfigured, ready: penny?.state().ready === true }),
   // A dispatch group's memory is the account its Coordinator recalls (agent-console::US-005/AC-04).
   ...(feishuConfiguration ? { groupMemory: (chatId: string) => {

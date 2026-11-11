@@ -9,6 +9,12 @@ import "../src/public/console/chat-markdown.js";
 const { render } = (globalThis as unknown as { ConsoleMarkdown: { render(text: string): string } }).ConsoleMarkdown;
 
 describe("a private reply's Markdown", () => {
+  // Shaped after the replies of the real-model run (ticket 18): one line of Chinese prose with full-width punctuation, curly quotes
+  // and embedded Latin names, and no Markdown at all.
+  it("shows a one-line reply in plain prose as one paragraph, as it was written", () => {
+    expect(render("这件事已经完成，由 Alice 负责，标题是“二手 iPad 九成新出售”。")).toBe("<p>这件事已经完成，由 Alice 负责，标题是“二手 iPad 九成新出售”。</p>");
+  });
+
   it("renders headings, lists, emphasis, inline code, code blocks and paragraphs", () => {
     expect(render("# 计划\n## 步骤\n### 备注")).toBe("<h4>计划</h4><h5>步骤</h5><h6>备注</h6>");
     expect(render("- 写文案\n- 拍主图\n\n1. 上架\n2. 复盘")).toBe("<ul><li>写文案</li><li>拍主图</li></ul><ol><li>上架</li><li>复盘</li></ol>");

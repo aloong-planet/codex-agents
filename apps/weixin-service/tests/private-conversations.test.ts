@@ -87,7 +87,7 @@ describe("what a reply turn is given", () => {
     const lead = input.requests[1]!;
     expect(lead).toMatchObject({ group: "银河护卫队", summary: "alice-lead 的摘要", state: "completed", lead: "Alice", teams: ["Bill"] });
     expect(Object.keys(lead).sort()).toEqual(["group", "id", "lead", "reports", "state", "summary", "teams"]);
-    // Every group post of the request, by who posted it, the cross-team closing included.
+    // Every group post of this request, which has fewer than ten, by who posted it, the cross-team closing included.
     const { reports } = lead as CoordinatorRequestView;
     expect(reports.map(({ from }) => from)).toEqual(["Alice", "Sam", "Bill", "Bill", "Alice"]);
     expect(reports.at(-1)!.text).toContain("ALICE_CLOSING");
@@ -109,6 +109,27 @@ describe("what a reply turn is given", () => {
     expect(bill).toMatchObject({ lead: "Alice", assignments: [{ title: "编写脚本", result: "编写脚本：已交付" }] });
     expect(bill.reports).toBeUndefined();
     expect(JSON.stringify(bill)).not.toMatch(/整理文案|ALICE_CLOSING/u);
+  });
+
+  it("gives Sam only a request's latest ten group posts", async () => {
+    const decisions = (team: string) => Array.from({ length: 5 }, (_, index) => `${team} 决定 ${index + 1}`);
+    const dispatch = dispatchOn(directory(), scripted(), {
+      plans: { "om_alice-many:alice": { assignments: [one("整理文案")], decisions: decisions("Alice"), help: [{ title: "自动上架脚本", brief: "只交付代码" }] },
+        "om_alice-many:bill": { assignments: [one("编写脚本")], decisions: decisions("Bill"), help: [] } },
+      placements: [{ part: 1, agentId: "bill", summary: "编写自动上架脚本" }] });
+    await dispatch.start();
+    dispatch.admit(event("alice-many", "oc_alpha"));
+    await vi.waitFor(() => expect(dispatch.records()[0]?.job.status).toBe("completed"), { timeout: 5000, interval: 10 });
+    const posts = dispatch.records()[0]!.posts;
+    expect(posts.length).toBeGreaterThan(10);
+    const input = privateTurnInput(chatAgent(definitions, "sam")!, chatRecords(dispatch.records(), { id: "sam", role: "coordinator" }, scope),
+      { transcript: [], message: "这件怎么样了？", selected: null }, names);
+    const reports = (input.requests[0] as CoordinatorRequestView).reports.map(({ text }) => text);
+    expect(reports).toHaveLength(10);
+    // The first post, Alice's start message, is the one left out; the closing is the last one kept.
+    expect(reports).not.toContain(posts[0]!.text);
+    expect(posts[0]!.text).toContain("我安排");
+    expect(reports.at(-1)).toContain("ALICE_CLOSING");
   });
 
   it("keeps the selected request when the owner has more requests than a turn shows, and bounds the transcript to the latest messages", async () => {
