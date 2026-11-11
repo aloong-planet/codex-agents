@@ -3,7 +3,7 @@
 > Status: the team registry and the team management page are implemented locally. Teams are edited, bound to groups, onboarded by QR creation or with an existing application, announced, removed from groups and deleted from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: parts of the page are not built.
-> - Not built yet: MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); and the link to skill management (US-001/AC-04).
+> - Not built yet: skills (US-003/AC-05); and the link to skill management (US-001/AC-04).
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. These points are open:
 > - whether Feishu's application-management APIs accept an application created by QR code, and whether the permissions asked for at creation let it change its own configuration; team-management::US-002/AC-08 says what the owner sees and does when they do not;
 > - whether a created application is already released when the scan ends, or only by step 3;
@@ -132,7 +132,10 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 | Two browser tabs edit the same team; the second saves later | Second save refused; owner reloads under team-management::REQ-002 |
 | Owner edits responsibility or instructions while a request runs | The running request keeps its definitions under [agent-dispatch::REQ-017/AC-01](agent-dispatch.md) |
 | Owner attaches an MCP server, closes the card without confirming | Nothing is attached under team-management::US-003/AC-03 |
-| Owner unbinds an MCP server while an Executor uses it | The next call is refused under team-management::US-003/AC-04 |
+| Owner unbinds an MCP server while an Executor uses it | The next call after the save is refused under team-management::US-003/AC-04 |
+| Owner confirms a server's card, and the server's command or address is changed before the team is saved | The save is refused with 「MCP 服务器 <名称> 的命令或地址与确认时不一致，请重新绑定并确认。」, and nothing is attached, under team-management::US-003/AC-03 |
+| Owner confirms a server's card, and the server is disabled or deleted before the team is saved | The save is refused with 「MCP 服务器 <名称> 已停用或已不在 MCP 管理中，请重新载入页面。」, under team-management::US-003/AC-03 |
+| The MCP Catalog no longer holds a server that a profile attaches, because its state file was removed by hand | The profile shows no row for it and its Executors are offered nothing of it; the team's next save drops the attachment (Implementation Decisions: MCP attachment) |
 | Owner unchecks a group where the team has running Assignments | Team drains in that group only under team-management::US-004/AC-01 and team-management::US-004/AC-02 |
 | Owner deletes a team that owns scheduled tasks | Removal waits until each task is moved or deleted under team-management::US-004/AC-03 |
 | Owner tries to move a task to a team that is not accepting work in that group | Not offered under team-management::REQ-005 |
@@ -238,6 +241,12 @@ Each announcement keeps its delivery state: accepted, failed or unknown. The pag
 
 A checked tool whose gate is not granted carries 「未授权」. Removing a tool applies at the next call of a running request ([agent-dispatch::REQ-017/AC-02](agent-dispatch.md)), and every refused call is audited.
 
+**MCP attachment.** Each definitions version holds, for every Executor profile, the names of the MCP Catalog servers it attaches; a profile that attaches none holds no such field, as in every version stored before attachment existed. A profile knows a server by its name, which the catalog never changes.
+- **On the page**, each attached server shows its name, 本机程序 or 网址, its state (已连接, 连接中, 已断开, 连接失败 or 已停用), 「可用 <n> 个工具」 when it has usable tools, 「工具名 mcp__<server>__…」 and its exact command or address, with 解绑; a profile without one says 「还没有 MCP。」 The 绑定 MCP list shows the same of each server it offers, and says 「MCP 管理里已启用的服务器都已绑定到这个能力档。」 when none is left. The card of a server that has failed to connect adds 「它目前连接失败，连上后工具才会提供。」 「去 MCP 管理登记」 leads to the MCP management page.
+- **Binding and unbinding are part of the team's edit.** Confirming a card, or 解绑, changes the page's copy of the team and marks it unsaved; the save attaches or unbinds. A save that names no server for a profile attaches none.
+- **The service holds the confirmation.** The save carries, for each server a profile did not attach before, the command or address its card showed. The service attaches it only when the server is registered and enabled and that line is its current one, so a skipped or outdated card attaches nothing. A server the profile already attached is kept without one, also once it is disabled or its command has changed ([mcp-catalog::REQ-002](mcp-catalog.md)).
+- **A link** `/console/teams?team=<team ID>` opens the page on that team; the MCP management page links each attaching profile this way.
+
 **Group names** come from the Coordinator's application, with the chat ID as the fallback. A lookup that gives no name is not repeated for 10 minutes, unless a team in that group is saved or rechecked. Concurrent page views share one lookup.
 
 **Audit.** These events are recorded with the authorized browser or the service, never with a secret:
@@ -247,6 +256,7 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 - `team_delete_started`, with the groups that started draining, and `team_deleted`, when the team has left the definitions;
 - `team_task_moved`, with the task, its group and the team it went to, and `team_task_deleted`;
 - `team_profile_saved` and `team_profile_removed`;
+- `team_profile_mcp_attached`, with the profile, the server and the command or address that was confirmed, and `team_profile_mcp_unbound`, with the profile and the server, also for the servers of a removed profile;
 - `team_application_qr_requested`, for each QR code asked for;
 - `team_application_created`, with the created App ID and the App ID it replaced;
 - `team_application_qr_failed`, with the team and the reason, in these cases:

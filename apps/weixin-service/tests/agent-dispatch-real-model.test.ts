@@ -227,9 +227,12 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
         let view = await run.get<McpTeamsView>("/api/teams");
         for (const until = Date.now() + 15_000; view.mcpServers[0]?.state !== "connected" && Date.now() < until;) view = await run.get<McpTeamsView>("/api/teams");
         expect(view.mcpServers).toMatchObject([{ name: "warehouse", state: "connected" }]);
-        // Alice's team gets a second preset, which attaches the server and has no host tool; her seeded preset attaches none.
+        // Alice's team gets a second preset, which attaches the server and has no host tool; her seeded preset attaches none. Its
+        // responsibility says what the team now also does, as the owner writes it: the Coordinator routes by the responsibility
+        // alone and is told nothing of any preset or server.
         const alice = view.teams.find(({ id }) => id === "alice")!;
-        const saved = await run.post<{ view: McpTeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
+        const saved = await run.post<{ view: McpTeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName,
+          responsibility: `${alice.responsibility}另外负责查询仓库里商品的库存和仓位。`,
           leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
             ...alice.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, mcpServers: [] })),
             { name: "仓库查询", noun: "仓库执行者", instructions: "", hostTools: [], mcpServers: [{ name: "warehouse", confirmed: launchLine }] }] } });
