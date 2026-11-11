@@ -749,8 +749,13 @@ it("finishes on the next start a compaction that a crash cut off, with the rollo
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-it("compacts the Executor homes left before the upgrade at the first start, and no other runtime home", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-"));
+// Main builds the real Team Leader, which sweeps its homes, under either seam. Under the real-model seam the Codex executable is a
+// command that only fails and the Codex home is synthetic; the start reaches no runtime and no model.
+it.each([
+  ["the coordination seam", (): Record<string, string> => ({ WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" })],
+  ["the real-model seam", (codexHome: string): Record<string, string> => ({ WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome })],
+] as const)("compacts the Executor homes left before the upgrade and a superseded Team Leader home at the first start under %s, and no other runtime home", async (_seam, environment) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-codex-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
   try {
     dispatchConfig(directory);
@@ -777,18 +782,88 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
     seedExecutorHome(home(scopes[0]!), [{ threadId: "thread-ended" }]);
     seedExecutorHome(home(scopes[1]!), [{ threadId: "thread-other" }]);
     seedExecutorHome(home(`dispatch-${"0".repeat(64)}`), [{ threadId: "thread-pre05" }]);
-    const others = [`dispatch-leader-${"b".repeat(64)}`, "dispatch-coordinator", "feishu.group.seeded-elsewhere"];
-    for (const name of others) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
-    const unchanged = Object.fromEntries([scopes[1]!, ...others].map((name) => [name, homeListing(home(name))]));
-    running = await start(directory);
-    console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])),
-      diagnostics: running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home")) }));
+    // A Team Leader home no stored request can use, as an earlier access revision or definitions version left it.
+    const superseded = `dispatch-leader-${"b".repeat(64)}`, others = ["dispatch-coordinator", "feishu.group.seeded-elsewhere"];
+    for (const name of [superseded, ...others]) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
+    // Another superseded Team Leader home, which holds no rollout: its records cannot be confirmed, so it is kept and named.
+    const unconfirmed = `dispatch-leader-${"c".repeat(64)}`;
+    seedExecutorHome(home(unconfirmed), []);
+    const unchanged = Object.fromEntries([scopes[1]!, unconfirmed, ...others].map((name) => [name, homeListing(home(name))]));
+    running = await start(directory, environment(codexHome));
+    const diagnostics = running.output().split("\n").filter((line) => /^dispatch_(executor|leader)_home/u.test(line));
+    console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])), diagnostics }));
     expect(homeListing(home(scopes[0]!))).toEqual(keptListing("thread-ended"));
     expect(homeListing(home(`dispatch-${"0".repeat(64)}`))).toEqual(keptListing("thread-pre05"));
+    expect(homeListing(home(superseded))).toEqual(keptListing("thread-other"));
     expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
-    expect(running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home"))).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`]);
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+    expect(diagnostics).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`, `dispatch_leader_home_kept:rollout_missing:${unconfirmed}`]);
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
 }, 30000);
+
+// Superseded Team Leader homes (agent-dispatch::QR-003), under WORKFLOW_FIXTURE_COORDINATION_RUNTIME: main builds the real Team
+// Leader runtimes, and the fixture App Server writes a rollout for each thread it starts in their homes.
+// - The case changes the definitions version, not the access revision: every turn reads the current revision, so a request in
+//   flight keeps only its version's homes, and a revision change supersedes them at once.
+// - A fixture runtime leaves nothing in its home that a new runtime does not write again, so a whole home is told from a
+//   compacted one only while the service is stopped: each check follows a stop, whose release of every runtime compacts.
+// Gaps:
+// - The fixture App Server resumes a thread without reading its rollout. Resume from a compacted Team Leader home is shown on the
+//   installed App Server in isolated-runtime-compaction.test.ts, which CI cannot run.
+// - As for Executor homes above, no case orders the startup sweep against `agentDispatch.start()`. Main runs it synchronously
+//   while it builds the dispatch, before the channel start that calls `agentDispatch.start()`.
+const leaderHomes = (directory: string) => readdirSync(join(directory, "group-model-runtimes")).filter((name) => /^dispatch-leader-[0-9a-f]{64}$/u.test(name))
+  .map((name) => join(directory, "group-model-runtimes", name));
+/** The fixture's Team Leader turns whose prompt holds every one of `fragments`, as the threads they ran on. */
+const leaderThreads = (state: Awaited<ReturnType<Running["state"]>>, ...fragments: string[]) =>
+  state.fixtureCoordinationRequests!.filter(({ input }) => fragments.every((fragment) => JSON.stringify(input).includes(fragment))).map(({ threadId }) => threadId);
+
+it("keeps the Team Leader home of a request in flight across a definitions change whole, and compacts it once the request has ended", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-leader-home-inflight-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const seam = { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" };
+  const whole = ["codex-home/config.toml", "home/", "workspace/"];
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, seam);
+    // A request under definitions version 1 whose Executor is held: in flight.
+    await running.post("/api/fixture/inbound", groupMessage("om_inflight", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    const held = await running.until((state) => state.agentDispatch?.jobs[0]?.assignments[0]?.status === "running" && state.fixtureModelRequests?.length === 1);
+    const [planThread] = leaderThreads(held, "生活团队的负责人", "请帮我规划周末一日行程");
+    // The owner saves Sam's instructions from the console: definitions version 2 takes effect.
+    const view = await running.get<{ version: number; coordinator: { responsibility: string; instructions: string } }>("/api/teams");
+    await running.post("/api/teams/coordinator", { basedOn: view.version, coordinator: { responsibility: view.coordinator.responsibility, instructions: `${view.coordinator.instructions}\n协调规则 V2` } });
+    // A request admitted afterwards runs under version 2 and completes; its Team Leader's session is new, which sweeps.
+    await running.post("/api/fixture/inbound", groupMessage("om_current", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述"),
+      { modelReply: executorReply("商品文案已整理好。", "整理闲鱼商品描述"), leaderClosing: { message: "商品文案已整理好。" } }));
+    const changed = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed" && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(changed.agentDispatch?.jobs.map(({ status, definitionsVersion }) => [status, definitionsVersion])).toEqual([["running", view.version], ["completed", view.version + 1]]);
+    // The service stops with the first request still in flight. Its release of every runtime leaves both homes whole:
+    // the older version's because the request can still resume it, the current version's because later requests will.
+    await running.close(); running = undefined;
+    const homes = leaderHomes(directory), older = homes.find((home) => homeListing(home).some((entry) => entry.endsWith(`-${planThread}.jsonl`)))!;
+    const current = homes.find((home) => home !== older)!;
+    expect(homes).toHaveLength(2);
+    const stopped = { older: homeListing(older), current: homeListing(current) };
+    expect(stopped.older).toEqual(expect.arrayContaining(whole));
+    expect(stopped.current).toEqual(expect.arrayContaining(whole));
+    const rollout = stopped.older.find((entry) => entry.endsWith(`-${planThread}.jsonl`))!, hash = sha256(join(older, rollout));
+
+    // The next start reports the Assignment the stop cut off, and the Team Leader closes the request on the thread it planned on.
+    running = await start(directory, seam);
+    const closed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(leaderThreads(closed, "生活团队的负责人", "分工已经结束")).toEqual([planThread]);
+    expect(closed.fixtureThreadStarts!.filter(({ serviceName }) => serviceName === "feishu_dispatch_leader")).toEqual([]);
+    // The request has ended under a version that is no longer current: the stop's release compacts its home to the rollout.
+    await running.close(); running = undefined;
+    console.log(JSON.stringify({ kind: "dispatch_leader_home_inflight", commands: ["请帮我规划周末一日行程", "save Sam (definitions version 2)", "帮我整理闲鱼商品描述", "restart"],
+      jobs: { beforeStop: changed.agentDispatch, afterRestart: closed.agentDispatch }, outboxes: { beforeStop: changed.agentFixtureOutboxes, afterRestart: closed.agentFixtureOutboxes },
+      runs: closed.workflows?.runs ?? [], planThread, closingThreads: leaderThreads(closed, "生活团队的负责人", "分工已经结束"),
+      homes: { inFlight: stopped, ended: { older: homeListing(older), current: homeListing(current) } } }));
+    expect(await onlyRolloutRemains(older, planThread)).toBe(rollout);
+    expect(sha256(join(older, rollout))).toBe(hash);
+    expect(homeListing(current)).toEqual(stopped.current);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
 
 // Several Assignments per request. Each Assignment's Executor turn takes its own injected fixture turn by title
 // (`executorTurns`), so the cases can hold, release and script each Executor apart (agent-dispatch Testing Decisions).
