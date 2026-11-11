@@ -749,8 +749,13 @@ it("finishes on the next start a compaction that a crash cut off, with the rollo
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-it("compacts the Executor homes left before the upgrade and a superseded Team Leader home at the first start, and no other runtime home", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-"));
+// Main builds the real Team Leader, which sweeps its homes, under either seam. Under the real-model seam the Codex executable is a
+// command that only fails and the Codex home is synthetic; the start reaches no runtime and no model.
+it.each([
+  ["the coordination seam", (): Record<string, string> => ({ WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" })],
+  ["the real-model seam", (codexHome: string): Record<string, string> => ({ WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome })],
+] as const)("compacts the Executor homes left before the upgrade and a superseded Team Leader home at the first start under %s, and no other runtime home", async (_seam, environment) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-codex-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
   try {
     dispatchConfig(directory);
@@ -784,8 +789,7 @@ it("compacts the Executor homes left before the upgrade and a superseded Team Le
     const unconfirmed = `dispatch-leader-${"c".repeat(64)}`;
     seedExecutorHome(home(unconfirmed), []);
     const unchanged = Object.fromEntries([scopes[1]!, unconfirmed, ...others].map((name) => [name, homeListing(home(name))]));
-    // Main builds the real Team Leader, which sweeps its homes, only under the coordination seam.
-    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
+    running = await start(directory, environment(codexHome));
     const diagnostics = running.output().split("\n").filter((line) => /^dispatch_(executor|leader)_home/u.test(line));
     console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])), diagnostics }));
     expect(homeListing(home(scopes[0]!))).toEqual(keptListing("thread-ended"));
@@ -793,7 +797,7 @@ it("compacts the Executor homes left before the upgrade and a superseded Team Le
     expect(homeListing(home(superseded))).toEqual(keptListing("thread-other"));
     expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
     expect(diagnostics).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`, `dispatch_leader_home_kept:rollout_missing:${unconfirmed}`]);
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
 }, 30000);
 
 // Superseded Team Leader homes (agent-dispatch::QR-003), under WORKFLOW_FIXTURE_COORDINATION_RUNTIME: main builds the real Team
