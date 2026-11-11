@@ -1699,6 +1699,35 @@ describe("local_file_grant_name_addressing", () => {
     } finally { await binding.release(); await tools.close(); }
   });
 
+  // The reading is taken from the directory as it is at each call. A folder of the grant's name makes the named form literal from
+  // then on, whoever created it, so each case below ends with a file one level deeper than its first write put one.
+  it("reads a retried named write literally once a folder of the grant's name has appeared, as a second write", async () => {
+    const { directory, tools } = grant("grant-name-appeared-");
+    const original = { ...turn("grant-name-appeared", "account-a"), target: "feishu.group.test", requesterRef: "ou_owner", dispatchRequestId: "dispatch-request" };
+    let binding = tools.bindTurn(original);
+    try {
+      await tools.execute(create("demo-vault/notes/a.md", binding.promptLines[0]!.split(":", 1)[0]!), original);
+      await binding.release();
+      fs.mkdirSync(path.join(directory, "demo-vault"));
+      const retry = { ...original, dispatchRetry: true }; binding = tools.bindTurn(retry);
+      await expect(tools.execute(create("demo-vault/notes/a.md", binding.promptLines[0]!.split(":", 1)[0]!), retry)).resolves.toMatchObject({
+        relativePath: "demo-vault/notes/a.md", created: true });
+      expect(fs.readdirSync(directory, { recursive: true }).map(String).sort()).toEqual(["demo-vault", "demo-vault/notes", "demo-vault/notes/a.md", "notes", "notes/a.md"]);
+      expect(tools.dispatchEvidence("dispatch-request")).toEqual({ completed: 2, unknown: 0 });
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it("counts a folder of the grant's name that an earlier write of the turn created", async () => {
+    const { directory, tools } = grant("grant-name-created-");
+    const trusted = turn("grant-name-created", "account-a"), binding = tools.bindTurn(trusted);
+    const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+    try {
+      await expect(tools.execute(create("demo-vault/demo-vault/a.md", scopeRef), trusted)).resolves.toMatchObject({ relativePath: "demo-vault/a.md" });
+      await expect(tools.execute(create("demo-vault/demo-vault/b.md", scopeRef), trusted)).resolves.toMatchObject({ relativePath: "demo-vault/demo-vault/b.md" });
+      expect(fs.readdirSync(directory, { recursive: true }).map(String).sort()).toEqual(["demo-vault", "demo-vault/a.md", "demo-vault/demo-vault", "demo-vault/demo-vault/b.md"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
   it("shows each file's path below the root next to its display path in find, grep and edit results", async () => {
     const { directory, tools } = grant("grant-name-results-");
     fs.mkdirSync(path.join(directory, "discount-project", "src"), { recursive: true });

@@ -645,7 +645,6 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       matches: selected,
       skipped: results.flatMap((result) => result.skipped.map((skipped) => ({
         scopeRef: skipped.scopeRef,
-        relativePath: skipped.relativePath,
         displayPath: `${session.scopes.get(skipped.scopeRef)!.label}/${skipped.relativePath}`,
         reason: skipped.reason,
       }))),
