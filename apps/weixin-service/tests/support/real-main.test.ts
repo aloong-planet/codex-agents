@@ -10,7 +10,7 @@ import { config, start, type State } from "./real-main.js";
 // in flight, as a loaded machine can: longer than the 1 s and 5 s they used to allow, shorter than processWaitLimitMs.
 // Node's fetch keeps a connection to a Node server open for 3 s after its last response (measured on Node 26.7.0), and a read sent
 // on a kept connection while main is stopped can be reset when main resumes. The case first waits until start()'s connections
-// have closed, so the reads open new ones and can fail only through their bounds.
+// have closed, so that the reads open new ones.
 it("waits for state() and get() reads that main answers only after a 6 s pause", async () => {
   const directory = mkdtempSync(join(tmpdir(), "real-main-slow-read-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
