@@ -54,9 +54,13 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 //   guard is unit-tested. Retest condition: a fixture router that can answer with a new goal, or a live run.
 // - A new goal that replaces the open choice of a waiting Assignment ends only that Assignment. No case drives it through main, for the
 //   same reason; the dispatch engine's cases do. Retest condition: the same.
-// - Two Assignments of one request that each raise a choice are driven only at the dispatch engine. Through main, which of the two
-//   workflows reaches its choice last, and so which choice is replaced, depends on timing; the real-main case replaces a waiting
-//   request's choice from a second request instead. Retest condition: a fixture hold ahead of a tool call.
+// - A new goal that replaces the choice of a request stored before Assignments existed cancels that request, as it did before
+//   Assignments existed. No case drives it anywhere: only the pre-Assignment code produces such a request, the one case that builds
+//   one is the upgrade case here, and through main the fixture router never answers with a new goal. Retest condition: the same.
+// - Two Assignments of one request that each raise a choice are driven only at the dispatch engine, and so is an Executor that ends
+//   with a choice that was replaced before it ended. Through main, which of the two workflows reaches its choice last, and so which
+//   choice is replaced, depends on timing; the real-main case replaces a waiting request's choice from a second request instead.
+//   Retest condition: a fixture hold ahead of a tool call, and one between a tool call and its turn's end.
 // - A replaced choice that is noticed only at the next start, or that an Executor's end leaves to the intake because a message of the
 //   group is being taken in, is driven only at the dispatch engine. Retest condition: a fixture seam that stops main, or holds a
 //   message's intake, between a workflow's start and its Executor's end.
