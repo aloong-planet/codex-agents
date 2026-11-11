@@ -64,10 +64,12 @@ type Capture = { scope: AgentMemoryScope } & DispatchMemoryTurn;
 function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecutor, deliveries: Array<{ sender: string; message: string; id: string }>,
   options: { roster?: readonly string[]; captures?: Capture[]; rejected?: Set<string>; failingCapture?: AgentMemoryScope["kind"];
     pending?: (event: InboundContent) => Promise<DispatchPendingResult>; profile?: { name: string; noun?: string }; completedWork?: string;
-    delivered?: (message: string) => void; assign?: DispatchClassifier["assign"]; definitionsVersion?: () => number; agents?: DispatchAgent[]; team?: typeof team } = {}) {
+    delivered?: (message: string) => void; assign?: DispatchClassifier["assign"]; definitionsVersion?: () => number; agents?: DispatchAgent[]; team?: typeof team;
+    revision?: () => string; teams?: (definitionsVersion: number) => readonly string[] } = {}) {
   const roster = options.roster ?? accepting;
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
-    agents: () => options.agents ?? agents, leader, executor, definitionsVersion: options.definitionsVersion ?? (() => 1), revision: () => "r1",
+    agents: () => options.agents ?? agents, leader, executor, definitionsVersion: options.definitionsVersion ?? (() => 1), revision: options.revision ?? (() => "r1"),
+    teams: options.teams ?? (() => ["alice", "bill", "jack"]),
     team: (id, version) => { const view = (options.team ?? team)(id, version); return view && options.profile ? { ...view, profiles: [{ id: "executor-1", ...options.profile }] } : view; },
     roster: () => roster.map((id) => ({ id, name: team(id)!.leader.teamName, responsibility: team(id)!.leader.responsibility })),
     classifier: { classify: async ({ event: inbound }) => {
@@ -700,6 +702,70 @@ it("ends only the Assignment whose choice the requester cancels, and closes the 
   expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "completed"]);
   expect(messages(deliveries).slice(2)).toEqual(["已取消这次选择。", "已收尾。"]);
   expect(reports[0]?.map(({ status }) => status)).toEqual(["cancelled", "completed"]);
+});
+
+// Which Team Leader sessions stored requests can still use (agent-dispatch::QR-003/AC-02): their runtime homes stay whole, and
+// every other Team Leader home is superseded. Each request below runs in its own group, so a session's group tells which
+// request keeps it.
+const GROUPS = ["running", "waiting", "failed", "partial", "completed", "cancelled"] as const;
+const group = (name: string) => `feishu.group.oc_${name}`;
+
+it("keeps in use the sessions of the current definitions version, and of an older one only while a request under it runs or waits", async () => {
+  let version = 1, revision = "r1";
+  const held = deferred<DispatchExecutionResult>();
+  const executor: DispatchExecutor = { run: async (job, assignment) => {
+    if (job.event.target === group("running")) return held.promise;
+    if (job.event.target === group("waiting") || job.event.target === group("cancelled")) return { status: "waiting", message: "请选择要发送的文件。", runRef: `run-${job.id}` };
+    if (job.event.target === group("failed") || (job.event.target === group("partial") && assignment.title === "核对价格")) return { status: "failed", message: "无法完成。" };
+    return { status: "completed", message: "已完成。" };
+  }, close: () => {} };
+  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, [], { definitionsVersion: () => version, revision: () => revision,
+    teams: (definitionsVersion) => definitionsVersion === 1 ? ["alice", "bill"] : ["alice", "bill", "jack"] });
+  await dispatch.start();
+  for (const name of GROUPS) dispatch.admit(event(name, "alice", { target: group(name) }));
+  dispatch.admit(event("proposed", "propose:alice", { target: group("proposed") }));
+  const statuses = () => Object.fromEntries(dispatch.getState().jobs.map(({ id, status }) => [id, status]));
+  await vi.waitFor(() => expect(statuses()).toEqual({ running: "running", waiting: "waiting", failed: "failed", partial: "partially_failed", completed: "completed",
+    cancelled: "waiting", proposed: "proposed" }), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("stop", "cancel:cancelled", { target: group("cancelled") }));
+  await vi.waitFor(() => expect(statuses().cancelled).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  const sessions = () => dispatch.leaderSessions().map(({ leaderId, target, revision: used, definitionsVersion, accountId, bindingHash }) =>
+    `${target} ${leaderId} ${used} v${definitionsVersion} ${accountId} ${bindingHash}`).sort();
+  const of = (names: readonly string[], used: string) => names.flatMap((name) => ["alice", "bill"].map((leaderId) =>
+    `${group(name)} ${leaderId} ${used} v1 cli_sam binding-alpha`)).sort();
+  // Version 1 is current: every request that ran under it keeps its group's sessions; the proposal never ran and has none.
+  expect(sessions()).toEqual(of(GROUPS, "r1"));
+  // Version 2 takes effect and the access revision changes: only the running and the waiting request still keep version 1,
+  // for each of its teams, under the revision a turn would use now.
+  version = 2; revision = "r2";
+  expect(sessions()).toEqual(of(["running", "waiting"], "r2"));
+  held.resolve({ status: "completed", message: "已完成。" });
+  await vi.waitFor(() => expect(statuses().running).toBe("completed"), { timeout: 2000, interval: 10 });
+  expect(sessions()).toEqual(of(["waiting"], "r2"));
+});
+
+it("stops keeping a failed request's version in use, and keeps it again once a retry queues the request", async () => {
+  let version = 1;
+  const held = deferred<DispatchExecutionResult>();
+  const executor: DispatchExecutor = { run: async (job) => job.id === "one" && job.attempt === 0 ? { status: "failed", message: "无法完成。" } : held.promise, close: () => {} };
+  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, [], { definitionsVersion: () => version, teams: () => ["alice"] });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("failed"), { timeout: 2000, interval: 10 });
+  const versions = () => dispatch.leaderSessions().map(({ definitionsVersion }) => definitionsVersion).sort();
+  expect(versions()).toEqual([1]);
+  version = 2;
+  expect(versions()).toEqual([]);
+  // A request of the same team in the same group holds the worker, so the retried request stays queued behind it.
+  dispatch.admit(event("two", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.status).toBe("running"), { timeout: 2000, interval: 10 });
+  expect(versions()).toEqual([2]);
+  dispatch.admit(event("three", "retry:one"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("queued"), { timeout: 2000, interval: 10 });
+  expect(versions()).toEqual([1, 2]);
+  held.resolve({ status: "completed", message: "已完成。" });
+  await vi.waitFor(() => expect(dispatch.getState().jobs.map(({ status }) => status)).toEqual(["completed", "completed"]), { timeout: 2000, interval: 10 });
+  expect(versions()).toEqual([2]);
 });
 
 // Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-02, US-003/AC-04, REQ-007/AC-03, AC-04, REQ-008/AC-01).

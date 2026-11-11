@@ -54,7 +54,7 @@ function dispatchOn(path: string, executor: DispatchExecutor, options: { plans?:
   const leader = new FixtureTeamLeader({ leaderPlan: (messageId, teamId) => structuredClone(options.plans?.[`${messageId}:${teamId}`]), leaderSupplement: () => undefined,
     leaderClosing: (_messageId, teamId) => ({ message: `${teamId.toUpperCase()}_CLOSING` }) });
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
-    agents: () => agents, leader, executor, definitionsVersion: () => 1, revision: () => "r1", team: (id) => teamView(id),
+    agents: () => agents, leader, executor, definitionsVersion: () => 1, revision: () => "r1", team: (id) => teamView(id), teams: () => ["alice", "bill"],
     roster: () => ["alice", "bill"].map((id) => ({ id, name: teamView(id)!.leader.teamName, responsibility: teamView(id)!.leader.responsibility })),
     classifier: { classify: async ({ event: inbound }) => {
       const [kind, argument] = inbound.text.split(":");
