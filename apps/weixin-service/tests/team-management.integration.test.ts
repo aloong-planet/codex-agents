@@ -597,7 +597,7 @@ it("gives a registered MCP server's tools only to Executors of the profile that 
     // Bill's plan turn of each request: whether it names what the server gives the preset's Executors.
     const planNamesServer = (brief: string) => turns.find((input) => input.includes("生活团队的负责人") && input.includes(brief))!.includes("通过 MCP 服务器「amap」：");
     console.log(JSON.stringify({ kind: "team_mcp_attached", commands: ["请帮我规划周末一日行程", "attach amap", "重试", "再帮我规划周日行程", "请帮我看一段代码", "unbind amap", "重试", "再帮我规划下周行程"],
-      jobs: result.agentDispatch, offered: { bill: offered("feishu_agent_bill"), jack: offered("feishu_agent_jack") }, refused }));
+      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, offered: { bill: offered("feishu_agent_bill"), jack: offered("feishu_agent_jack") }, refused }));
     // Three Bill Executors started a thread: before the attachment, after it, and after the unbinding.
     expect(offered("feishu_agent_bill")).toEqual([[], ["mcp-amap.env", "mcp-amap.whoami", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.route_plan"], []]);
     expect(offered("feishu_agent_jack")).toEqual([[]]);
