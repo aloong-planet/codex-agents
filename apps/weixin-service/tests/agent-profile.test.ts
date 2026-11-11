@@ -115,8 +115,8 @@ describe("effective host tools", () => {
   });
 });
 
-// agent-dispatch::REQ-011/AC-01: what a Team Leader is told an Executor of a preset can do. The preset here allows every
-// production tool; the rows narrow what is still allowed, what module permissions grant, and the runtime's web search.
+// agent-dispatch::REQ-011/AC-01: what a Team Leader is told an Executor of a preset can do. The rows narrow, in turn, what module
+// permissions grant, what the preset still allows, what it allowed in the request's definitions version, and the runtime's web search.
 describe("Executor capabilities in plain words", () => {
   const FIND = ["按名称查找授权目录里的文件", "搜索授权目录里文件的内容", "读取授权目录里的文件"];
   const SEND_FILES = "把授权目录里的文件发到本群";
@@ -124,16 +124,19 @@ describe("Executor capabilities in plain words", () => {
     "立即执行定时任务", "重试日报任务", "删除定时任务"];
   const READ_WRITE = [{ read: true, write: true }];
   it.each([
-    ["every tool granted", PRODUCTION_TOOL_IDS, READ_WRITE, true,
+    ["every tool granted", PRODUCTION_TOOL_IDS, PRODUCTION_TOOL_IDS, READ_WRITE, true,
       [...FIND, "在授权目录里保存新文件或覆盖已有文件", "修改授权目录里已有的文件", SEND_FILES, ...UNGATED, "联网搜索"]],
-    ["a read-only scope, which grants no saving or editing", PRODUCTION_TOOL_IDS, [{ read: true, write: false }], true, [...FIND, SEND_FILES, ...UNGATED, "联网搜索"]],
-    ["no saved scope, which grants no file tool", PRODUCTION_TOOL_IDS, [], true, [...UNGATED, "联网搜索"]],
-    ["a preset that no longer allows sending files", PRODUCTION_TOOL_IDS.filter((id) => id !== "weixin.send_files"), READ_WRITE, true,
+    ["a read-only scope, which grants no saving or editing", PRODUCTION_TOOL_IDS, PRODUCTION_TOOL_IDS, [{ read: true, write: false }], true, [...FIND, SEND_FILES, ...UNGATED, "联网搜索"]],
+    ["no saved scope, which grants no file tool", PRODUCTION_TOOL_IDS, PRODUCTION_TOOL_IDS, [], true, [...UNGATED, "联网搜索"]],
+    ["a preset that no longer allows sending files", PRODUCTION_TOOL_IDS, PRODUCTION_TOOL_IDS.filter((id) => id !== "weixin.send_files"), READ_WRITE, true,
       [...FIND, "在授权目录里保存新文件或覆盖已有文件", "修改授权目录里已有的文件", ...UNGATED, "联网搜索"]],
-    ["a preset removed from the current definitions", undefined, READ_WRITE, true, ["联网搜索"]],
-    ["a runtime without web search", ["files.read"], READ_WRITE, false, ["读取授权目录里的文件"]],
-  ] as const)("names, with %s, exactly what an Executor can do now", (_case, stillAllowed, scopes, webSearch, expected) => {
-    expect(executorCapabilities(PRODUCTION_TOOL_IDS, stillAllowed, scopes, webSearch)).toEqual(expected);
+    // The request keeps the tools of its own definitions version, so a tool the preset gained later is not named (agent-dispatch::REQ-017/AC-01).
+    ["a preset that gained sending files after the request's definitions version", ["files.find", "files.read"], ["files.find", "files.read", "weixin.send_files"], READ_WRITE, true,
+      ["按名称查找授权目录里的文件", "读取授权目录里的文件", "联网搜索"]],
+    ["a preset removed from the current definitions", PRODUCTION_TOOL_IDS, undefined, READ_WRITE, true, ["联网搜索"]],
+    ["a runtime without web search", PRODUCTION_TOOL_IDS, ["files.read"], READ_WRITE, false, ["读取授权目录里的文件"]],
+  ] as const)("names, with %s, exactly what an Executor can do now", (_case, versionTools, stillAllowed, scopes, webSearch, expected) => {
+    expect(executorCapabilities(versionTools, stillAllowed, scopes, webSearch)).toEqual(expected);
   });
 });
 

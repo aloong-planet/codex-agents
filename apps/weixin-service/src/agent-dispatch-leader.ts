@@ -221,10 +221,13 @@ function helpRule(input: LeaderTurnInput): string {
 }
 
 /**
- * What its Executors can do and how a file reaches the group: a Team Leader holds no tools (agent-dispatch::REQ-002/AC-05), its
- * Executors hold what `profiles[].capabilities` names, and nothing after an Executor's turn saves or sends for it.
+ * What its Executors can do with tools and how a file reaches the group: a Team Leader holds no tools
+ * (agent-dispatch::REQ-002/AC-05), its Executors hold what `profiles[].capabilities` names, and nothing after an Executor's turn
+ * saves or sends for it. The list is of tool operations only: which team a piece of work belongs to stays a matter of
+ * responsibility, and reading, analysing and writing text need no tool.
  */
-const EXECUTOR_RULE = "profiles[].capabilities 列出按该能力档创建的执行者现在能做的事，这就是本团队能做到的范围：其中有的事由本团队的执行者完成，不要因为你本人没有工具就认为团队做不到，也不要写进 help。" +
+const EXECUTOR_RULE = "profiles[].capabilities 列出按该能力档创建的执行者现在能用工具做的操作；阅读、分析和撰写文字不需要工具，执行者都能做。" +
+  "你本人没有工具不等于团队做不到：capabilities 里有的操作（如保存、发送文件）由本团队的执行者完成，不要为这些操作向其他团队求助，也不要写进 help。" +
   "执行者的文字结果交回给你，由你在收尾时向本群汇报；文件和图片则只有执行者发送才会到本群（以你的身份发出），执行者结束后没有任何步骤会代为保存或发送。" +
   "因此请求要求把文档、文件等成果发到本群，而所选能力档能保存和发送文件时，brief 必须写明由执行者把成果保存成文件并发到本群，不能只要求保存后报告位置或提交内容。";
 

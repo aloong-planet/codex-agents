@@ -920,13 +920,15 @@ it("reruns the Assignments a supplement affects, each with the supplement and it
 }, 30000);
 
 // agent-dispatch::REQ-011/AC-01, REQ-016/AC-01: main's wiring from the definitions and the module permissions to the Team Leader's
-// real turns, under WORKFLOW_FIXTURE_COORDINATION_RUNTIME. Bill's preset allows four tools and carries marker instructions. Saving
-// is lost to the narrowed module permission and sending to the preset's later allowlist, so each loss shows its own wiring.
+// real turns, under WORKFLOW_FIXTURE_COORDINATION_RUNTIME. Bill's two presets allow different tools, so each is told by its own, and
+// carry marker instructions. Saving is lost to the narrowed module permission and sending to the first preset's later allowlist, so
+// each loss shows its own wiring.
 it("tells a Team Leader what its preset's Executors can do now, in its plan and supplement turns, and never the preset's instructions", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-leader-capabilities-")), business = mkdtempSync(join(tmpdir(), "dispatch-leader-capabilities-files-"));
   mkdirSync(join(business, "demo-vault", ".obsidian"), { recursive: true });
   let running: Running | undefined;
   const FIND = "按名称查找授权目录里的文件", READ = "读取授权目录里的文件", SAVE = "在授权目录里保存新文件或覆盖已有文件", SEND = "把授权目录里的文件发到本群", SEARCH = "联网搜索";
+  const TASKS = "查看定时任务列表";
   try {
     dispatchConfig(directory, true);
     const local = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")?.dispatch;
@@ -934,8 +936,9 @@ it("tells a Team Leader what its preset's Executors can do now, in its plan and 
     const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
     try {
       const seeded = registry.importLocalConfiguration(local, { executorHostTools: PRODUCTION_TOOL_IDS });
-      registry.save({ ...seeded.definitions, teams: seeded.definitions.teams.map((team) => team.id === "bill" ? { ...team, executorProfiles: team.executorProfiles.map((profile) =>
-        ({ ...profile, instructions: "执行者规则 R38", hostTools: ["files.find", "files.read", "files.write", "weixin.send_files"] })) } : team) }, { basedOn: seeded.version });
+      registry.save({ ...seeded.definitions, teams: seeded.definitions.teams.map((team) => team.id === "bill" ? { ...team, executorProfiles: [...team.executorProfiles.map((profile) =>
+        ({ ...profile, instructions: "执行者规则 R38", hostTools: ["files.find", "files.read", "files.write", "weixin.send_files"] })),
+      { id: "meal", name: "餐饮采购", instructions: "餐饮采购规则 R38", hostTools: ["files.write", "schedules.list"] }] } : team) }, { basedOn: seeded.version });
     } finally { registry.close(); }
     running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1", WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
     await allowNotes(running);
@@ -948,7 +951,7 @@ it("tells a Team Leader what its preset's Executors can do now, in its plan and 
       scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: false })) });
     await running.post("/api/fixture/feishu/inbound", groupMessage("om_capabilities_narrowed", "帮我规划周日一日行程", decision("bill", "规划周日一日行程"), { modelHold: true }));
     const busy = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "running" && billTexts(state).length === 3 && state.fixtureModelRequests?.length === 2);
-    // While that request runs, the owner removes file sending from the preset; the request keeps its definitions version.
+    // While that request runs, the owner removes file sending from the first preset; the request keeps its definitions version.
     type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
       profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> };
     const view = await running.get<{ version: number; teams: TeamView[] }>("/api/teams");
@@ -973,14 +976,14 @@ it("tells a Team Leader what its preset's Executors can do now, in its plan and 
     // Each request's plan and closing, then the second request's supplement turn and its closing.
     expect(phases).toEqual(["plan", "close", "plan", "close", "supplement", "close"]);
     expect([leaderTurns[0]!, leaderTurns[2]!, leaderTurns[4]!].map(presets)).toEqual([
-      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SAVE, SEND, SEARCH] }],
-      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEND, SEARCH] }],
-      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEARCH] }]]);
-    // The preset's instructions reach its Executors' turns and no turn of the Team Leader.
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SAVE, SEND, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [SAVE, TASKS, SEARCH] }],
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEND, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [TASKS, SEARCH] }],
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [TASKS, SEARCH] }]]);
+    // The first preset's instructions reach its Executors' turns; neither preset's reach any turn of the Team Leader.
     const executorTurns = done.fixtureModelRequests!.map(({ input }) => JSON.stringify(input));
     expect(executorTurns).toHaveLength(3);
     for (const turn of executorTurns) expect(turn).toContain("执行者规则 R38");
-    for (const prompt of leaderTurns) expect(prompt).not.toContain("执行者规则 R38");
+    for (const prompt of leaderTurns) expect(prompt).not.toContain("规则 R38");
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 60000);
 
