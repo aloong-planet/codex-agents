@@ -553,6 +553,26 @@ describe("local_file_query_contract_regression", () => {
     } finally { await sandbox.close(); }
   });
 
+  // Only this Interface reads by path: the file tools issue no reference to a file below a closed root.
+  it("refuses a read and an inspection by path below a root that a saved scope closed, and reads beside it", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-closed-root-"));
+    temporaryDirectories.push(root);
+    const directory = path.join(root, "Documents"), vault = path.join(directory, "vault");
+    fs.mkdirSync(vault, { recursive: true });
+    fs.writeFileSync(path.join(vault, "secret.md"), "secret");
+    fs.writeFileSync(path.join(directory, "beside.md"), "beside");
+    const sandbox = new NodeFileSandbox({ accountId: "account", moduleId: "local-media", revision: 1,
+      scopes: [{ scopeId: "documents", scopeRef: "scope-documents", label: "Documents", directory, read: true, write: false, closedRoots: [fs.realpathSync(vault)] }],
+      spoolDirectory: path.join(root, "spool") });
+    try {
+      await expect(sandbox.execute({ type: "read", scopeRef: "scope-documents", relativePath: "vault/secret.md" })).rejects.toThrow(/^file_sandbox_permission_denied$/u);
+      await expect(sandbox.execute({ type: "inspect", scopeRef: "scope-documents", relativePath: "vault/secret.md" })).rejects.toThrow(/^file_sandbox_permission_denied$/u);
+      // The answer does not tell whether the file exists.
+      await expect(sandbox.execute({ type: "read", scopeRef: "scope-documents", relativePath: "vault/absent.md" })).rejects.toThrow(/^file_sandbox_permission_denied$/u);
+      await expect(sandbox.execute({ type: "read", scopeRef: "scope-documents", relativePath: "beside.md" })).resolves.toMatchObject({ content: "beside" });
+    } finally { await sandbox.close(); }
+  });
+
   it("creates an immutable private snapshot and rejects stale source metadata", async () => {
     const parent = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-file-sandbox-"));
     temporaryDirectories.push(parent);

@@ -12,7 +12,7 @@ import {
   type FileSandboxGrepResult,
 } from "./file-sandbox.js";
 import { LocalFileOperationStore, type LocalFileOperationRecord } from "./local-file-operation-store.js";
-import type { WorkflowModulePermissionState } from "./workflow-module-permission-store.js";
+import { narrowingRootsBelow, type NarrowingRoots, type WorkflowModulePermissionState } from "./workflow-module-permission-store.js";
 import type {
   InlineWorkflowToolExecutor,
   TrustedWorkflowTurn,
@@ -46,6 +46,9 @@ type ScopeBinding = {
   directory: string;
   read: boolean;
   write: boolean;
+  /** The directories below this grant that a saved scope closed or left read-only when the turn was bound. */
+  closedRoots: string[];
+  readOnlyRoots: string[];
 };
 
 type FileBinding = {
@@ -200,9 +203,8 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     if (this.sessions.has(trusted.eventKey)) throw new Error("local_file_turn_already_bound");
     const scopes = new Map<string, ScopeBinding>();
     const sandboxes = new Map<string, NodeFileSandbox>();
-    for (const moduleId of this.moduleIds) {
-      const state = this.permissions.get(moduleId);
-      if (!state?.saved) continue;
+    const saved = this.savedPermissions();
+    for (const [moduleId, state] of saved.states) {
       const moduleScopes = state.scopes
         .filter((scope) => scope.read || scope.write)
         .map((scope) => ({
@@ -211,6 +213,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
           scopeRef: opaque("scoperef"),
           ...scope,
           read: scope.read || scope.write,
+          ...narrowingRootsBelow(scope.directory, saved.scopes),
         }));
       if (moduleScopes.length === 0) continue;
       for (const scope of moduleScopes) scopes.set(scope.scopeRef, scope);
@@ -226,6 +229,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
           directory: scope.directory,
           read: scope.read,
           write: scope.write,
+          ...canonicalRoots(scope),
         })),
         spoolDirectory: path.join(this.spoolDirectory, safeSegment(trusted.accountId), moduleId, String(state.revision)),
       }, undefined, this.diagnostics));
@@ -323,7 +327,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
         queueWaitMs = waited;
         session.queueWaitMs += waited;
         started = this.now();
-        this.assertSearchPermissions(session, scopeRefs);
+        this.assertGrantsCurrent(session, scopeRefs);
         try {
           const value = await this.executeTimed(session, operation);
           if (session.abort.signal.aborted) throw new Error("local_file_turn_unavailable");
@@ -431,13 +435,15 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
           const state = this.permissions.get(candidate.moduleId);
           if (!state?.saved || state.revision !== candidate.moduleRevision) throw new Error("local_file_permission_changed");
           const readableScopes = state.scopes.filter((scope) => scope.read);
+          const saved = this.savedPermissions().scopes;
           const refs = new Map(readableScopes.map((scope) => [scope.scopeId, opaque("sendscope")]));
           const sandbox = new NodeFileSandbox({
             accountId,
             moduleId: candidate.moduleId,
             revision: state.revision,
             deniedRoots: this.protectedRoots,
-            scopes: readableScopes.map((scope) => ({ ...scope, scopeRef: refs.get(scope.scopeId)! })),
+            scopes: readableScopes.map((scope) => ({ ...scope, scopeRef: refs.get(scope.scopeId)!,
+              ...canonicalRoots(narrowingRootsBelow(scope.directory, saved)) })),
             spoolDirectory: path.join(this.spoolDirectory, safeSegment(accountId), candidate.moduleId, String(state.revision)),
           }, undefined, this.diagnostics);
           runtime = { sandbox, refs };
@@ -505,7 +511,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
       try {
         do {
           this.assertExecutionTimeRemaining(session);
-          this.assertSearchPermissions(session, scopeRefs);
+          this.assertGrantsCurrent(session, scopeRefs);
           const batchBudget = this.remainingTraversalBudget(session, false);
           if (!batchBudget) { omittedGroups = true; break; }
           const started = this.now();
@@ -527,7 +533,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
           }
           scanCursor = result.scanCursor;
           this.consumeTraversal(session, result);
-          this.assertSearchPermissions(session, scopeRefs);
+          this.assertGrantsCurrent(session, scopeRefs);
           this.checkpoint("files.find.batch", {
             scannedEntries: result.scannedEntries, scannedFiles: result.scannedFiles,
             elapsedMs: Math.max(0, this.now() - started), scanComplete: result.scanComplete,
@@ -550,7 +556,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     const sort = input.sort && typeof input.sort === "object" && !Array.isArray(input.sort)
       ? input.sort as { field?: unknown; direction?: unknown }
       : undefined;
-    for (const scopeRefs of groups.values()) this.assertSearchPermissions(session, scopeRefs);
+    for (const scopeRefs of groups.values()) this.assertGrantsCurrent(session, scopeRefs);
     const entries = results.flatMap((result) => result.entries);
     sortFindEntries(entries, sort?.field, sort?.direction, session.scopes);
     const page = entries.slice(offset, fetchLimit);
@@ -575,11 +581,28 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     };
   }
 
-  private assertSearchPermissions(session: TurnSession, scopeRefs: string[]): void {
+  /** What is saved now for the modules the file tools serve. A module that was never saved has no scope, so it narrows nothing. */
+  private savedPermissions(): { states: Map<string, WorkflowModulePermissionState>; scopes: WorkflowModulePermissionState["scopes"] } {
+    const states = new Map<string, WorkflowModulePermissionState>();
+    for (const moduleId of this.moduleIds) {
+      const state = this.permissions.get(moduleId);
+      if (state?.saved) states.set(moduleId, state);
+    }
+    return { states, scopes: [...states.values()].flatMap((state) => state.scopes) };
+  }
+
+  /**
+   * Refuses a call once what is saved differs from what the turn was bound to, for the grants the call addresses: the grant's
+   * module was saved again, or the scopes saved below the grant narrow it differently (failure modes 4, 8 and 9).
+   */
+  private assertGrantsCurrent(session: TurnSession, scopeRefs: string[]): void {
+    const saved = this.savedPermissions();
     for (const scopeRef of scopeRefs) {
       const scope = session.scopes.get(scopeRef)!;
-      const current = this.permissions.get(scope.moduleId);
-      if (!current?.saved || current.revision !== scope.moduleRevision) throw new Error("local_file_permission_changed");
+      if (saved.states.get(scope.moduleId)?.revision !== scope.moduleRevision ||
+          !sameRoots(narrowingRootsBelow(scope.directory, saved.scopes), scope)) {
+        throw new Error("local_file_permission_changed");
+      }
     }
   }
 
@@ -611,7 +634,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
         limit: fetchLimit,
         budget: remaining,
       } as FileSandboxGrepOperation));
-      this.assertSearchPermissions(session, scopeRefs);
+      this.assertGrantsCurrent(session, scopeRefs);
       results.push(result);
       this.consumeTraversal(session, result);
       if (!result.scanComplete) {
@@ -741,6 +764,7 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
     if (reservation < 1) throw new Error("local_file_turn_budget_exhausted");
     session.reservedReadCharacters += reservation;
     try {
+      this.assertGrantsCurrent(session, [file.scopeRef]);
       const result = await sandbox.execute({
         type: "read",
         scopeRef: file.scopeRef,
@@ -938,10 +962,12 @@ export class LocalFileTools implements InlineWorkflowToolExecutor {
   }
 
   private assertCurrentMutationAccess(scope: ScopeBinding, requiresRead: boolean): void {
-    const state = this.permissions.get(scope.moduleId);
+    const saved = this.savedPermissions();
+    const state = saved.states.get(scope.moduleId);
     const current = state?.scopes.find((candidate) => candidate.scopeId === scope.scopeId);
-    if (!state?.saved || state.revision !== scope.moduleRevision || !current?.write ||
-        (requiresRead && !(current.read || current.write)) || current.directory !== scope.directory) {
+    if (!state || state.revision !== scope.moduleRevision || !current?.write ||
+        (requiresRead && !(current.read || current.write)) || current.directory !== scope.directory ||
+        !sameRoots(narrowingRootsBelow(scope.directory, saved.scopes), scope)) {
       throw new Error("local_file_permission_changed");
     }
   }
@@ -1098,6 +1124,16 @@ function canonicalProtectedPath(input: string): string {
   const parent = path.dirname(input);
   if (parent === input) throw new Error("local_file_tools_config_invalid");
   return path.join(canonicalProtectedPath(parent), path.basename(input));
+}
+
+/** A grant's narrowing roots as the sandbox worker's real paths spell them. */
+function canonicalRoots(roots: NarrowingRoots): NarrowingRoots {
+  return { closedRoots: roots.closedRoots.map(canonicalProtectedPath), readOnlyRoots: roots.readOnlyRoots.map(canonicalProtectedPath) };
+}
+
+function sameRoots(left: NarrowingRoots, right: NarrowingRoots): boolean {
+  const same = (one: string[], other: string[]) => one.length === other.length && one.every((root, index) => root === other[index]);
+  return same(left.closedRoots, right.closedRoots) && same(left.readOnlyRoots, right.readOnlyRoots);
 }
 
 function groupScopes(
