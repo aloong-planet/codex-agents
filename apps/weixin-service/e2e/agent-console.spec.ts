@@ -78,17 +78,18 @@ const owner = { memoryAccountId: "fixture-bot", bindings: [
 ] };
 const dispatchChannel = { channel: "feishu", owner, taskScope: { accountId: "fixture-bot", target: "fixture-user@im.wechat" },
   feishu: { appId: "cli_0123456789abcdef", appSecret: "fixture-secret",
-    groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
+    groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner", "ou_colleague"] }, { chatId: "oc_beta", allowedSenderIds: ["ou_owner"] }],
     dispatch: { groupChatIds: ["oc_alpha", "oc_beta"], agents: [{ id: "sam" }, { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
       { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } };
 const GROUP_NAMES = { chats: { oc_alpha: { name: "银河护卫队" }, oc_beta: { name: "产品讨论组" } } };
 const MARKUP = "请把这段加进详情：<a href=\"https://example.com/x\">链接</a> ![主图](https://example.com/a.png) <script>alert(1)</script>";
 type Server = { url: string; cookie: string };
 type Jobs = { agentDispatch?: { jobs: Array<{ id: string; status: string; assignments: Array<{ title: string; status: string }> }> } };
+/** A group message from the owner, or from `sender`, such as ou_colleague, a member of 银河护卫队. */
 async function inbound(server: Server, chatId: string, messageId: string, text: string, agentId: string, summary: string, extra: Record<string, unknown> = {},
-  decision: Record<string, unknown> = { kind: "dispatch", agentId, requestId: null, summary, message: "" }) {
+  decision: Record<string, unknown> = { kind: "dispatch", agentId, requestId: null, summary, message: "" }, sender = "ou_owner") {
   const response = await fetch(`${server.url}/api/fixture/inbound`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" },
-    body: JSON.stringify({ event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+    body: JSON.stringify({ event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
       message: { message_id: messageId, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", content: JSON.stringify({ text }), mentions: [] } },
     dispatchDecision: decision, ...extra }) });
   expect(response.status, await response.text()).toBe(200);
@@ -414,6 +415,9 @@ test.describe("with Feishu dispatch", () => {
 
   test("chats privately with Sam and each Team Leader from the bubble beside the name, keeping each draft, and from a record with its request selected", async ({ page, fixtureServer }, testInfo) => {
     await seedRequests(fixtureServer);
+    // A member's request in 银河护卫队, the newest of all, led by Jack: the owner does not control it (agent-console::REQ-002/AC-01).
+    await inbound(fixtureServer, "oc_alpha", "om_member", "帮我整理竞品清单", "jack", "整理竞品清单", { modelReply: reply("竞品清单已整理", "整理竞品清单") }, undefined, "ou_colleague");
+    await expect.poll(async () => (await jobs(fixtureServer))[3]?.status, { timeout: processWaitLimitMs }).toBe("completed");
     await page.goto("/console");
     const card = (name: string) => page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: new RegExp(`^${name}$`) }) });
     const drawer = page.locator("#ats-drawer"), input = page.locator("#ats-chat-input"), mode = page.locator("#ats-mode-button");
@@ -433,7 +437,7 @@ test.describe("with Feishu dispatch", () => {
     await expect(page.locator("#ats-drawer-kind")).toHaveText("本人私聊 · 仅本人可见");
     await expect(page.locator("#ats-record-tabs")).toBeHidden();
     await expect(mode).toHaveText("查看记录");
-    // Sam's selector lists every one of the owner's requests (US-006/AC-03).
+    // Sam's selector lists every one of the owner's requests and not the member's (US-006/AC-03).
     await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊", /^群 · 整理发布说明 · /, /^群 · 商品 D 上架 · /, /^群 · 商品 C 上架/]);
     await expect(page.locator(".ats-chat-context p")).toHaveText("可直接讨论，或在上方选择本人发起的事务；私聊内容不进入群记录。");
     await mode.click();
@@ -450,6 +454,7 @@ test.describe("with Feishu dispatch", () => {
     await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊", /^群 · 整理发布说明 · /, /^群 · 商品 D 上架 · /]);
     await input.fill("给 Bill 的草稿：周末行程先别订");
     await chatWith("Jack");
+    // Jack leads only the member's request.
     await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊"]);
     await expect(input).toHaveValue("");
     await input.fill("给 Jack 的草稿");
@@ -461,6 +466,14 @@ test.describe("with Feishu dispatch", () => {
     await expect(input).toHaveValue("给 Bill 的草稿：周末行程先别订");
     await chatWith("Jack");
     await expect(input).toHaveValue("给 Jack 的草稿");
+    await page.keyboard.press("Escape");
+
+    // The member's request shows as the member's, with no chat action (US-004/AC-04).
+    await card("Jack").locator(".ats-name").click();
+    const theirs = drawer.locator(".acv2-record", { hasText: "整理竞品清单" });
+    await theirs.locator(".acv2-record-button").click();
+    await expect(theirs.locator(".acv2-detail-label", { hasText: "原始信息" })).toHaveText(/^原始信息 · 群成员 \/ 银河护卫队/);
+    await expect(theirs.locator(".ats-chat-actions")).toHaveCount(0);
     await page.keyboard.press("Escape");
 
     // A record's chat action opens that leader's conversation with the request selected (US-006/AC-03).

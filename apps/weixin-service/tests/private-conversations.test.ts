@@ -112,6 +112,8 @@ describe("what a reply turn is given", () => {
   });
 
   it("gives Sam only a request's latest ten group posts", async () => {
+    // A plan holds at most five decisions, so two teams post them. Alice starts, Sam passes a part to Bill and Bill starts; then
+    // come Alice's five decisions, Bill's five, Bill's closing and Alice's: fifteen posts in this order.
     const decisions = (team: string) => Array.from({ length: 5 }, (_, index) => `${team} 决定 ${index + 1}`);
     const dispatch = dispatchOn(directory(), scripted(), {
       plans: { "om_alice-many:alice": { assignments: [one("整理文案")], decisions: decisions("Alice"), help: [{ title: "自动上架脚本", brief: "只交付代码" }] },
@@ -120,16 +122,11 @@ describe("what a reply turn is given", () => {
     await dispatch.start();
     dispatch.admit(event("alice-many", "oc_alpha"));
     await vi.waitFor(() => expect(dispatch.records()[0]?.job.status).toBe("completed"), { timeout: 5000, interval: 10 });
-    const posts = dispatch.records()[0]!.posts;
-    expect(posts.length).toBeGreaterThan(10);
     const input = privateTurnInput(chatAgent(definitions, "sam")!, chatRecords(dispatch.records(), { id: "sam", role: "coordinator" }, scope),
       { transcript: [], message: "这件怎么样了？", selected: null }, names);
-    const reports = (input.requests[0] as CoordinatorRequestView).reports.map(({ text }) => text);
-    expect(reports).toHaveLength(10);
-    // The first post, Alice's start message, is the one left out; the closing is the last one kept.
-    expect(reports).not.toContain(posts[0]!.text);
-    expect(posts[0]!.text).toContain("我安排");
-    expect(reports.at(-1)).toContain("ALICE_CLOSING");
+    // The three starts and Alice's first two decisions are left out.
+    expect((input.requests[0] as CoordinatorRequestView).reports.map(({ text }) => text)).toEqual(["Alice 决定 3", "Alice 决定 4", "Alice 决定 5",
+      "Bill 决定 1", "Bill 决定 2", "Bill 决定 3", "Bill 决定 4", "Bill 决定 5", expect.stringContaining("BILL_CLOSING"), expect.stringContaining("ALICE_CLOSING")]);
   });
 
   it("keeps the selected request when the owner has more requests than a turn shows, and bounds the transcript to the latest messages", async () => {

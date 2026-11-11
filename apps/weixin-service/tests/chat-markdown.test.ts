@@ -18,11 +18,18 @@ describe("a private reply's Markdown", () => {
   it("renders headings, lists, emphasis, inline code, code blocks and paragraphs", () => {
     expect(render("# 计划\n## 步骤\n### 备注")).toBe("<h4>计划</h4><h5>步骤</h5><h6>备注</h6>");
     expect(render("- 写文案\n- 拍主图\n\n1. 上架\n2. 复盘")).toBe("<ul><li>写文案</li><li>拍主图</li></ul><ol><li>上架</li><li>复盘</li></ol>");
+    // A `*` item and an item of any number make lists too; an indented item joins its list, so lists never nest.
+    expect(render("* 写文案\n  - 配图\n\n3. 上架")).toBe("<ul><li>写文案</li><li>配图</li></ul><ol><li>上架</li></ol>");
     expect(render("**已完成** 一半，*剩下* 用 `npm test` 核对\n第二行")).toBe("<p><strong>已完成</strong> 一半，<em>剩下</em> 用 <code>npm test</code> 核对<br>第二行</p>");
     // Nothing inside a code block or a code span is formatted.
     expect(render("```\n**原样** [链接](https://example.com)\n```")).toBe("<pre><code>**原样** [链接](https://example.com)</code></pre>");
     expect(render("`**原样**`")).toBe("<p><code>**原样**</code></p>");
   });
+
+  it.each([["#### 四级", "#### 四级"], ["+ 写文案", "+ 写文案"], ["> 引用", "&gt; 引用"], ["---", "---"], ["~~删除~~", "~~删除~~"]])(
+    "shows %j, which it does not render, as written", (text, html) => {
+      expect(render(text)).toBe(`<p>${html}</p>`);
+    });
 
   it("puts a table in its own scroll region", () => {
     expect(render("| 商品 | 价格 |\n| --- | ---: |\n| D | 99 |\n| E | **120** |")).toBe(
