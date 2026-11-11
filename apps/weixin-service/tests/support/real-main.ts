@@ -9,6 +9,7 @@ import type { PublicCodexServiceState } from "../../src/conversation-service.js"
 import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { authorizeLocalService } from "../../e2e/console-session.js";
 import { signalProcessGroup } from "./process-group.js";
+import { processWaitLimitMs } from "./process-wait.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
 export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number; dependsOn: string[] };
@@ -72,7 +73,7 @@ export async function start(directory: string, extraEnv: Record<string, string> 
   // The local service requires an authorized browser; the test logs in through the control channel like the owner.
   let cookie: string | undefined;
   const authorized = async () => cookie ??= await authorizeLocalService(directory);
-  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(1000) })).json() as State; }
+  async function state(): Promise<State> { return await (await fetch(`${url}/api/state`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(processWaitLimitMs) })).json() as State; }
   async function until(predicate: (value: State) => boolean, timeout = 15000): Promise<State> {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
@@ -104,7 +105,7 @@ export async function start(directory: string, extraEnv: Record<string, string> 
     },
     /** GETs a JSON route as the authorized owner. */
     async get<T = unknown>(route: string): Promise<T> {
-      const response = await fetch(`${url}${route}`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(5000) });
+      const response = await fetch(`${url}${route}`, { headers: { cookie: await authorized() }, signal: AbortSignal.timeout(processWaitLimitMs) });
       const text = await response.text();
       expect(response.status, text).toBe(200);
       return JSON.parse(text) as T;
