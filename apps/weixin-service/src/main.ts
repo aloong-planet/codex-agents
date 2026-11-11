@@ -783,7 +783,7 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
         return new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           requests.push(request); if (requests.length > 20) requests.shift();
-        }, undefined, observeThreadStart, kind === "dispatchAgent" ? runtime.env.CODEX_HOME : undefined);
+        }, undefined, observeThreadStart, kind === "dispatchAgent" || kind === "dispatchLeader" ? runtime.env.CODEX_HOME : undefined);
       }
       const transport = spawnIsolatedAppServer(codexExecutable, runtime);
       exits.push(transport.exited);
@@ -1028,17 +1028,23 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     })();
   // Team Leader turns are tool-free; each turn holds its pool slot only for itself (agent-dispatch::QR-001/AC-02).
   const fixtureLeader = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime ? new FixtureTeamLeader(fixtureFeishu!) : undefined;
-  const leader: TeamLeader = fixtureLeader ?? (() => {
+  const codexLeader = fixtureLeader ? undefined : (() => {
     if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-    const create = (scope: string) => isolatedConversation("dispatchLeader", { instance: scope });
-    return new CodexTeamLeader(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
+    // Each runtime is created through the Team Leader, which keeps its home from being compacted while it exists (agent-dispatch::QR-003/AC-04).
+    const create = (scope: string): DispatchRuntime => created.tracked(scope, () => isolatedConversation("dispatchLeader", { instance: scope }));
+    const created = new CodexTeamLeader(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
       runtime: (scope, work) => runtimes.use(scope, () => create(scope), ({ agent, cwd }) => work(agent, cwd)), model,
       ...(fixtureCoordinationRuntime ? { prepareThread: (input, phase, threadId, assignments) => answer(threadId, JSON.stringify(phase === "plan"
         ? withFixtureDependencies(fixtureFeishu!.leaderPlan(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultPlan(input)
         : phase === "supplement" ? withFixtureDependencies(fixtureFeishu!.leaderSupplement(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultSupplement(assignments as readonly LeaderAssignmentView[])
           : fixtureFeishu!.leaderClosing(input.fixtureMessageId, input.leader.id) ?? fixtureDefaultClosing(assignments as readonly LeaderAssignmentReport[]))) } : {}),
+      // The sessions stored requests can still use are asked of the dispatch each time, which exists before any sweep or release.
+      homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchLeader.directory), compact: compactRuntimeHome, inUse: () => dispatch.leaderSessions() },
+      report: (code) => process.stderr.write(`${code}\n`),
     });
+    return created;
   })();
+  const leader: TeamLeader = fixtureLeader ?? codexLeader!;
   const teamView = (teamId: string, version: number) => {
     const versionDefinitions = definitionsFor(version), team = versionDefinitions.teams.find(({ id }) => id === teamId);
     if (!team) return undefined;
@@ -1087,7 +1093,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   fixtureDispatchTurns = recorded.turns;
   const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier: recorded.classifier, executor: recorded.executor, authorized,
     leader: recorded.leader,
-    definitionsVersion: () => teams.current().version, team: teamView, revision: contextRevision,
+    definitionsVersion: () => teams.current().version, team: teamView, teams: (version) => definitionsFor(version).teams.map(({ id }) => id), revision: contextRevision,
     // The current definitions decide which teams take work in a group, whatever version a request was planned under.
     roster: (event) => {
       const chatId = configuration.owner.deliveryTarget(event.accountId, event.target);
@@ -1131,6 +1137,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
     },
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
+  // Before any dispatch work can start a Team Leader runtime (agent-dispatch::QR-003/AC-03).
+  codexLeader?.compactSupersededHomes();
   channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
     () => teams.roster().agents);
   countActiveAssignments = () => {

@@ -182,11 +182,20 @@ The configured idle limit defaults to 5 minutes. The configured concurrency limi
 
 ### agent-dispatch::QR-002 Disk kept per Executor home
 
-Applies to: the isolated runtime home of every Executor, including the homes left by the earlier one-specialist dispatch. The homes of the Coordinator, the Team Leaders and group conversations are excluded.
+Applies to: the isolated runtime home of every Executor, including the homes left by the earlier one-specialist dispatch. Team Leader homes follow agent-dispatch::QR-003. The homes of the Coordinator and of group conversations are excluded.
 
 - agent-dispatch::QR-002/AC-01: Once an Executor's runtime has been released and its App Server process has exited, its home holds only its records: the thread rollouts. Everything else in the home is removed, and every rollout stays byte for byte unchanged.
 - agent-dispatch::QR-002/AC-02: Each start compacts every Executor home before any dispatch work runs, under agent-dispatch::QR-002/AC-01 and agent-dispatch::QR-002/AC-03. This covers the homes written before compaction existed and the homes whose compaction a stop or crash cut off.
 - agent-dispatch::QR-002/AC-03: Compaction removes nothing from a home whose records it cannot confirm: the thread recorded for the home has no rollout there, or no thread is recorded and the home holds no rollout. When a removal fails, the home keeps what remains. In both cases a diagnostic names the home and the reason, and the next start checks the home again. Rollouts are never opened, changed or removed.
+
+### agent-dispatch::QR-003 Disk kept per superseded Team Leader home
+
+Applies to: the isolated runtime home of every Team Leader session. The homes of the Coordinator and of group conversations are excluded: each is one session that keeps being resumed, and their number is bounded.
+
+- agent-dispatch::QR-003/AC-01: A compacted Team Leader home holds only its records, the thread rollouts. Everything else in the home is removed, and every rollout stays byte for byte unchanged, as agent-dispatch::QR-002/AC-01 states for an Executor home. agent-dispatch::QR-002/AC-03 applies with the thread that the Team Leader's session records.
+- agent-dispatch::QR-003/AC-02: A Team Leader home is superseded unless a stored request can still use its session, and only a superseded home is compacted. A stored request keeps, for every team of its definitions version, the home of that team's session in the request's conversation and binding under the current access revision. It keeps them while it is queued, running or waiting, and for as long as its definitions version is the current one.
+- agent-dispatch::QR-003/AC-03: Superseded homes are compacted at each start, before any dispatch work runs, and whenever a Team Leader turn starts a session that has none recorded.
+- agent-dispatch::QR-003/AC-04: No home is compacted while a runtime exists for it. A superseded home whose runtime exists is compacted once that runtime has been released and its App Server process has exited, if the home is still superseded then. When the process has not exited within the bounded wait, the home is left to the next start.
 
 ## Constraints
 
@@ -242,9 +251,14 @@ Applies to: every Coordinator, Team Leader and Executor runtime. Each agent runs
 | Requester retries a failed request after its Executor's home was compacted | The Assignment resumes its own thread with its earlier process, because the rollouts are kept, under agent-dispatch::QR-002/AC-01, agent-dispatch::REQ-008/AC-01 and agent-dispatch::REQ-012/AC-03 |
 | Requester retries while the failed attempt's runtime is still closing | The retry's runtime starts only after the old one's process has exited and its home was compacted, so compaction never removes a running runtime's files, under agent-dispatch::QR-002/AC-01 |
 | A released Executor's App Server process does not exit | Its home is left as it is until the next start's sweep under agent-dispatch::QR-002/AC-02; the pool slot is freed after a bounded wait |
-| Service stops or crashes while it compacts an Executor home | Rollouts intact; the next start finishes the compaction under agent-dispatch::QR-002/AC-02 |
-| Compaction cannot remove an entry, or finds no rollout for the home's thread | The home keeps what remains and its records stay unchanged; a diagnostic names the home and the reason under agent-dispatch::QR-002/AC-03 |
+| Service stops or crashes while it compacts an Executor home or a superseded Team Leader home | Rollouts intact; the next start finishes the compaction under agent-dispatch::QR-002/AC-02 or agent-dispatch::QR-003/AC-03 |
+| Compaction cannot remove an entry, or finds no rollout for the home's thread | The home keeps what remains and its records stay unchanged; a diagnostic names the home and the reason under agent-dispatch::QR-002/AC-03, which agent-dispatch::QR-003/AC-01 applies to a Team Leader home |
 | A retried Assignment's rollout is missing, for example removed by hand | Existing behavior, unchanged: the retry runs on a fresh thread without its earlier process. Compaction never causes this, because it keeps every rollout (agent-dispatch::QR-002/AC-01) |
+| Owner saves a definitions change while a request runs, and the request then closes | The request's Team Leader turns resume the same thread, in a home that stayed whole; the home is compacted at the first sweep or release after the request has ended, under agent-dispatch::QR-003/AC-02 through agent-dispatch::QR-003/AC-04 |
+| The access revision changes while a request runs | The request's next Team Leader turn starts a new session, as it did before superseded homes were compacted; every home of the earlier revision is superseded at once, under agent-dispatch::QR-003/AC-02 |
+| Requester retries a failed request after its Team Leader's home was compacted | The Team Leader's turns resume the same thread from the kept rollout, under agent-dispatch::QR-003/AC-01 and agent-dispatch::QR-001/AC-01 |
+| A superseded Team Leader home's runtime still exists, or its released runtime's process has not exited | The home is left whole; it is compacted when the runtime has been released and its process has exited, or else at the next start, under agent-dispatch::QR-003/AC-04 |
+| The stored requests cannot be read when a sweep or a release asks which Team Leader sessions are in use | Nothing is removed and a diagnostic is written; the next sweep asks again, under agent-dispatch::QR-003/AC-02 |
 | Deliver same message repeatedly, including changed delivery event IDs; restart after admission | One durable request under agent-dispatch::REQ-008/AC-02 and agent-dispatch::REQ-009/AC-02 |
 | Stop during an Assignment, after a local write, or after a platform send | Existing safe recovery only; report the interrupted Assignment rather than repeat unknown effects under agent-dispatch::REQ-008/AC-01 through agent-dispatch::REQ-008/AC-03 |
 | Start, cross-team, closing or result notification is rejected or uncertain; requester asks for another report | Delivery retry separate from execution under agent-dispatch::REQ-008/AC-03 |
@@ -446,10 +460,24 @@ Replies that refuse a control message, and clarifications without a request, bel
 **Executor home compaction.** An Executor's runtime home keeps only its records: the thread rollouts in its Codex home's session and archived-session directories (agent-dispatch::QR-002, [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)). Everything else in the home is bookkeeping. The App Server's databases are rebuilt from the rollouts when it next starts. The configuration, the login copy and the model catalog are written again whenever the host creates a runtime. The rest are the App Server's logs, locks and temporary files. What is kept is an allowlist, so files that a later Codex version adds are removed as well.
 
 - A runtime release compacts the home inside the pool's close, once the App Server process has exited. A new runtime for the same home, such as a retry's, starts only after that close settles. A process that has not exited within a bounded wait leaves its home to the next start's sweep.
-- Each start sweeps every Executor home before dispatch work runs. Executor homes are recognized by their scope form, which the homes of the Coordinator, the Team Leaders and group conversations do not share; those homes are not compacted.
+- Each start sweeps every Executor home before dispatch work runs. Executor homes are recognized by their scope form, which the homes of the Coordinator, the Team Leaders and group conversations do not share, so this sweep leaves them alone.
 - Before removing anything, compaction checks the records by file name only: the rollout of the thread that the Executor's session records, or, for a home with no recorded thread, at least one rollout. A retry needs nothing else: the App Server resumes the recorded thread from its rollout alone, with the earlier process in the model input, and without the rollout it starts a fresh thread without reporting an error (ADR-0031 Sources).
 - Compaction is idempotent and removes one entry at a time, so a stop at any point leaves the rollouts and some removable entries, which the next start removes.
 - Executor memory (agent-dispatch::REQ-012/AC-03) is kept in the host's memory store, outside every runtime home, so compaction never touches it.
+
+**Team Leader home compaction.** A Team Leader's session is shared by every request its team takes in one conversation and binding under one access revision and definitions version, so a new revision or version gives every team a new session and a new home there. The earlier homes are compacted once they are superseded (agent-dispatch::QR-003, [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)), to the same records and after the same check as an Executor home.
+
+- Which sessions are in use is worked out from the stored requests each time a sweep or a release asks.
+  - A request counts while it is queued, running or waiting. A failed, partially failed or partially unassigned request does not count, although a retry can queue it again at any time: its Team Leader then resumes the same thread from the kept rollout.
+  - Every request counts while its definitions version is the current one, whatever its state, because later requests of its conversation resume those sessions.
+  - A request counts for every team of its definitions version, not only for the teams it has used: a later plan, supplement or retry can place a part with any of them.
+  - A request that has never run has no definitions version yet and counts for nothing.
+- A session's key takes the access revision that is current when a turn runs; a request stores none. A new revision therefore supersedes every earlier home at once, also for a request in flight.
+- A sweep runs at each start, before dispatch work, and when a Team Leader turn starts a session that has none recorded, which is when a new revision or version begins to create homes. Saving a definitions change or a permission change runs no sweep by itself.
+- A home whose request ends with no further Team Leader turn, after its runtime was already released, stays whole until the next sweep. A request cancelled while it waited for a choice is an example.
+- A home counts as occupied from before its runtime is created until that runtime's close has settled, and a sweep skips it. Finding a home superseded and removing its files is one uninterrupted step, so compaction never interleaves with the creation of a runtime on the same home.
+- A home whose released runtime's process had not exited is left alone until the next start, also when a later runtime on it is released.
+- Team Leader homes are recognized by their scope form, which no other runtime home shares. The thread a session records is kept in the host's session store, outside the home, and so is the Team Leader's memory (agent-dispatch::REQ-012/AC-02); compaction touches neither.
 
 **Node runtime.** Deployment and local acceptance use the Node version pinned in the repository's CI configuration, matching the existing service runtime. A runtime upgrade must first verify real permission-worker writes and recovery; a successful model response does not establish filesystem compatibility. Node 26.13.0 fails that check. Its Permission Model also denies `FileHandle.sync()` and `FileHandle.datasync()`, where 26.7.0 denied `fs.fsync()`, `fs.fsyncSync()` and `fs.fdatasyncSync()` but allowed the `FileHandle` methods. The file-sandbox worker syncs each edited or written file before it replaces the target, so under 26.13.0 every file edit and write by the permission worker fails. The pin cannot move past 26.7.x until the worker's write durability is redesigned. Production's Homebrew Node is held at 26.7.0 with `brew pin`, and it is unpinned only after the permission-worker write and recovery validation.
 
@@ -490,9 +518,9 @@ These tests do not inspect prompt text.
 **Home compaction.**
 
 - The compaction rule is tested on seeded homes with the file set the App Server leaves after a turn: the listing that remains, the rollouts' bytes, the guard and a failed removal.
-- In fixture mode the fixture App Server writes a rollout named after each thread it starts into an Executor runtime's Codex home, so real-main cases compact as production does. It does not model resuming from the rollout.
-- The fixture-only `WORKFLOW_FIXTURE_COMPACTION_HOLD=1` seam stops compaction after its first removal, so a case can kill the service mid-compaction. Outside fixture mode, startup refuses it.
-- Resume after compaction is tested on the installed App Server with the loopback fake model, opt-in like the other isolated runtime checks and rerun after every Codex upgrade. A failed Assignment with a host-tool call is compacted and retried; the retry resumes the same thread, with the first attempt's user text, tool output and answer in its model input.
+- In fixture mode the fixture App Server writes a rollout named after each thread it starts into the Codex home of an Executor's runtime, and of a Team Leader's under the coordination seam, so real-main cases compact as production does. It does not model resuming from the rollout.
+- The fixture-only `WORKFLOW_FIXTURE_COMPACTION_HOLD=1` seam stops an Executor home's compaction after its first removal, so a case can kill the service mid-compaction. Outside fixture mode, startup refuses it. A superseded Team Leader home is compacted by the same function, and no case stops the service while it compacts one.
+- Resume after compaction is tested on the installed App Server with the loopback fake model, opt-in like the other isolated runtime checks and rerun after every Codex upgrade. A failed Assignment with a host-tool call is compacted and retried; the retry resumes the same thread, with the first attempt's user text, tool output and answer in its model input. A Team Leader session whose home was compacted after its plan turn resumes the same thread for its closing turn, with the plan turn in its model input.
 
 **Real-model suite.** An opt-in suite, `pnpm test:dispatch-real-model`, drives real main through the fixture Feishu ingress with the Coordinator, the Team Leaders and the Executors on their real runtimes and the real model. It runs only with `DISPATCH_REAL_MODEL_TEST=1`, so no default run and no CI run includes it.
 
@@ -517,6 +545,7 @@ These tests do not inspect prompt text.
 - Executors with bot identities or private chats.
 - Penny joining the team structure (ADR-0025).
 - Binding teams to Weixin conversations.
+- Compacting the runtime homes of the Coordinator and of group conversations, and checkpointing the App Server's write-ahead logs in homes that are still in use ([ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)).
 
 ## Further Notes
 

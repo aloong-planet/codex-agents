@@ -5,7 +5,7 @@ import type { InboundContent, SendTextResult } from "./channel-contract.js";
 import type { CrossTeamDecision, DispatchAgent, DispatchAssignment, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob,
   DispatchPart, DispatchPendingResult, PrerequisiteResult } from "./agent-dispatch-types.js";
 import { parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
-import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
+import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderSessionKey, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN } from "./team-registry.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
@@ -180,6 +180,8 @@ export class AgentDispatch {
     definitionsVersion(): number;
     /** A team as its request's definitions version defines it, or undefined when that version has no such team. */
     team(teamId: string, definitionsVersion: number): DispatchTeamView | undefined;
+    /** The IDs of every team a definitions version defines. */
+    teams(definitionsVersion: number): readonly string[];
     /** The access revision that keys Team Leader sessions. */
     revision(): string;
     /**
@@ -263,6 +265,23 @@ export class AgentDispatch {
       byRequest.set(String(row.request_id), list);
     }
     return this.jobs().map((job) => ({ job, assignments: this.assignments(job.id), posts: byRequest.get(job.id) ?? [] }));
+  }
+
+  /**
+   * The Team Leader sessions a stored request can still use; their runtime homes stay whole (agent-dispatch::QR-003/AC-02). A
+   * request counts while it is queued, running or waiting, or when its definitions version is the current one, whose sessions
+   * later requests resume. It counts for every team of its version, in its conversation and binding: a later plan, supplement
+   * or retry may place a part with any of them. Every session is keyed by the current access revision, the one a turn uses.
+   * A request that never ran has no definitions version and no session.
+   */
+  leaderSessions(): LeaderSessionKey[] {
+    const revision = this.options.revision(), current = this.options.definitionsVersion();
+    const conversations = new Map<string, LeaderTurnInput["session"]>();
+    for (const { event: { accountId, target }, bindingHash, definitionsVersion, status } of this.jobs()) {
+      if (definitionsVersion === undefined || (definitionsVersion !== current && !["queued", "running", "waiting"].includes(status))) continue;
+      conversations.set(JSON.stringify([accountId, target, bindingHash, definitionsVersion]), { accountId, target, bindingHash, revision, definitionsVersion });
+    }
+    return [...conversations.values()].flatMap((session) => this.options.teams(session.definitionsVersion).map((leaderId) => ({ leaderId, ...session })));
   }
 
   async close(): Promise<void> {

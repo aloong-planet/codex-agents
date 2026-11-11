@@ -172,7 +172,7 @@ Each Executor's runtime home is `group-model-runtimes/dispatch-<64 hex>/` in the
 
 A retry resumes the Assignment's thread from its rollout. The App Server rebuilds its databases, and the service writes the configuration, login copy and catalog again.
 
-The first start after deploying this compacts every existing Executor home in the same way, including the homes of the earlier one-specialist dispatch, before any dispatch work runs. Every later start repeats the sweep. The homes of the Coordinator (`dispatch-coordinator`), the Team Leaders (`dispatch-leader-…`) and group conversations are not touched, and no rollout is ever opened, changed or removed. Compacted Executor homes need no restore when rolling back to the previous release: it resumes Executor threads from the same rollouts.
+The first start after deploying this compacts every existing Executor home in the same way, including the homes of the earlier one-specialist dispatch, before any dispatch work runs. Every later start repeats the sweep. This sweep does not touch the homes of the Coordinator (`dispatch-coordinator`), the Team Leaders (`dispatch-leader-…`) or group conversations; Team Leader homes are described below. No rollout is ever opened, changed or removed. Compacted Executor homes need no restore when rolling back to the previous release: it resumes Executor threads from the same rollouts.
 
 When the service cannot confirm a home's records, it keeps the whole home and writes one line to standard error, for example `dispatch_executor_home_kept:rollout_missing:dispatch-<64 hex>`. The reasons are:
 
@@ -182,6 +182,19 @@ When the service cannot confirm a home's records, it keeps the whole home and wr
 - `compaction_failed`: the session store could not be read.
 
 `dispatch_executor_home_deferred:process_running:dispatch-<64 hex>` means a released runtime's App Server had not exited within 10 seconds; the next start compacts that home. `dispatch_executor_homes_unreadable` means the start could not list `group-model-runtimes/`, so it compacted no home. A kept home is reported again at every start. Inspect it; do not delete its rollouts.
+
+## Team Leader runtime homes
+
+Each Team Leader session has its own home, `group-model-runtimes/dispatch-leader-<64 hex>/`: one per team, conversation, binding (Sam's application and the group's allowed senders), access revision and definitions version. A home that no stored request can use any more is superseded, and the service compacts it to its thread rollouts, as it does an Executor home. A home stays whole in two cases:
+
+- a request of the same conversation and binding that is queued, running or waiting was planned under its definitions version;
+- its definitions version is the current one.
+
+A changed access revision supersedes every earlier home at once.
+
+Superseded homes are compacted at each start, when a Team Leader's turn starts a new session, and when the runtime of a superseded home is released. The first start after deploying this therefore compacts every superseded Team Leader home that earlier releases left. Saving teams or permissions compacts nothing by itself; the next request does. A retry of a failed request resumes its Team Leader's thread from the kept rollout. Compacted homes need no restore when rolling back to the previous release.
+
+The diagnostics follow those of Executor homes, with `leader` in place of `executor`: `dispatch_leader_home_kept:<reason>:dispatch-leader-<64 hex>` with the same reasons, and `dispatch_leader_home_deferred:process_running:dispatch-leader-<64 hex>`. `dispatch_leader_homes_unreadable` means the service could not list `group-model-runtimes/`, or could not read which sessions are in use, so it removed nothing. The homes of the Coordinator and of group conversations are never compacted.
 
 ## Rollback and diagnosis
 
