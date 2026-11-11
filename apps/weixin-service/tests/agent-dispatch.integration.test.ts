@@ -52,8 +52,6 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - A message the pending-choice router takes as a new goal while the only open choice is a superseded one replaces nothing and goes
 //   to the Coordinator. No case drives it through main: the fixture router never answers with a new goal. The dispatch engine's own
 //   guard is unit-tested. Retest condition: a fixture router that can answer with a new goal, or a live run.
-// - With several choices of one requester open in a group, main asks for the prompt's reference before any routing and resumes
-//   nothing, also when one of them is superseded. No case here opens a superseded choice beside another one.
 // - Main leaves an expired choice alone when a cancel or supplement closes a request's choices. No case shows it: a choice expires
 //   after 24 hours and main gives the workflow engine no clock to move. Retest condition: a fixture clock for the workflow engine.
 // - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
