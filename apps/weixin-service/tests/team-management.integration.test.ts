@@ -246,7 +246,7 @@ it("counts each team's active Assignments in the team view", async () => {
 // outcome must not change routing by itself. While the team's application cannot post, the owner sees 需处理 on the page; the
 // request fails, and its failure report goes through the same application, which refuses it too. The requester sees Sam's one
 // sentence for a rejected start message, the only post another identity makes for a team (agent-dispatch::REQ-008/AC-04).
-it("keeps a team accepting work when its replaced secret fails the check, and only Sam's sentence about the unstarted request reaches the group", async () => {
+it("keeps a team accepting work when its replaced secret fails the check, and only Sam's sentence that the attempt has not started reaches the group", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-secret-failed-"));
   let running: Running | undefined;
   try {
@@ -263,7 +263,7 @@ it("keeps a team accepting work when its replaced secret fails the check, and on
     console.log(JSON.stringify({ kind: "team_secret_failed", command: "请帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
     expect(failed.agentDispatch?.jobs[0]?.result).toBe("接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。");
     expect([failed.agentFixtureOutboxes?.bill?.text, failed.fixtureTextOutbox?.map(({ message }) => message), failed.fixtureModelRequests ?? []])
-      .toEqual([[], ["Bill 队的接单通知未能发出，这项请求尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。"], []]);
+      .toEqual([[], ["Bill 队的接单通知未能发出，本次尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。"], []]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 

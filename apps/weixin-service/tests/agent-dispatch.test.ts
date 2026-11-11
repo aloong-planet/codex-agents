@@ -1452,17 +1452,17 @@ it("keeps a cross-team team's frozen application when a later division adds to i
 // (agent-dispatch::REQ-008/AC-04, AC-03). A cross-team Team Leader's start message gets none: "starts no Executor when a
 // cross-team Team Leader's start message is not confirmed as sent" above pins every post of that case.
 // Gap: a storage failure while the sentence is stored is not driven, for the lack of a storage seam named at the top of this file.
-const NOT_STARTED = "Alice 队的接单通知未能发出，这项请求尚未开始处理。请检查 Alice 是否可在本群发言后明确重试。";
+const NOT_STARTED = "Alice 队的接单通知未能发出，本次尚未开始处理。请检查 Alice 是否可在本群发言后明确重试。";
 const RECEIPT_FAILED = "接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。";
 const WAIT = { timeout: 2000, interval: 10 };
 const noticeStates = (dispatch: AgentDispatch) => dispatch.getState().notices.map(({ id, state }) => `${String(id)} ${String(state)}`);
 
+// A start message the platform rejects is driven by the cases below that refuse `dispatch:one:receipt:0`.
 it.each([
-  ["rejected by the platform", { ok: false, reason: "rejected", acceptedSegments: 0 }, "rejected"],
   ["refused by the channel, which has no sender for the application", { ok: false, reason: "unavailable", acceptedSegments: 0 }, "rejected"],
   ["of unknown outcome", { ok: false, reason: "unknown", acceptedSegments: 0 }, "unknown"],
   ["accepted in part", { ok: false, reason: "rejected", acceptedSegments: 1, totalSegments: 2 }, "unknown"],
-] as const)("has the Coordinator tell the group once that the request has not started only for a lead start message recorded as rejected: one %s", async (_case, receipt, recorded) => {
+] as const)("has the Coordinator tell the group once that the attempt has not started only for a lead start message recorded as rejected: one %s", async (_case, receipt, recorded) => {
   let runs = 0;
   const deliveries: Array<{ sender: string; message: string; id: string }> = [], destinations: string[] = [];
   // The request comes from a group of its own, and the lead's failure report is refused too, as when its application cannot post.
@@ -1492,6 +1492,23 @@ it("leaves the Coordinator silent when the lead's start message was never submit
   dispatch.admit(event("one", "alice"));
   await vi.waitFor(() => expect(noticeStates(dispatch)).toEqual(["one:receipt:0 cancelled", "one:closing:0 cancelled"]), WAIT);
   expect([dispatch.getState().jobs[0]?.status, deliveries]).toEqual(["failed", []]);
+});
+
+it("leaves the Coordinator silent when the requester cancelled the request while the lead's start message was being sent", async () => {
+  const sending = deferred<SendTextResult>(), cancelTakenIn = deferred();
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), done, deliveries,
+    { outcome: ({ operationId }) => operationId === "dispatch:one:receipt:0" ? sending.promise : undefined, closeChoices: async () => { cancelTakenIn.resolve(); } });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(noticeStates(dispatch)).toEqual(["one:receipt:0 sending"]), WAIT);
+  // The host is asked to close the request's choices once the cancel of a running request is recorded.
+  dispatch.admit(event("two", "cancel:one"));
+  await cancelTakenIn.promise;
+  sending.resolve({ ok: false, reason: "rejected", acceptedSegments: 0 });
+  await vi.waitFor(() => expect(noticeStates(dispatch)).toEqual(["one:receipt:0 rejected", "one:closing:0 accepted"]), WAIT);
+  expect(posts(deliveries)).toEqual([`cli_alice: ${start(1)}`, "cli_alice: 已停止继续处理。已经完成的操作不会自动撤销。"]);
+  expect(dispatch.getState().jobs[0]?.status).toBe("cancelled");
 });
 
 it("tries nothing else when the Coordinator's own sentence is rejected, and sends only the lead's report again when the requester asks for it", async () => {
@@ -1559,6 +1576,23 @@ it("has the Coordinator tell the group again when a retry's start message is rej
   const attempt = [`cli_alice: ${start(1)}`, `cli_sam: ${NOT_STARTED}`, `cli_alice: ${RECEIPT_FAILED}`];
   expect(posts(deliveries)).toEqual([...attempt, ...attempt]);
   expect(noticeStates(dispatch).filter((notice) => notice.includes(":receipt-rejected:"))).toEqual(["one:receipt-rejected:0 accepted", "one:receipt-rejected:1 accepted"]);
+});
+
+it("keeps the Coordinator's sentence among the request's posts, and captures it into the group memory with the request's next accepted report", async () => {
+  const captures: Capture[] = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), done, [], { captures, rejected: new Set(["dispatch:one:receipt:0", "dispatch:one:closing:0"]) });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(noticeStates(dispatch).at(-1)).toBe("one:closing:0 rejected"), WAIT);
+  expect(dispatch.records()[0]?.posts.map(({ id, agentId, text, state }) => ({ id, agentId, text, state }))).toEqual([
+    { id: "one:receipt:0", agentId: "alice", text: start(1), state: "rejected" },
+    { id: "one:receipt-rejected:0", agentId: "sam", text: NOT_STARTED, state: "accepted" },
+    { id: "one:closing:0", agentId: "alice", text: RECEIPT_FAILED, state: "rejected" }]);
+  // Nothing of the failed attempt was captured, because its report was rejected; the retry's accepted closing captures what was accepted since.
+  expect(groupCaptures(captures)).toEqual([]);
+  dispatch.admit(event("two", "retry:one"));
+  await vi.waitFor(() => expect(groupCaptures(captures)).toHaveLength(1), WAIT);
+  expect(groupCaptures(captures).map(({ assistantText }) => assistantText)).toEqual([[NOT_STARTED, start(1), "LEADER_CLOSING_1"].join("\n")]);
 });
 
 // Dependencies between Assignments (ticket 31: agent-dispatch::REQ-011, REQ-008/AC-01, REQ-007/AC-04, US-003/AC-01).

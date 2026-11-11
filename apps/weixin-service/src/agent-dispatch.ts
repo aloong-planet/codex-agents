@@ -128,9 +128,12 @@ function crossTeamAnnouncement(coordinator: string, lead: string, placed: Readon
   return placed.length === 1 ? `应 ${lead} 请求，${placed[0]!.part}交给 ${placed[0]!.leader} 队；${ending}`
     : `应 ${lead} 请求：\n${placed.map(({ part, leader }) => `${part}交给 ${leader} 队`).join("\n")}\n${ending}`;
 }
-/** The Coordinator's sentence for a rejected lead start message: it names the lead's team and nothing of the request or the team's work. */
+/**
+ * The Coordinator's sentence for a rejected lead start message: it names the lead's team and nothing of the request or the team's
+ * work. Like the lead's own report it speaks of the attempt (本次), because an earlier attempt of the request may have done work.
+ */
 function receiptRejected(lead: string): string {
-  return `${lead} 队的接单通知未能发出，这项请求尚未开始处理。请检查 ${lead} 是否可在本群发言后明确重试。`;
+  return `${lead} 队的接单通知未能发出，本次尚未开始处理。请检查 ${lead} 是否可在本群发言后明确重试。`;
 }
 /** Each of a Team Leader's Assignments, `view`, with its own result, one per line: the closing when its closing turn fails. */
 function resultLines(view: readonly DispatchAssignment[]): string[] {
@@ -792,12 +795,14 @@ export class AgentDispatch {
   /**
    * The one post another identity makes for a team (agent-dispatch::REQ-008/AC-04): when the lead's start message is recorded as
    * rejected, its failure report would go through the same application, so the Coordinator tells the request's group that the
-   * request has not started. An uncertain start message may have arrived, and one never submitted did not fail at the platform,
+   * attempt has not started. An uncertain start message may have arrived, and one never submitted did not fail at the platform,
    * so neither gets the sentence. It is stored once per attempt, with its own delivery state. A stopping service stores nothing,
-   * because a post stored then is cancelled: the next start finds the rejected start message again and posts the sentence.
+   * because a post stored then is cancelled: the next start finds the rejected start message again and posts the sentence. A
+   * request whose cancel was taken in meanwhile gets none: it ends cancelled, and the retry the sentence suggests would be refused.
    */
   private async reportRejectedReceipt(job: DispatchJob, receipt: string, lead: string): Promise<void> {
-    if (this.closing || this.database.prepare("SELECT state FROM dispatch_notice WHERE id = ?").get(receipt)?.state !== "rejected") return;
+    if (this.closing || this.job(job.id)?.cancelRequested) return;
+    if (this.database.prepare("SELECT state FROM dispatch_notice WHERE id = ?").get(receipt)?.state !== "rejected") return;
     await this.deliverNotice(`${job.id}:receipt-rejected:${job.attempt}`, { ...this.coordinatorNotice(job, receiptRejected(lead)), requestId: job.id });
   }
 

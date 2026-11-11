@@ -1367,7 +1367,9 @@ it.each(["member", "group", "application"] as const)("fails closed for an unavai
     const unavailable = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
     expect(unavailable.fixtureModelRequests).toEqual([]);
     expect(unavailable.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
-    expect(unavailable.fixtureTextOutbox).toEqual([]);
+    // The channel refuses the start message of an application that is offline, so it is recorded as rejected: Sam's one sentence
+    // is the only post, and nothing goes out for Alice under another identity (agent-dispatch::REQ-008/AC-04).
+    expect(unavailable.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Alice 队的接单通知未能发出，本次尚未开始处理。请检查 Alice 是否可在本群发言后明确重试。" })]);
     expect(unavailable.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
     await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "ready" } });
     await send("om_running_before_revocation", "ou_owner", "alice", true);

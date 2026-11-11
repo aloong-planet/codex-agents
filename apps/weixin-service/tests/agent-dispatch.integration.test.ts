@@ -339,7 +339,7 @@ it("fails a request whose start message was uncertain at a crash, without sendin
 // wiring: the channel records the platform's refusal as rejected, and the sentence leaves through Sam's application to the
 // request's chat. The plan's title and Brief and the Coordinator's summary differ from the sentence, so the exact outboxes
 // show that nothing of the team's content went out.
-it("has Sam tell the group that a request has not started when its team's start message is rejected, and posts nothing else for the team", async () => {
+it("has Sam tell the group that the attempt has not started when the request's team has its start message rejected, and posts nothing else for the team", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-receipt-rejected-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
   try {
@@ -352,7 +352,7 @@ it("has Sam tell the group that a request has not started when its team's start 
     const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentDispatch.notices?.length === 3 &&
       state.agentDispatch.notices.every(({ state: delivery }) => delivery !== "queued" && delivery !== "sending"));
     console.log(JSON.stringify({ kind: "dispatch_receipt_rejected", command: "帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
-    expect(failed.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Bill 队的接单通知未能发出，这项请求尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。" })]);
+    expect(failed.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Bill 队的接单通知未能发出，本次尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。" })]);
     expect(failed.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
     expect(failed.agentDispatch?.notices?.map(({ id, state }) => [id.split(":").slice(1).join(":"), state]))
       .toEqual([["receipt:0", "rejected"], ["receipt-rejected:0", "accepted"], ["closing:0", "rejected"]]);
