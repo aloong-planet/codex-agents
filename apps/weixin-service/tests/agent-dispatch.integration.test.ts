@@ -27,7 +27,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // validation and effects. The Coordinator's and Team Leaders' real runtime construction is driven by the case that sets
 // WORKFLOW_FIXTURE_COORDINATION_RUNTIME, where the fixture App Server answers their turns with the same injected outputs.
 // Gaps:
-// - A live run is still needed for real model semantics and for the default Team Leader runtimes outside that seam.
+// - Real model semantics, and the default Team Leader runtimes outside that seam, are not driven here. The opt-in real-model suite
+//   (agent-dispatch-real-model.test.ts) drives them for single-turn requests; the rest still needs a live run.
 // - The upgrade case covers the stored states the pre-05 fixture mode can produce. A state reached only in production, such as
 //   an old request whose team was later removed from the local configuration, keeps the existing authorization fencing,
 //   which channel-startup's "fails closed for an unavailable assignee" cases drive; no case here builds it.
@@ -36,15 +37,22 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
-// - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
-//   the fixture injects both.
+// - Whether a real Team Leader divides work sensibly is judged from the real-model suite's run records. Which Assignments it marks
+//   affected by a supplement still needs a live run. The fixture injects both.
 // - Main records an Executor's memory capture with its Assignment's frozen sender. Fixture mode's curators record only the account
 //   and the turns, so no case observes that sender. Retest condition: a fixture curator that records each turn's source sender.
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
-// - Whether a real Team Leader marks sensible dependencies, and whether its closing names the Assignments left not started and
-//   the retry order, needs a live run; the fixture injects the plan and the closing. The host's own fallback closing is unit-tested.
+// - Which messages the real pending-choice router passes on to the Coordinator while a choice is open, so that it can cancel or
+//   supplement the request, is model behavior; the fixture router passes on every text that names no candidate.
+// - Main cannot be made to fail closing a choice in fixture mode, so what follows a failed close (the cancel still goes through, and
+//   an answer still handed over leaves the request cancelled) is driven only at the dispatch engine.
+// - Main leaves an expired choice alone when a cancel or supplement closes a request's choices. No case shows it: a choice expires
+//   after 24 hours and main gives the workflow engine no clock to move. Retest condition: a fixture clock for the workflow engine.
+// - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
+//   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
+//   closing is unit-tested.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -384,6 +392,29 @@ it("builds the Coordinator's and the Team Leader's runtimes from their resolved 
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// The real-model seam (agent-dispatch Testing Decisions). This case never reaches a model: the Codex executable is a command that
+// only fails and the Codex home holds a synthetic login, so it shows which path the Coordinator's turn takes, not what a model decides.
+// Gap: a Team Leader's or an Executor's turn follows a Coordinator turn that succeeded, which no default run can produce, so their
+// paths under the seam are reached only by the opt-in suite (agent-dispatch-real-model.test.ts).
+it("takes the Coordinator's turn to its real runtime with the Codex home's login under the real-model seam, and records it, ignoring an injected decision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-codex-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    writeFileSync(join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-synthetic"}');
+    running = await start(directory, { WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome });
+    await running.post("/api/fixture/inbound", groupMessage("om_real_model_seam", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    // Either outcome ends the wait: the Coordinator's fallback post, or the request an injected decision would create.
+    const result = await running.until((state) => state.fixtureTextOutbox?.length === 1 || (state.agentDispatch?.jobs.length ?? 0) > 0);
+    console.log(JSON.stringify({ kind: "dispatch_real_model_seam", command: "帮我整理闲鱼商品描述", jobs: result.agentDispatch, coordinator: result.fixtureTextOutbox, turns: result.fixtureDispatchTurns }));
+    expect(result.agentDispatch?.jobs).toEqual([]);
+    expect(result.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
+    // The turn tried to start the Coordinator's own App Server, which this executable cannot derive a model catalog for.
+    expect(result.fixtureDispatchTurns).toEqual([expect.objectContaining({ role: "coordinator", turn: "classify", messageId: "om_real_model_seam", error: "isolated_runtime_catalog_unavailable" })]);
+    expect(readFileSync(join(directory, "group-model-runtimes", "dispatch-coordinator", "codex-home", "auth.json"), "utf8")).toBe('{"OPENAI_API_KEY":"sk-synthetic"}');
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
+}, 30000);
+
 const RESPONSIBILITIES = { alice: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。", bill: "日常生活事务，包括吃穿住行的规划和安排。",
   jack: "技术事务和开发需求，包括代码分析、补丁、测试设计和技术研究。" };
 
@@ -605,7 +636,9 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     await post("om_old_running", "ou_owner", "安排周末出行", decision("bill", "安排周末出行"), { modelHold: true });
     await running.until((state) => state.agentDispatch?.jobs[5]?.status === "running" && (state.fixtureModelRequests?.length ?? 0) === 4);
     await post("om_old_queued", "ou_owner", "再安排周日的晚餐", decision("bill", "安排周日晚餐"));
-    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued");
+    // Another member's file choice, left open for the new code to close with a cancel.
+    await post("om_old_waiting_other", "ou_colleague", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote });
+    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued" && state.agentDispatch?.jobs[7]?.status === "waiting");
     await running.crash(); running = undefined;
     const storedIds = stored.agentDispatch!.jobs.map(({ id }) => id);
 
@@ -623,12 +656,19 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
       { status: "waiting", definitionsVersion: null, assignments: 0 },
       { status: "failed", definitionsVersion: null, assignments: 0 },
       { status: "completed", definitionsVersion: 2, assignments: 1 },
+      { status: "waiting", definitionsVersion: null, assignments: 0 },
     ]);
     expect(upgraded.agentDispatch?.jobs[0]?.result).toBe("这是 fixture Codex 回复。");
     expect(upgraded.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
       expect.stringContaining("服务中断，本次处理已停止。"), "我安排执行者 1（能力档 1）处理：安排周日晚餐。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
     expect([upgraded.agentFixtureOutboxes?.alice?.text, upgraded.agentFixtureOutboxes?.jack?.text, upgraded.feishuFixtureTextOutbox]).toEqual([[], [], []]);
     expect(upgraded.fixtureModelRequests).toHaveLength(1);
+
+    // A cancel closes the choice of a request stored before Assignments existed, whose workflow run is keyed by its message;
+    // the other member's stored choice stays open.
+    await post("om_new_cancel", "ou_colleague", "这项请求不用做了", { kind: "cancel", agentId: null, requestId: storedIds[7], summary: "", message: "" });
+    const closed = await running.until((state) => state.agentDispatch?.jobs[7]?.status === "cancelled");
+    expect(sendRuns(closed).map(({ status }) => status).sort()).toEqual(["cancelled", "needs_input"]);
 
     // The stored proposal, file choice and failed request still answer their original requester's controls.
     await post("om_new_confirm", "ou_owner", "确认", { kind: "confirm", agentId: null, requestId: storedIds[2], summary: "", message: "" });
@@ -724,8 +764,13 @@ it("finishes on the next start a compaction that a crash cut off, with the rollo
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-it("compacts the Executor homes left before the upgrade at the first start, and no other runtime home", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-"));
+// Main builds the real Team Leader, which sweeps its homes, under either seam. Under the real-model seam the Codex executable is a
+// command that only fails and the Codex home is synthetic; the start reaches no runtime and no model.
+it.each([
+  ["the coordination seam", (): Record<string, string> => ({ WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" })],
+  ["the real-model seam", (codexHome: string): Record<string, string> => ({ WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome })],
+] as const)("compacts the Executor homes left before the upgrade and a superseded Team Leader home at the first start under %s, and no other runtime home", async (_seam, environment) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-upgrade-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-home-compaction-codex-"));
   let running: Awaited<ReturnType<typeof start>> | undefined;
   try {
     dispatchConfig(directory);
@@ -752,18 +797,88 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
     seedExecutorHome(home(scopes[0]!), [{ threadId: "thread-ended" }]);
     seedExecutorHome(home(scopes[1]!), [{ threadId: "thread-other" }]);
     seedExecutorHome(home(`dispatch-${"0".repeat(64)}`), [{ threadId: "thread-pre05" }]);
-    const others = [`dispatch-leader-${"b".repeat(64)}`, "dispatch-coordinator", "feishu.group.seeded-elsewhere"];
-    for (const name of others) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
-    const unchanged = Object.fromEntries([scopes[1]!, ...others].map((name) => [name, homeListing(home(name))]));
-    running = await start(directory);
-    console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])),
-      diagnostics: running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home")) }));
+    // A Team Leader home no stored request can use, as an earlier access revision or definitions version left it.
+    const superseded = `dispatch-leader-${"b".repeat(64)}`, others = ["dispatch-coordinator", "feishu.group.seeded-elsewhere"];
+    for (const name of [superseded, ...others]) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
+    // Another superseded Team Leader home, which holds no rollout: its records cannot be confirmed, so it is kept and named.
+    const unconfirmed = `dispatch-leader-${"c".repeat(64)}`;
+    seedExecutorHome(home(unconfirmed), []);
+    const unchanged = Object.fromEntries([scopes[1]!, unconfirmed, ...others].map((name) => [name, homeListing(home(name))]));
+    running = await start(directory, environment(codexHome));
+    const diagnostics = running.output().split("\n").filter((line) => /^dispatch_(executor|leader)_home/u.test(line));
+    console.log(JSON.stringify({ kind: "dispatch_home_compaction_upgrade", homes: Object.fromEntries(readdirSync(root).map((name) => [name, homeListing(home(name))])), diagnostics }));
     expect(homeListing(home(scopes[0]!))).toEqual(keptListing("thread-ended"));
     expect(homeListing(home(`dispatch-${"0".repeat(64)}`))).toEqual(keptListing("thread-pre05"));
+    expect(homeListing(home(superseded))).toEqual(keptListing("thread-other"));
     expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
-    expect(running.output().split("\n").filter((line) => line.startsWith("dispatch_executor_home"))).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`]);
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+    expect(diagnostics).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`, `dispatch_leader_home_kept:rollout_missing:${unconfirmed}`]);
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
 }, 30000);
+
+// Superseded Team Leader homes (agent-dispatch::QR-003), under WORKFLOW_FIXTURE_COORDINATION_RUNTIME: main builds the real Team
+// Leader runtimes, and the fixture App Server writes a rollout for each thread it starts in their homes.
+// - The case changes the definitions version, not the access revision: every turn reads the current revision, so a request in
+//   flight keeps only its version's homes, and a revision change supersedes them at once.
+// - A fixture runtime leaves nothing in its home that a new runtime does not write again, so a whole home is told from a
+//   compacted one only while the service is stopped: each check follows a stop, whose release of every runtime compacts.
+// Gaps:
+// - The fixture App Server resumes a thread without reading its rollout. Resume from a compacted Team Leader home is shown on the
+//   installed App Server in isolated-runtime-compaction.test.ts, which CI cannot run.
+// - As for Executor homes above, no case orders the startup sweep against `agentDispatch.start()`. Main runs it synchronously
+//   while it builds the dispatch, before the channel start that calls `agentDispatch.start()`.
+const leaderHomes = (directory: string) => readdirSync(join(directory, "group-model-runtimes")).filter((name) => /^dispatch-leader-[0-9a-f]{64}$/u.test(name))
+  .map((name) => join(directory, "group-model-runtimes", name));
+/** The fixture's Team Leader turns whose prompt holds every one of `fragments`, as the threads they ran on. */
+const leaderThreads = (state: Awaited<ReturnType<Running["state"]>>, ...fragments: string[]) =>
+  state.fixtureCoordinationRequests!.filter(({ input }) => fragments.every((fragment) => JSON.stringify(input).includes(fragment))).map(({ threadId }) => threadId);
+
+it("keeps the Team Leader home of a request in flight across a definitions change whole, and compacts it once the request has ended", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-leader-home-inflight-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const seam = { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" };
+  const whole = ["codex-home/config.toml", "home/", "workspace/"];
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, seam);
+    // A request under definitions version 1 whose Executor is held: in flight.
+    await running.post("/api/fixture/inbound", groupMessage("om_inflight", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    const held = await running.until((state) => state.agentDispatch?.jobs[0]?.assignments[0]?.status === "running" && state.fixtureModelRequests?.length === 1);
+    const [planThread] = leaderThreads(held, "生活团队的负责人", "请帮我规划周末一日行程");
+    // The owner saves Sam's instructions from the console: definitions version 2 takes effect.
+    const view = await running.get<{ version: number; coordinator: { responsibility: string; instructions: string } }>("/api/teams");
+    await running.post("/api/teams/coordinator", { basedOn: view.version, coordinator: { responsibility: view.coordinator.responsibility, instructions: `${view.coordinator.instructions}\n协调规则 V2` } });
+    // A request admitted afterwards runs under version 2 and completes; its Team Leader's session is new, which sweeps.
+    await running.post("/api/fixture/inbound", groupMessage("om_current", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述"),
+      { modelReply: executorReply("商品文案已整理好。", "整理闲鱼商品描述"), leaderClosing: { message: "商品文案已整理好。" } }));
+    const changed = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed" && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(changed.agentDispatch?.jobs.map(({ status, definitionsVersion }) => [status, definitionsVersion])).toEqual([["running", view.version], ["completed", view.version + 1]]);
+    // The service stops with the first request still in flight. Its release of every runtime leaves both homes whole:
+    // the older version's because the request can still resume it, the current version's because later requests will.
+    await running.close(); running = undefined;
+    const homes = leaderHomes(directory), older = homes.find((home) => homeListing(home).some((entry) => entry.endsWith(`-${planThread}.jsonl`)))!;
+    const current = homes.find((home) => home !== older)!;
+    expect(homes).toHaveLength(2);
+    const stopped = { older: homeListing(older), current: homeListing(current) };
+    expect(stopped.older).toEqual(expect.arrayContaining(whole));
+    expect(stopped.current).toEqual(expect.arrayContaining(whole));
+    const rollout = stopped.older.find((entry) => entry.endsWith(`-${planThread}.jsonl`))!, hash = sha256(join(older, rollout));
+
+    // The next start reports the Assignment the stop cut off, and the Team Leader closes the request on the thread it planned on.
+    running = await start(directory, seam);
+    const closed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(leaderThreads(closed, "生活团队的负责人", "分工已经结束")).toEqual([planThread]);
+    expect(closed.fixtureThreadStarts!.filter(({ serviceName }) => serviceName === "feishu_dispatch_leader")).toEqual([]);
+    // The request has ended under a version that is no longer current: the stop's release compacts its home to the rollout.
+    await running.close(); running = undefined;
+    console.log(JSON.stringify({ kind: "dispatch_leader_home_inflight", commands: ["请帮我规划周末一日行程", "save Sam (definitions version 2)", "帮我整理闲鱼商品描述", "restart"],
+      jobs: { beforeStop: changed.agentDispatch, afterRestart: closed.agentDispatch }, outboxes: { beforeStop: changed.agentFixtureOutboxes, afterRestart: closed.agentFixtureOutboxes },
+      runs: closed.workflows?.runs ?? [], planThread, closingThreads: leaderThreads(closed, "生活团队的负责人", "分工已经结束"),
+      homes: { inFlight: stopped, ended: { older: homeListing(older), current: homeListing(current) } } }));
+    expect(await onlyRolloutRemains(older, planThread)).toBe(rollout);
+    expect(sha256(join(older, rollout))).toBe(hash);
+    expect(homeListing(current)).toEqual(stopped.current);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
 
 // Several Assignments per request. Each Assignment's Executor turn takes its own injected fixture turn by title
 // (`executorTurns`), so the cases can hold, release and script each Executor apart (agent-dispatch Testing Decisions).
@@ -859,6 +974,122 @@ it("cancels the unfinished Assignments of a request and reports the completed on
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 
+// A choice that a cancel or a supplement closes (agent-dispatch failure modes "Requester cancels a request while one of its
+// Assignments waits on a choice, then answers that choice" and "Requester supplements a request that waits on a choice, then
+// answers that choice"). In each case the requester's later answer is an ordinary message, which the fixture Coordinator clarifies.
+const chooseNote = [
+  { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+  { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+    candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }];
+const aliceTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.alice?.text.map(({ message }) => message) ?? [];
+const clarified = { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明你的需求。" };
+const CANCELLED_ONE = "已停止继续处理。已经完成的操作不会自动撤销。";
+/** Sends the requester's answer `2` and returns the state once the Coordinator's reply to it is out. */
+async function answerTwo(running: Running, messageId: string) {
+  await running.post("/api/fixture/feishu/inbound", groupMessage(messageId, "2", clarified));
+  return running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+}
+/** After the answer: no file went out, no send run went on, and the Coordinator's clarification is the only reply. */
+function expectNothingSent(answered: Awaited<ReturnType<Running["state"]>>) {
+  expect(sendRuns(answered).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+  expect(answered.agentFixtureOutboxes?.alice?.media).toEqual([]);
+  expect(answered.feishuFixtureMediaOutbox).toEqual([]);
+  expect(answered.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual(["请说明你的需求。"]);
+}
+
+it("closes a cancelled request's open file choice, so answering it afterwards sends nothing and the request stays cancelled", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    // The second of two Assignments raises the choice; the first has completed.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice", "整理要点，再列出 Agent 笔记让我选发哪个", decision("alice", "整理要点并发送运营笔记"), {
+      leaderPlan: divided(["整理要点", "发送笔记"]), executorTurns: { 整理要点: { modelReply: executorReply("要点已整理。", "要点") }, 发送笔记: { modelToolCalls: chooseNote } } }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    // The fixture pending-choice router passes this text on as an ordinary message, so the Coordinator takes it as the request's cancel.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_stop", "这项请求不用做了", control(waiting.agentDispatch!.jobs[0]!.id, "cancel")));
+    const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 3);
+    const answered = await answerTwo(running, "om_choice_answer");
+    console.log(JSON.stringify({ kind: "dispatch_cancelled_choice", commands: ["整理要点，再列出 Agent 笔记让我选发哪个", "这项请求不用做了", "2"],
+      afterCancel: { jobs: cancelled.agentDispatch, runs: sendRuns(cancelled) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered), outboxes: answered.agentFixtureOutboxes,
+        coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase), executorTurns: answered.fixtureModelRequests?.length } }));
+    expect(sendRuns(cancelled).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "completed" }, { status: "cancelled" }] });
+    // One cancel report after the start message and the choice; no Team Leader post, Team Leader turn or Executor run follows the cancel.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      `已停止继续处理：\n执行者 1「整理要点」已完成\n执行者 2「发送笔记」已停止\n已经完成的操作不会自动撤销。`]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("closes the choice a supplement supersedes, so answering it after the rerun was cancelled sends nothing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-superseded-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-superseded-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    const requestId = waiting.agentDispatch!.jobs[0]!.id;
+    // The supplement reruns the Assignment under the supplement's key; its Executor is held, so the request still runs when it is cancelled.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_more", "补充：换成最新的版本", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1], assignments: [], decisions: [] }, modelHold: true }));
+    const rerunning = await running.until((state) => state.fixtureModelRequests?.length === 2 && aliceTexts(state).length === 3);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_stop", "都停下", control(requestId, "cancel")));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 4);
+    const answered = await answerTwo(running, "om_rerun_answer");
+    console.log(JSON.stringify({ kind: "dispatch_superseded_choice_cancelled", commands: ["列出 Agent 笔记让我选发哪个", "补充：换成最新的版本", "都停下", "2"],
+      afterSupplement: { jobs: rerunning.agentDispatch, runs: sendRuns(rerunning) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered),
+        outboxes: answered.agentFixtureOutboxes, coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase),
+        executorTurns: answered.fixtureModelRequests?.length } }));
+    // The supplement itself closed the choice, before the rerun.
+    expect(sendRuns(rerunning).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      expect.stringContaining("完成后会在本群汇报。"), CANCELLED_ONE]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "supplement"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("closes the choice of a request that a supplement left queued behind another, so answering it after its cancel sends nothing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-queued-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-queued-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    const requestId = waiting.agentDispatch!.jobs[0]!.id;
+    // Another request of the same team runs, held, so the supplemented request stays queued behind it.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_other", "帮我整理商品", decision("alice", "整理商品"), { modelHold: true }));
+    await running.until((state) => state.fixtureModelRequests?.length === 2 && aliceTexts(state).length === 3);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_more", "补充：换成最新的版本", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1], assignments: [], decisions: [] } }));
+    const queued = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "queued");
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_stop", "前面那项请求不用做了", control(requestId, "cancel")));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 4);
+    const answered = await answerTwo(running, "om_queued_answer");
+    console.log(JSON.stringify({ kind: "dispatch_queued_choice_cancelled", commands: ["列出 Agent 笔记让我选发哪个", "帮我整理商品", "补充：换成最新的版本", "前面那项请求不用做了", "2"],
+      afterSupplement: { jobs: queued.agentDispatch, runs: sendRuns(queued) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered),
+        outboxes: answered.agentFixtureOutboxes, coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase),
+        executorTurns: answered.fixtureModelRequests?.length } }));
+    expect(sendRuns(queued).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs.map(({ status, assignments }) => ({ status, assignments: assignments.map((assignment) => assignment.status) })))
+      .toEqual([{ status: "cancelled", assignments: ["cancelled"] }, { status: "running", assignments: ["running"] }]);
+    // The cancelled request never reached its supplement turn or a second Executor run.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      expect.stringContaining("完成后会在本群汇报。"), CANCELLED_ONE]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "plan"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
 it("reruns the Assignments a supplement affects, each with the supplement and its own workflow run", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-supplement-keys-")), business = mkdtempSync(join(tmpdir(), "dispatch-supplement-keys-files-"));
   let running: Running | undefined;
@@ -893,6 +1124,74 @@ it("reruns the Assignments a supplement affects, each with the supplement and it
     expect(done.agentDispatch?.jobs[0]?.assignments.map(({ executor, attempt }) => `${executor}:${attempt}`)).toEqual(["执行者 1:1", "执行者 2:1", "执行者 3:0"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
+
+// agent-dispatch::REQ-011/AC-01, REQ-016/AC-01: main's wiring from the definitions and the module permissions to the Team Leader's
+// real turns, under WORKFLOW_FIXTURE_COORDINATION_RUNTIME. Bill's two presets allow different tools, so each is told by its own, and
+// carry marker instructions. Saving is lost to the narrowed module permission and sending to the first preset's later allowlist, so
+// each loss shows its own wiring.
+it("tells a Team Leader what its preset's Executors can do now, in its plan and supplement turns, and never the preset's instructions", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-leader-capabilities-")), business = mkdtempSync(join(tmpdir(), "dispatch-leader-capabilities-files-"));
+  mkdirSync(join(business, "demo-vault", ".obsidian"), { recursive: true });
+  let running: Running | undefined;
+  const FIND = "按名称查找授权目录里的文件", READ = "读取授权目录里的文件", SAVE = "在授权目录里保存新文件或覆盖已有文件", SEND = "把授权目录里的文件发到本群", SEARCH = "联网搜索";
+  const TASKS = "查看定时任务列表";
+  try {
+    dispatchConfig(directory, true);
+    const local = parseChannelStartupConfiguration(JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"))).entries.find((entry) => entry.channel === "feishu")?.dispatch;
+    if (!local) throw new Error("expected_dispatch_configuration");
+    const registry = new TeamRegistry(join(directory, "team-registry.sqlite"));
+    try {
+      const seeded = registry.importLocalConfiguration(local, { executorHostTools: PRODUCTION_TOOL_IDS });
+      registry.save({ ...seeded.definitions, teams: seeded.definitions.teams.map((team) => team.id === "bill" ? { ...team, executorProfiles: [...team.executorProfiles.map((profile) =>
+        ({ ...profile, instructions: "执行者规则 R38", hostTools: ["files.find", "files.read", "files.write", "weixin.send_files"] })),
+      { id: "meal", name: "餐饮采购", instructions: "餐饮采购规则 R38", hostTools: ["files.write", "schedules.list"] }] } : team) }, { basedOn: seeded.version });
+    } finally { registry.close(); }
+    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1", WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    const billTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.bill?.text ?? [];
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_capabilities_granted", "帮我规划周六一日行程", decision("bill", "规划周六一日行程")));
+    await running.until((state) => billTexts(state).length === 2);
+    // The owner narrows the notes module to read-only before the next request is planned.
+    const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+    await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+      scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: false })) });
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_capabilities_narrowed", "帮我规划周日一日行程", decision("bill", "规划周日一日行程"), { modelHold: true }));
+    const busy = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "running" && billTexts(state).length === 3 && state.fixtureModelRequests?.length === 2);
+    // While that request runs, the owner removes file sending from the first preset; the request keeps its definitions version.
+    type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
+      profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> };
+    const view = await running.get<{ version: number; teams: TeamView[] }>("/api/teams");
+    const bill = view.teams.find(({ id }) => id === "bill")!;
+    await running.post("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader,
+      executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools: hostTools.filter((tool) => tool !== "weixin.send_files") })),
+      groups: ["oc_alpha"] } });
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_capabilities_supplement", "补充：下午再出发", control(busy.agentDispatch!.jobs[1]!.id, "supplement"),
+      { leaderSupplement: { affected: [1], assignments: [], decisions: [] } }));
+    // The Coordinator's clarification afterwards shows the supplement was taken in before the Executor is released.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_capabilities_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" }));
+    await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+    await running.post("/api/fixture/feishu/inbound", { modelControl: { messageId: "om_capabilities_narrowed", action: "release" } });
+    const done = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed" && state.agentDispatch.jobs[1].assignments[0]?.attempt === 1 && billTexts(state).length === 6);
+    const prompts = done.fixtureCoordinationRequests!.map(({ input }) => (input as Array<{ text?: string }>)[0]?.text ?? "");
+    const leaderTurns = prompts.filter((prompt) => prompt.startsWith("你是 Bill，"));
+    // The last line of a plan or supplement prompt is its input.
+    const presets = (prompt: string) => (JSON.parse(prompt.slice(prompt.lastIndexOf("\n") + 1)) as { profiles: unknown }).profiles;
+    const phases = leaderTurns.map((prompt) => prompt.includes("请为本群写收尾消息") ? "close" : prompt.includes("补充了要求") ? "supplement" : "plan");
+    console.log(JSON.stringify({ kind: "dispatch_leader_capabilities", commands: ["帮我规划周六一日行程", "帮我规划周日一日行程", "补充：下午再出发"], jobs: done.agentDispatch,
+      outboxes: done.agentFixtureOutboxes, leaderTurns: leaderTurns.map((prompt, index) => ({ phase: phases[index], ...(phases[index] === "close" ? {} : { presets: presets(prompt) }) })) }));
+    // Each request's plan and closing, then the second request's supplement turn and its closing.
+    expect(phases).toEqual(["plan", "close", "plan", "close", "supplement", "close"]);
+    expect([leaderTurns[0]!, leaderTurns[2]!, leaderTurns[4]!].map(presets)).toEqual([
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SAVE, SEND, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [SAVE, TASKS, SEARCH] }],
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEND, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [TASKS, SEARCH] }],
+      [{ id: "executor-1", name: "能力档 1", capabilities: [FIND, READ, SEARCH] }, { id: "meal", name: "餐饮采购", capabilities: [TASKS, SEARCH] }]]);
+    // The first preset's instructions reach its Executors' turns; neither preset's reach any turn of the Team Leader.
+    const executorTurns = done.fixtureModelRequests!.map(({ input }) => JSON.stringify(input));
+    expect(executorTurns).toHaveLength(3);
+    for (const turn of executorTurns) expect(turn).toContain("执行者规则 R38");
+    for (const prompt of leaderTurns) expect(prompt).not.toContain("规则 R38");
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 60000);
 
 it("reports interrupted Assignments after a crash and closes the request", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-crash-three-"));

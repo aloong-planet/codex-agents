@@ -1,6 +1,6 @@
 # 工作流模块权限
 
-> 关联：[features](../features/workflow-module-permissions.md) · ADR-0010 · ADR-0008
+> 关联：ADR-0010 · ADR-0008 · ADR-0029
 
 ## Problem Statement
 
@@ -9,6 +9,8 @@
 ## Solution
 
 保留安装、首次启用和“本地权限”设置页中的 module/scope 授权真源。文件工具运行在专用 File Sandbox Adapter 中；生产 Adapter 使用独立 Node 子进程及当前运行时的 Permission Model，只运行随应用打包的可信固定代码，并授予代码自身、当前 permission revision 对应的读取/写入根目录及专属内部 spool 所需的最小权限，不授予网络、child process、worker、native addon、WASI 或执行能力。Node Permission Model 是纵深防护，不是运行恶意代码的强安全隔离。
+
+“本地权限”页按模块分区显示可配置的目录范围（笔记目录与本地媒体目录各在一区），只能调整宿主已登记目录的读写，不能提交任意路径；新增任意目录的本机选择器尚未开放。点击“保存更改”后显示“已配置”和明确反馈；基于旧版本页面的保存被拒绝，不静默覆盖更新后的配置。保存权限本身不读取、修改或发送任何文件。已授权目录中的服务状态与配置不进入任何文件授权，见 [workflow-runs::CON-003](workflow-runs.md)。
 
 宿主通过结构化 stdio Interface 调用沙箱，不提供 shell。沙箱池按账户、模块和 permission revision 隔离；跨模块查询由宿主分别调用对应沙箱并合并结构化结果，不把多个模块的根目录合并成一个进程权限。权限 revision 改变时只替换对应模块的沙箱进程；旧进程只完成已经绑定旧快照的调用，不能接收新调用，随后退出。微信通道不读取用户原始路径，只消费沙箱生成并由宿主持久登记的不可变发送快照。
 
@@ -73,7 +75,7 @@
 - 为微信通道、数据库、普通模型调用或整个 App Server 加同一个文件沙箱。
 - 网络沙箱、容器、虚拟机或跨平台强隔离承诺。
 - 运行中授权弹窗、会话临时提权或模型自行修改权限。
-- 文件删除、执行、安装、chmod、所有权修改和系统目录授权。
+- 文件删除、移动、执行、解压、安装、chmod、所有权修改和系统目录授权。
 
 ## Further Notes
 

@@ -87,8 +87,9 @@ import { GroupNames } from "./group-names.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement, withFixtureDependencies } from "./fixture-team-leader.js";
+import { recordDispatchTurns, type DispatchTurnRecord } from "./fixture-dispatch-recorder.js";
 import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
-import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
+import { DISPATCH_MEMORY_ACCOUNT_PREFIX, executorCapabilities, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { ConsoleAudit } from "./console-audit.js";
@@ -165,6 +166,10 @@ const fixtureMode = process.env.DEMO_MODE === "fixture";
 // Fixture-only seam: real Coordinator and Team Leader runtimes over the fixture App Server. Refused outside fixture mode.
 const fixtureCoordinationRuntime = process.env.WORKFLOW_FIXTURE_COORDINATION_RUNTIME === "1";
 if (fixtureCoordinationRuntime && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+// Fixture-only seam: the Coordinator, the Team Leaders and the Executors run on their real runtimes and the real model, and each of
+// their turns is recorded; every platform and every other model stay fixtures. Refused outside fixture mode.
+const fixtureDispatchRealModel = process.env.WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL === "1";
+if (fixtureDispatchRealModel && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 // Fixture-only seam: Executor home compaction stops after its first removal, so a case can kill the service mid-compaction.
 const fixtureCompactionHold = process.env.WORKFLOW_FIXTURE_COMPACTION_HOLD === "1";
 if (fixtureCompactionHold && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
@@ -235,6 +240,12 @@ let senderTasks: TeamManagementOptions["tasks"] = { sentBy: () => [], move: () =
 let pennyApplicationId: string | undefined;
 // With dispatch, the entry carries the registry's roster, so every reader sees the Coordinator and the teams with an application.
 type FeishuStartupEntry = Omit<Extract<ChannelStartupEntry, { channel: "feishu" }>, "dispatch"> & { dispatch?: Readonly<FeishuDispatchConfiguration> };
+// The saved scopes of the modules whose permissions gate host tools. The profile page's effective tools and a Team Leader's view
+// of its presets both read them (team-management::US-003/AC-02, agent-dispatch::REQ-011/AC-01).
+const moduleScopes = () => ["notes", "local-media"].flatMap((moduleId) => {
+  const state = workflowModulePermissions.get(moduleId);
+  return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
+});
 const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
   if (!entry) return undefined;
@@ -246,11 +257,7 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
     const management = new TeamManagement({ registry, coordinator: entry.connection,
       platform: onboardingPlatform, ...(groupNames ? { groupNames } : {}),
       announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
-      audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(),
-      moduleScopes: () => ["notes", "local-media"].flatMap((moduleId) => {
-        const state = workflowModulePermissions.get(moduleId);
-        return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
-      }),
+      audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(), moduleScopes,
       activeAssignments: () => countActiveAssignments(),
       work: (teamId) => teamWork(teamId),
       tasks: { sentBy: (appId) => senderTasks.sentBy(appId), move: (...task) => senderTasks.move(...task), delete: (...task) => senderTasks.delete(...task) },
@@ -775,14 +782,16 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
   tools: DynamicToolHost | undefined = ISOLATED_RUNTIME_KINDS[kind].hostTools ? workflowToolHost : undefined) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
   const { hostTools } = ISOLATED_RUNTIME_KINDS[kind];
+  // Under the real-model seam the three dispatch kinds start the installed App Server with the Codex home's login, as production does.
+  const realModel = fixtureDispatchRealModel && (kind === "dispatchCoordinator" || kind === "dispatchLeader" || kind === "dispatchAgent");
   // Kinds with host tools always use the fixture App Server in fixture mode; Coordinator and Team Leader kinds only under the seam.
-  const fixtureRuntime = fixtureMode && !fixtureLiveMainModel &&
+  const fixtureRuntime = fixtureMode && !fixtureLiveMainModel && !realModel &&
     (hostTools || (fixtureCoordinationRuntime && (kind === "dispatchCoordinator" || kind === "dispatchLeader")));
   const requests = hostTools ? fixtureModelRequests : fixtureCoordinationRequests;
   const runtime = createIsolatedRuntime(kind, { stateDirectory,
     ...(placement.instance !== undefined ? { instance: placement.instance } : {}),
     ...(placement.mediaRoot !== undefined ? { mediaRoot: placement.mediaRoot } : {}),
-    ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
+    ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents && !realModel ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
   // Every process the conversation starts, so a closed runtime can wait for them to exit before its home is compacted.
   const exits: Array<Promise<void>> = [];
   const agent = new CodexConversation(
@@ -791,7 +800,7 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
         return new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           requests.push(request); if (requests.length > 20) requests.shift();
-        }, undefined, observeThreadStart, kind === "dispatchAgent" ? runtime.env.CODEX_HOME : undefined);
+        }, undefined, observeThreadStart, kind === "dispatchAgent" || kind === "dispatchLeader" ? runtime.env.CODEX_HOME : undefined);
       }
       const transport = spawnIsolatedAppServer(codexExecutable, runtime);
       exits.push(transport.exited);
@@ -954,6 +963,7 @@ const codexService = conversationRouter ? new ConversationService(
   weixinConfiguration?.owner,
 );
 let fixtureLeaderRequests: FixtureTeamLeader["requests"] | undefined;
+let fixtureDispatchTurns: (() => DispatchTurnRecord[]) | undefined;
 const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const configuration = feishuConfiguration, channel = feishuChannel;
   const teams = teamManagement!;
@@ -1002,6 +1012,10 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Each call is also checked against the profile's current allowlist, so a removed tool is refused at once in running
   // requests, and the refusal is audited (agent-dispatch::REQ-017/AC-02).
   const toolViews = new Map<string, ProfileToolHost>();
+  // A preset's host tools in the current definitions; undefined once the preset is gone.
+  const stillAllowed = (teamId: string, profileId: string) => {
+    try { return resolveAgentProfile(teams.current().definitions, { role: "executor", teamId, profileId }, catalogToolIds).hostTools; } catch { return undefined; }
+  };
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob, assignment: import("./agent-dispatch-types.js").DispatchAssignment) => {
     const agent = { role: "executor", teamId: assignment.teamId, profileId: assignment.profileId } as const;
     const resolved = resolveAgentProfile(definitionsFor(job.definitionsVersion), agent, catalogToolIds);
@@ -1009,7 +1023,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     let tools = toolViews.get(key);
     if (!tools) {
       tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools, {
-        current: () => { try { return resolveAgentProfile(teams.current().definitions, agent, catalogToolIds).hostTools; } catch { return undefined; } },
+        current: () => stillAllowed(assignment.teamId, assignment.profileId),
         refused: (tool) => consoleAudit.tryAppend({ by: "service", event: "host_tool_refused", team: assignment.teamId, profile: assignment.profileId, tool }),
       });
       toolViews.set(key, tools);
@@ -1021,7 +1035,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const contextRevision = () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); };
   // Under the coordination seam the fixture App Server answers Coordinator and Team Leader turns with the injected outputs.
   const answer = (threadId: string, text: string) => fixtureThreadQueues.set(threadId, { takeFixtureModelToolCall: () => undefined, takeFixtureModelCompletion: () => Promise.resolve(text) });
-  const classifier = fixtureMode && !fixtureLiveMainModel && !fixtureCoordinationRuntime
+  const classifier = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input),
       assign: async (input: import("./agent-dispatch-types.js").CrossTeamInput) => parseCrossTeamDecision(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId), input) }
     : (() => {
@@ -1034,24 +1048,34 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         fixtureCoordinationRuntime ? (input, threadId) => answer(threadId, JSON.stringify(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId))) : undefined);
     })();
   // Team Leader turns are tool-free; each turn holds its pool slot only for itself (agent-dispatch::QR-001/AC-02).
-  const fixtureLeader = fixtureMode && !fixtureLiveMainModel && !fixtureCoordinationRuntime ? new FixtureTeamLeader(fixtureFeishu!) : undefined;
-  const leader: TeamLeader = fixtureLeader ?? (() => {
+  const fixtureLeader = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime ? new FixtureTeamLeader(fixtureFeishu!) : undefined;
+  const codexLeader = fixtureLeader ? undefined : (() => {
     if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
-    const create = (scope: string) => isolatedConversation("dispatchLeader", { instance: scope });
-    return new CodexTeamLeader(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
+    // Each runtime is created through the Team Leader, which keeps its home from being compacted while it exists (agent-dispatch::QR-003/AC-04).
+    const create = (scope: string): DispatchRuntime => created.tracked(scope, () => isolatedConversation("dispatchLeader", { instance: scope }));
+    const created = new CodexTeamLeader(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
       runtime: (scope, work) => runtimes.use(scope, () => create(scope), ({ agent, cwd }) => work(agent, cwd)), model,
       ...(fixtureCoordinationRuntime ? { prepareThread: (input, phase, threadId, assignments) => answer(threadId, JSON.stringify(phase === "plan"
         ? withFixtureDependencies(fixtureFeishu!.leaderPlan(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultPlan(input)
         : phase === "supplement" ? withFixtureDependencies(fixtureFeishu!.leaderSupplement(input.fixtureMessageId, input.leader.id)) ?? fixtureDefaultSupplement(assignments as readonly LeaderAssignmentView[])
           : fixtureFeishu!.leaderClosing(input.fixtureMessageId, input.leader.id) ?? fixtureDefaultClosing(assignments as readonly LeaderAssignmentReport[]))) } : {}),
+      // The sessions stored requests can still use are asked of the dispatch each time, which exists before any sweep or release.
+      homes: { root: path.join(stateDirectory, ISOLATED_RUNTIME_KINDS.dispatchLeader.directory), compact: compactRuntimeHome, inUse: () => dispatch.leaderSessions() },
+      report: (code) => process.stderr.write(`${code}\n`),
     });
+    return created;
   })();
+  const leader: TeamLeader = fixtureLeader ?? codexLeader!;
   const teamView = (teamId: string, version: number) => {
     const versionDefinitions = definitionsFor(version), team = versionDefinitions.teams.find(({ id }) => id === teamId);
     if (!team) return undefined;
     const { instructions, memoryScope } = resolveAgentProfile(versionDefinitions, { role: "leader", teamId }, catalogToolIds);
+    const scopes = moduleScopes();
     return { leader: { id: team.id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions },
-      profiles: team.executorProfiles.map(({ id, name, noun }) => ({ id, name, ...(noun ? { noun } : {}) })), memoryScope };
+      // Each preset with what an Executor created from it can do now, which is all its Team Leader is told of it (agent-dispatch::REQ-011/AC-01).
+      profiles: team.executorProfiles.map(({ id, name, noun }) => ({ id, name, ...(noun ? { noun } : {}),
+        capabilities: executorCapabilities(resolveAgentProfile(versionDefinitions, { role: "executor", teamId, profileId: id }, catalogToolIds).hostTools,
+          stillAllowed(teamId, id), scopes, ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live") })), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
     agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,
@@ -1089,8 +1113,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   });
   // Before any dispatch work can start an Executor runtime (agent-dispatch::QR-002/AC-02).
   executor.compactHomes();
-  const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized, leader,
-    definitionsVersion: () => teams.current().version, team: teamView, revision: contextRevision,
+  // Under the real-model seam nothing is injected, so each turn of the three is recorded for the state to show what it decided.
+  const recorded = fixtureDispatchRealModel ? recordDispatchTurns({ classifier, leader, executor }) : { classifier, leader, executor, turns: undefined };
+  fixtureDispatchTurns = recorded.turns;
+  // A request's workflow runs are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
+  const runEvents = (job: import("./agent-dispatch-types.js").DispatchJob, assignments: readonly import("./agent-dispatch-types.js").DispatchAssignment[]) =>
+    assignments.length ? assignments.map((assignment) => executorEvent(job, assignment)) : [job.executionEvent ?? job.event];
+  const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier: recorded.classifier, executor: recorded.executor, authorized,
+    leader: recorded.leader,
+    definitionsVersion: () => teams.current().version, team: teamView, teams: (version) => definitionsFor(version).teams.map(({ id }) => id), revision: contextRevision,
     // The current definitions decide which teams take work in a group, whatever version a request was planned under.
     roster: (event) => {
       const chatId = configuration.owner.deliveryTarget(event.accountId, event.target);
@@ -1102,9 +1133,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     completedWork: (job, assignments) => {
       const files = localFileTools.dispatchEvidence(job.id);
       const schedules = scheduledTasks.dispatchEvidence(job.id);
-      // Workflow effects are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
-      const events = assignments.length ? assignments.map((assignment) => executorEvent(job, assignment)) : [job.executionEvent ?? job.event];
-      const effects = [...new Map(events.map((event) => [event.key, event])).values()]
+      const effects = [...new Map(runEvents(job, assignments).map((event) => [event.key, event])).values()]
         .flatMap((event) => workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.effects ?? []);
       const accepted = effects.filter((effect) => effect.state === "accepted").length;
       const unknown = effects.filter((effect) => effect.state === "unknown" || effect.state === "prepared").length;
@@ -1135,7 +1164,18 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return { handled: true, ...destination, runRef: request.runId,
         result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
     },
+    closeChoices: async (job, assignments) => {
+      for (const event of runEvents(job, assignments)) {
+        const choice = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.pendingInput;
+        // An expired choice takes no answer any more.
+        if (!choice || choice.expiresAt <= Date.now()) continue;
+        await workflowEngine.cancelPending({ cancellationId: `dispatch-cancel:${choice.signalRef}`, signalRef: choice.signalRef, expectedRevision: choice.revision,
+          accountRef: event.accountId, targetRef: event.target, ...(event.senderId ? { requesterRef: event.senderId } : {}) });
+      }
+    },
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
+  // Before any dispatch work can start a Team Leader runtime (agent-dispatch::QR-003/AC-03).
+  codexLeader?.compactSupersededHomes();
   channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
     () => teams.roster().agents);
   teamWork = (teamId) => dispatch.involving(teamId).flatMap(({ requestId, summary, accountId, target, requester, active, awaitingRequester, waitingFor }) => {
@@ -1268,6 +1308,7 @@ if (pennyConfigured) {
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
   fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
+  ...(fixtureDispatchTurns ? { fixtureDispatchTurns: fixtureDispatchTurns() } : {}),
   ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
     [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
@@ -1392,14 +1433,17 @@ const startup = (async () => {
       if (!stopping && name === "feishu" && agentDispatch) {
         await Promise.all([...dispatchApplications.values()].map(startDispatchApplication));
         await agentDispatch.start();
-        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped.
-        teamManagement?.deliverAnnouncementsWith(async ({ id, chatId, text }) => {
+        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped. A team's test
+        // message takes the same channel as the team's own application, so it has the effect record of the team's other posts.
+        const postInGroup = async (chatId: string, text: string, operationId: string, senderAccountId?: string) => {
           const address = feishuConfiguration!.owner.conversationAddresses().find(({ accountId, target }) => feishuConfiguration!.owner.deliveryTarget(accountId, target) === chatId);
-          if (!address) return "rejected";
+          if (!address) return "rejected" as const;
           const sent = await feishuChannel!.send({ channel: "feishu", accountId: address.accountId, target: address.target, message: text,
-            operationId: `team-announcement:${id}`, beforeSubmit: () => true });
-          return sent.ok ? "accepted" : sent.reason === "unknown" ? "unknown" : "rejected";
-        });
+            operationId, beforeSubmit: () => true, ...(senderAccountId ? { senderAccountId } : {}) });
+          return sent.ok ? "accepted" as const : sent.reason === "unknown" ? "unknown" as const : "rejected" as const;
+        };
+        teamManagement?.deliverAnnouncementsWith(({ id, chatId, text }) => postInGroup(chatId, text, `team-announcement:${id}`));
+        teamManagement?.deliverTestMessagesWith(({ appId, chatId, text, operationId }) => postInGroup(chatId, text, operationId, appId));
         void teamManagement?.resume().catch(() => process.stderr.write("team_onboarding_resume_failed\n"));
       }
       if (!stopping) {
@@ -1429,6 +1473,8 @@ function shutdown(): Promise<void> {
   try { await settleCleanup([
     () => pennyStartup,
     () => penny?.close(),
+    // A QR code that waits for its scan keeps polling; ending the wait lets the process exit.
+    () => teamManagement?.close(),
     () => agentDispatch?.close(),
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),

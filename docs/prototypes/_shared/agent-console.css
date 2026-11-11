@@ -28,6 +28,7 @@
 .acf-check small{display:block;color:var(--acv-muted);font-size:10px}
 .acf-seg{display:inline-flex;border:1px solid var(--acv-line);border-radius:6px;overflow:hidden}
 .acf-seg button{border:0;background:var(--acv-paper);padding:6px 10px;font-size:11px;color:var(--acv-ink)}
+.acf-seg button+button{border-left:1px solid var(--acv-line)}
 .acf-seg button:hover{background:var(--acv-soft)}
 .acf-seg button[aria-pressed="true"]{background:var(--acv-selected);color:var(--acv-brand);font-weight:650}
 .acf-grant{margin-top:10px;padding:10px;border:1px solid var(--acv-warning);border-radius:7px;font-size:11px;line-height:1.7;color:var(--acv-ink);background:var(--acv-paper)}

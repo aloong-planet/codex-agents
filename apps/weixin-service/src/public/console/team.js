@@ -1,12 +1,14 @@
 // 团队管理 (docs/specs/team-management.md), drawn after the owner-confirmed team management prototype. The page shows the
 // team view the service reports and sends one team's edit at a time; the service validates it, derives binding states,
 // runs onboarding and audits every change. Every value from the service is inserted as text (agent-console::REQ-005/AC-04).
-// Not built yet (ticket 11, decision D1): QR creation and the test message, MCP binding and skills. An existing application
-// is the only onboarding method, so the editor shows its two steps.
+// A team gets its Feishu application by QR creation, with six onboarding steps, or as an existing application, with the last
+// three; the choice is saved with the team, and the QR code is asked for by the save that chooses it (team-management::US-002).
+// Not built yet (ticket 11, decision D1): MCP binding and skills.
 // The dispatch-group form (agent-console::US-009) fills the 未配置 panel and, with dispatch, the 派单群设置 drawer; a save writes
 // the channel configuration file and applies after the service restarts.
 (() => {
   const { mount, tip, esc } = window.ConsoleShell;
+  const { onboardingView, SENT } = window.TeamOnboardingView;
   mount("teams");
 
   // Host tools by group, labelled as in the prototype. A catalog tool without a label is listed by its ID under 其他.
@@ -20,11 +22,12 @@
   const LABELS = Object.fromEntries(TOOL_GROUPS.flatMap(([, tools]) => tools));
   const label = (id) => LABELS[id] ?? id;
   const TONES = new Set(["sam", "alice", "bill", "jack"]);
-  const STEP = { done: ["已完成", "acv2-badge acv2-completed"], todo: ["未开始", "acv2-badge"], review: ["等待审核", "acv2-badge acv2-waiting"], blocked: ["需处理", "acv2-badge acv2-failed"] };
+  const STEP = { done: ["已完成", "acv2-badge acv2-completed"], todo: ["未开始", "acv2-badge"], active: ["进行中", "acv2-badge acv2-running"],
+    review: ["等待审核", "acv2-badge acv2-waiting"], blocked: ["需处理", "acv2-badge acv2-failed"] };
   const STATUS = { fixed: ["固定", "acv2-badge"], active: ["正常接单", "acv2-badge acv2-completed"], onboarding: ["接入未完成", "acv2-badge acv2-waiting"],
     draining: ["停止接单 · 做完后移除", "acv2-badge acv2-waiting"], removed: ["已删除 · 历史保留", "acv2-badge"] };
   const REMOVAL = { done: ["已完成", "acv2-badge acv2-completed"], wait: ["等待中", "acv2-badge acv2-waiting"], block: ["需处理", "acv2-badge acv2-failed"] };
-  const ANNOUNCED = { accepted: "飞书已接收", failed: "发送失败 · 不会自动重发", unknown: "发送结果未知 · 不会自动重发", pending: "正在发送", sending: "正在发送" };
+  const ANNOUNCED = { ...SENT, pending: SENT.sending };
   const SAVEBAR = { clean: "保存后新事务立即使用新配置。", dirty: "有未保存的修改", saved: "已保存：新事务使用新配置，进行中的事务保持原配置。", reloaded: "已重新载入最新版本，请再修改。" };
   const SAM = "sam";
   const NEW = "new";
@@ -37,6 +40,8 @@
   const drafts = new Map();
   let query = "";
   let filter = "all";
+  /** The team whose test message waits for the owner's confirmation. */
+  let testConfirm = null;
   /** The dispatch-group form: the service's view of the file, the checked groups while edited, the save bar state and a refusal. */
   const dc = { view: null, open: false, checked: null, state: "clean", refusal: null };
   const DC_BAR = { clean: "保存后重启服务才生效。", dirty: "有未保存的修改", saved: "已保存，重启服务后生效", reloaded: "已重新载入最新的配置，请再修改。" };
@@ -78,11 +83,11 @@
   function fromView(id) {
     if (id === SAM) return { responsibility: view.coordinator.responsibility, instructions: view.coordinator.instructions };
     if (id === NEW) {
-      return { teamName: "", responsibility: "", leader: { name: "", appId: "", instructions: "" }, groups: [], secretEditing: false, secret: "",
+      return { teamName: "", responsibility: "", leader: { name: "", appId: "", instructions: "" }, groups: [], method: "qr", secretEditing: false, secret: "",
         profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools) }] };
     }
     const team = shownTeam(id);
-    return { id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader }, secretEditing: false, secret: "",
+    return { id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader }, method: team.method, secretEditing: false, secret: "",
       groups: team.bindings.filter(({ state }) => state !== "draining").map(({ chatId }) => chatId),
       profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools] })) };
   }
@@ -125,45 +130,49 @@
       || '<div class="acv2-empty"><strong>没有匹配的团队</strong><p>换个关键词或群筛选。</p></div>';
   }
 
-  // ---- onboarding: an existing application starts at the credential check ----
-  const stepState = (outcome) => !outcome ? "todo" : outcome.status === "done" ? "done" : outcome.status === "review" ? "review" : "blocked";
-  function credentialNote(outcome) {
-    if (outcome?.status === "review") return "应用版本尚未发布，或还没有被企业管理员启用。审核通过后点「重新检查」。";
-    if (outcome?.status === "action") {
-      return { bad_credentials: "凭证校验没有通过：App ID 与 App Secret 不匹配。请替换 App Secret 后保存。", secret_missing: "还没有填写 App Secret。填写后保存，会自动开始检查。" }[outcome.reason]
-        ?? "暂时连不上飞书，稍后点「重新检查」。";
-    }
-    return "确认凭证可用，读取机器人名称。";
-  }
-  function joinNote(chatId, outcome, credentialsDone) {
-    const group = groupName(chatId);
-    if (outcome?.status === "done") return "机器人已在群里。";
-    if (outcome) {
-      return {
-        owner_only: `${group}只允许群主和管理员添加成员，Sam 无法拉入。请在飞书调整群设置，或由群主手动添加。`,
-        pending_approval: `${group}开启了入群审批，Sam 的添加申请正等待群主或管理员批准；批准后点「重新检查」。`,
-        refused: `飞书没有接受把机器人加入${group}。请确认应用已开启机器人能力，再点「重新检查」。`,
-        not_joined: `机器人还不在${group}里。请把机器人加入该群后点「重新检查」。`,
-      }[outcome.reason] ?? "暂时连不上飞书，稍后点「重新检查」。";
-    }
-    return credentialsDone ? "尚未检查，可点「重新检查」。" : "等待前面的步骤完成。";
+  // ---- onboarding: six steps for an application created by QR code, the last three for an existing one ----
+  /** The QR area of a team in QR creation, as team-onboarding-view.js describes it. */
+  function qrHtml(area, team) {
+    if (area.created) return `<div class="atm-created">已创建应用 ${esc(area.created)}<small>凭证已自动保存，不显示</small></div>`;
+    // The image's address changes with each code, so a new code is never drawn from the previous one.
+    const box = area.image ? `<img src="/api/teams/qr?team=${esc(encodeURIComponent(team.id))}&amp;code=${Number(team.creation.codeExpiresAt)}" alt="创建应用的二维码">` : area.box;
+    const refresh = area.refresh ? `<div class="acf-row-actions"><button class="acv2-button${area.refresh === "main" ? " acv2-primary" : ""}" type="button" data-qr-refresh>刷新二维码</button></div>` : "";
+    return `<div class="atm-qr"><div class="atm-qr-box">${box}</div><div><p>${esc(area.text)}</p>${refresh}</div></div>`;
   }
 
-  function onboardingHtml(team, fixed) {
-    // A binding that accepts work has passed both steps, even when it came from the local configuration without recorded checks.
-    const live = (team?.bindings ?? []).filter(({ state }) => state !== "draining");
-    const done = { status: "done" };
-    const credentials = fixed ? done : team?.credentials ?? (live.some(({ state }) => state === "accepting") ? done : undefined);
-    const joins = fixed ? view.groups.map(({ chatId }) => ({ chatId, join: done }))
-      : live.map(({ chatId, state, join }) => ({ chatId, join: join ?? (state === "accepting" ? done : undefined) }));
-    const first = stepState(credentials);
-    const second = !joins.length ? "todo" : joins.some(({ join }) => stepState(join) === "blocked") ? "blocked" : joins.every(({ join }) => stepState(join) === "done") ? "done" : "todo";
-    const rows = joins.length ? `<ul class="atm-joins">${joins.map(({ chatId, join }) => {
-      const state = stepState(join);
-      return `<li data-state="${state}"><div>${esc(groupName(chatId))}<small>${esc(joinNote(chatId, join, first === "done"))}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span></li>`;
-    }).join("")}</ul>` : "";
-    return `<ol class="atm-onboard"><li data-state="${first}"><span class="atm-onboard-num">1</span><div>校验凭证并读取机器人信息<small>${esc(credentialNote(credentials))}</small></div><span class="${STEP[first][1]}">${STEP[first][0]}</span></li>`
-      + `<li data-state="${second}"><span class="atm-onboard-num">2</span><div>加入所绑定的群<small>${joins.length ? "由 Sam 把机器人拉进每个绑定的群。" : "先在下面勾选所属群。"}</small></div><span class="${STEP[second][1]}">${STEP[second][0]}</span>${rows}</li></ol>`;
+  /**
+   * The onboarding block of the selected team: how it gets its application, the application or its QR code, the steps and
+   * their actions. What each of them shows is decided in team-onboarding-view.js; this draws it. Only an existing
+   * application's block holds a field, so QR creation's block can be redrawn while the owner edits the rest of the team.
+   */
+  function onboardingBlock() {
+    const fixed = selected === SAM;
+    const draft = current().value;
+    const team = fixed || selected === NEW ? undefined : teamOf(selected);
+    const shown = onboardingView({ fixed, team, method: draft.method, groups: view.groups, confirming: testConfirm === selected });
+    const qr = shown.qr;
+    const rows = (items) => items.length ? `<ul class="atm-joins">${items.map(({ group, state, note }) => `<li data-state="${state}"><div>${esc(group)}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span></li>`).join("")}</ul>` : "";
+    const list = `<ol class="atm-onboard">${shown.steps.map(({ state, title, note, rows: items }, index) => `<li data-state="${state}"><span class="atm-onboard-num">${index + 1}</span><div>${title}<small>${esc(note)}</small></div><span class="${STEP[state][1]}">${STEP[state][0]}</span>${rows(items)}</li>`).join("")}</ol>`;
+    const c = view.coordinator;
+    const mode = fixed ? '<div class="atm-mode">接入方式：已有应用，手动填写</div>'
+      : `<div class="atm-mode">接入方式<div class="acf-seg"><button type="button" data-method="qr" aria-pressed="${qr}">扫码一键创建</button><button type="button" data-method="existing" aria-pressed="${!qr}">已有应用，手动填写</button></div></div>`;
+    const stored = fixed || Boolean(team?.secretStored);
+    const secret = fixed ? '<div class="acf-secret">已保存 · 不显示</div>'
+      : draft.secretEditing ? '<div class="atm-secret-input"><input class="acv2-input" type="password" data-field="secret" placeholder="粘贴 App Secret，保存后不再显示" autocomplete="off" aria-label="App Secret"><button class="acv2-button" type="button" data-secret-cancel>取消</button></div>'
+        : `<div class="acf-secret">${stored ? "已保存 · 不显示" : "尚未填写"}<button class="acv2-button" type="button" data-secret-edit>${stored ? "替换" : "填写"}</button></div>`;
+    const source = qr ? qrHtml(shown.area, team)
+      : `<div class="acf-fields atm-field-gap"><label class="acf-field">App ID<input class="acv2-input" data-field="appId" value="${esc(fixed ? c.appId : draft.leader.appId)}" placeholder="cli_…" ${fixed ? "disabled" : ""}></label><div class="acf-field">App Secret${secret}</div></div>`;
+    // The message is sent only from the confirmation below the actions.
+    const confirm = shown.confirm ? `<div class="acf-inline-confirm atm-test-confirm">${esc(shown.confirm)}`
+      + '<div class="acf-row-actions"><button class="acv2-button acv2-primary" type="button" data-test-ok>确认发送</button><button class="acv2-button" type="button" data-test-cancel>取消</button></div></div>' : "";
+    const actions = shown.recheck ? `<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button>${shown.test ? '<button class="acv2-button" type="button" data-test-open>发送测试消息…</button>' : ""}</div>${confirm}` : "";
+    return `<div data-onboarding>${mode}${source}${list}${actions}</div>`;
+  }
+
+  /** QR creation moves on in the service while the owner edits other fields; its block holds no field, so it alone is redrawn. */
+  function renderOnboarding() {
+    const block = document.querySelector("[data-onboarding]");
+    if (block && selected !== SAM && current().value.method === "qr") block.outerHTML = onboardingBlock();
   }
 
   // ---- editor ----
@@ -275,17 +284,10 @@
     const bound = fixed ? [] : view.groups.map(({ chatId }) => chatId).filter((chatId) => draft.groups.includes(chatId) || team?.bindings.some((binding) => binding.chatId === chatId && binding.state === "draining"));
     const head = `<div class="atm-editor-title ${tone(selected)}"><div><h2>${esc(leader)} · ${esc(teamName)}</h2><small>${fixed ? "每个派单群固定的总协调，只能修改职责与提示词"
       : `绑定在 ${esc(bound.map(groupName).join("、") || "尚未绑定的群")} · ${draft.profiles.length} 个执行者能力档`}</small></div>${badge(state)}</div>`;
-    const stored = fixed || Boolean(team?.secretStored);
-    const secret = fixed ? '<div class="acf-secret">已保存 · 不显示</div>'
-      : draft.secretEditing ? '<div class="atm-secret-input"><input class="acv2-input" type="password" data-field="secret" placeholder="粘贴 App Secret，保存后不再显示" autocomplete="off" aria-label="App Secret"><button class="acv2-button" type="button" data-secret-cancel>取消</button></div>'
-        : `<div class="acf-secret">${stored ? "已保存 · 不显示" : "尚未填写"}<button class="acv2-button" type="button" data-secret-edit>${stored ? "替换" : "填写"}</button></div>`;
     const basics = `<section class="acf-section"><div class="acv-tip-row"><h3>基本信息与飞书接入</h3>${tip("负责人用自己的飞书机器人在群里发言。\n· 凭证只能写入或替换，保存后不再显示。")}</div>`
       + `<div class="acf-fields"><label class="acf-field">负责人名称<input class="acv2-input" data-field="leaderName" value="${esc(fixed ? c.name : draft.leader.name)}" placeholder="例如：Daisy" ${fixed ? "disabled" : ""}></label>`
       + `<label class="acf-field">团队名称<input class="acv2-input" data-field="teamName" value="${esc(fixed ? c.teamName : draft.teamName)}" placeholder="例如：设计团队" ${fixed ? "disabled" : ""}></label></div>`
-      + '<div class="atm-mode">接入方式：已有应用，手动填写</div>'
-      + `<div class="acf-fields atm-field-gap"><label class="acf-field">App ID<input class="acv2-input" data-field="appId" value="${esc(fixed ? c.appId : draft.leader.appId)}" placeholder="cli_…" ${fixed ? "disabled" : ""}></label><div class="acf-field">App Secret${secret}</div></div>`
-      + onboardingHtml(team, fixed)
-      + (team && !removed ? '<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button></div>' : "")
+      + onboardingBlock()
       + "</section>";
     const duty = `<section class="acf-section"><div class="acv-tip-row"><h3>职责与提示词</h3>${tip(`职责会出现在 Sam 的分派名单和各负责人的团队通讯录里。\n· 提示词只给${fixed ? " Sam" : "这位负责人"}自己。`)}</div>`
       + `<label class="acf-field">职责<textarea class="acf-textarea" data-field="responsibility">${esc(draft.responsibility)}</textarea></label>`
@@ -406,6 +408,7 @@
     if (gone && gone.id !== id) { drafts.delete(gone.id); gone = null; }
     deleteConfirm = null; taskConfirm = null; actionError = null;
     selected = id;
+    testConfirm = null;
     if (!drafts.has(id)) drafts.set(id, entryFor(id));
     renderList();
     renderEditor();
@@ -458,17 +461,28 @@
     if (JSON.stringify(view) === before) return;
     renderFilter();
     renderList();
-    // An edit in progress, or a field or task choice the owner is in, is not redrawn under them.
+    // An edit in progress, or a field or task choice the owner is in, is not redrawn under them; QR creation's progress still is.
     const focused = document.activeElement?.closest?.("[data-editor]") && document.activeElement.matches("input,textarea,select");
     if (current().note !== "dirty" && !current().refusal && !focused) renderEditor();
+    else renderOnboarding();
+    followCreation();
+  }
+
+  /** A code that is being fetched arrives within moments, so the page asks again sooner than its regular poll. */
+  let following = null;
+  function followCreation() {
+    const creation = selected === SAM || selected === NEW ? undefined : teamOf(selected)?.creation;
+    if (following !== null || creation?.status !== "waiting" || creation.codeExpiresAt) return;
+    following = setTimeout(() => { following = null; void load(false); }, 400);
   }
 
   function payload() {
     const draft = current().value;
-    return { ...(draft.id ? { id: draft.id } : {}), teamName: draft.teamName, responsibility: draft.responsibility,
+    // In QR creation the application is the service's to set; a secret is sent only for an existing application.
+    return { ...(draft.id ? { id: draft.id } : {}), teamName: draft.teamName, responsibility: draft.responsibility, method: draft.method,
       leader: { name: draft.leader.name, appId: draft.leader.appId, instructions: draft.leader.instructions }, groups: draft.groups,
       executorProfiles: draft.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ ...(id ? { id } : {}), name, noun, instructions, hostTools })),
-      ...(draft.secretEditing && draft.secret.trim() ? { secret: draft.secret } : {}) };
+      ...(draft.method === "existing" && draft.secretEditing && draft.secret.trim() ? { secret: draft.secret } : {}) };
   }
 
   async function save() {
@@ -490,6 +504,7 @@
     renderFilter();
     renderList();
     renderEditor();
+    followCreation();
   }
 
   async function reload() {
@@ -540,6 +555,28 @@
     renderEditor();
   }
 
+  /** 刷新二维码: the service answers once the new code, which the page then shows in place of the old one, is known or could not be obtained. */
+  async function refreshCode(button) {
+    button.disabled = true;
+    const { ok, body } = await api("/api/teams/qr", { teamId: selected });
+    if (!ok) { button.disabled = false; current().refusal = { reasons: [body.error ?? "请求失败"], stale: false }; renderEditor(); return; }
+    accept(body.view);
+    renderList();
+    renderEditor();
+    followCreation();
+  }
+
+  /** 确认发送: the only place the test message is sent from. */
+  async function sendTest(button) {
+    button.disabled = true;
+    const { ok, body } = await api("/api/teams/test-message", { teamId: selected, confirmed: true });
+    testConfirm = null;
+    if (!ok) { current().refusal = { reasons: [body.error ?? "请求失败"], stale: false }; renderEditor(); return; }
+    accept(body.view);
+    renderList();
+    renderEditor();
+  }
+
   /** Marks the selected entry as edited; only the save bar is redrawn, so the field being typed in keeps its focus. */
   function edited() {
     const entry = current();
@@ -563,6 +600,17 @@
     if (target.closest("#atm-new")) { if (!drafts.has(NEW)) drafts.set(NEW, entryFor(NEW)); open(NEW); return; }
     if (!current()) return;
     const draft = current().value;
+    const method = target.closest("[data-method]");
+    if (method) {
+      if (draft.method !== method.dataset.method) { draft.method = method.dataset.method; testConfirm = null; edited(); renderEditor(); }
+      return;
+    }
+    const refreshButton = target.closest("[data-qr-refresh]");
+    if (refreshButton) { void refreshCode(refreshButton); return; }
+    if (target.closest("[data-test-open]")) { testConfirm = selected; renderEditor(); return; }
+    if (target.closest("[data-test-cancel]")) { testConfirm = null; renderEditor(); return; }
+    const sendButton = target.closest("[data-test-ok]");
+    if (sendButton) { void sendTest(sendButton); return; }
     if (target.closest("[data-secret-edit]")) { draft.secretEditing = true; edited(); renderEditor(); document.querySelector('[data-field="secret"]')?.focus(); return; }
     if (target.closest("[data-secret-cancel]")) { draft.secretEditing = false; draft.secret = ""; renderEditor(); return; }
     if (target.closest("[data-profile-add]")) { draft.profiles.push({ name: `能力档 ${draft.profiles.length + 1}`, noun: "执行者", instructions: "", hostTools: [] }); edited(); renderEditor(); return; }

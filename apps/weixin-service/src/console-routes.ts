@@ -23,6 +23,9 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyE
  *   No response carries an App Secret (team-management::CON-001); every change is audited. `/api/teams/delete` starts deleting a
  *   team, and `/api/teams/tasks/move` and `/api/teams/tasks/delete` handle a scheduled task one of its removals lists
  *   (team-management::US-004).
+ * - `/api/teams/qr`: QR creation of a team's application (team-management::US-002). GET with `team=<ID>` is the QR code that
+ *   waits for its scan, as an SVG image, or 404 when none waits; POST asks for a new code, as 「刷新二维码」 does.
+ * - `/api/teams/test-message`: the test message, sent only with `confirmed: true`.
  * - `/api/teams/dispatch-groups`: the dispatch-group form (agent-console::US-009), with or without dispatch. A save writes the
  *   channel configuration file and applies at the next start; a refusal answers 409 with its kind and leaves the file unchanged.
  * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
@@ -46,6 +49,7 @@ const ASSETS: Record<string, { file: string; type: string }> = {
   "/console/mcp.js": { file: "mcp.js", type: "text/javascript; charset=utf-8" },
   "/console/team.css": { file: "team.css", type: "text/css; charset=utf-8" },
   "/console/team.js": { file: "team.js", type: "text/javascript; charset=utf-8" },
+  "/console/team-onboarding-view.js": { file: "team-onboarding-view.js", type: "text/javascript; charset=utf-8" },
 };
 
 export type ConsoleRoutes = {
@@ -144,10 +148,20 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
     }
   }
 
-  async function teamsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
+  async function teamsApi(req: IncomingMessage, res: ServerResponse, url: URL, context: ConsoleRequestContext): Promise<void> {
     const actor = context.browser ? { browser: context.browser } : {};
+    const { pathname } = url;
     if (pathname === "/api/teams" && req.method === "GET") {
       json(res, 200, teams ? await teams.view() : { configured: false });
+      return;
+    }
+    if (pathname === "/api/teams/qr" && req.method === "GET") {
+      const code = await teams?.creationCode(url.searchParams.get("team") ?? "");
+      if (!code) throw new RequestError(404, "没有等待扫码的二维码");
+      headers(res);
+      res.statusCode = 200;
+      res.setHeader("content-type", "image/svg+xml; charset=utf-8");
+      res.end(code);
       return;
     }
     if (pathname === "/api/teams/dispatch-groups" && dispatchGroups) {
@@ -183,6 +197,12 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
         json(res, 200, { view: await teams.view() });
       } else if (pathname === "/api/teams/tasks/delete") {
         teams.deleteTask(input.teamId, input.taskId, actor);
+        json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/qr") {
+        await teams.refreshCreation(input.teamId, actor);
+        json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/test-message") {
+        await teams.sendTestMessage(input.teamId, input.confirmed, actor);
         json(res, 200, { view: await teams.view() });
       } else throw new RequestError(404, "未找到");
     } catch (error) {
@@ -271,7 +291,8 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
       try {
         if (board) await overviewApi(req, res, url);
         else if (browsers) await browsersApi(req, res, url.pathname, context);
-        else await (team ? teamsApi : mcpApi)(req, res, url.pathname, context);
+        else if (team) await teamsApi(req, res, url, context);
+        else await mcpApi(req, res, url.pathname, context);
       } catch (error) {
         if (error instanceof RequestError) json(res, error.status, { error: error.message });
         else if (error instanceof McpConfigError) json(res, 400, { error: error.message });
