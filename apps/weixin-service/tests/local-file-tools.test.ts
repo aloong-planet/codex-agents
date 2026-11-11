@@ -866,6 +866,43 @@ describe("local_file_query_contract_regression", () => {
   });
 });
 
+// A search that cannot look anywhere must fail, because a complete empty scan reads as "not found".
+describe("local_file_query_fails_closed", () => {
+  const SEARCHES = [["files.find", { query: "inside" }], ["files.grep", { pattern: "needle" }]] as const;
+
+  it.each(SEARCHES)("refuses %s with a permission error when no scope is readable", async (toolId, args) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "search-no-scope-")); temporaryDirectories.push(root);
+    const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true, scopes: [] }) },
+      { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    const trusted = turn("search-no-scope", "account-a"), binding = files.bindTurn(trusted);
+    try {
+      expect(binding.promptLines).toEqual([]);
+      await expect(files.execute({ toolId, toolVersion: 2, arguments: args }, trusted)).rejects.toThrow(/^local_file_permission_denied$/u);
+    } finally { await binding.release(); await files.close(); }
+  });
+
+  it.each(SEARCHES.flatMap(([toolId, args]) => (["deleted", "replaced by a symlink to another directory"] as const).flatMap((change) =>
+    [true, false].map((searchedBefore) => [toolId, change, searchedBefore ? "after" : "without", args, searchedBefore] as const))),
+  )("fails %s once the granted directory is %s, %s an earlier search of the turn", async (toolId, change, _when, args, searchedBefore) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "search-scope-gone-")); temporaryDirectories.push(root);
+    const directory = path.join(root, "files"), outside = path.join(root, "outside");
+    for (const [folder, name] of [[directory, "inside.md"], [outside, "inside-elsewhere.md"]] as const) {
+      fs.mkdirSync(folder); fs.writeFileSync(path.join(folder, name), "needle\n");
+    }
+    const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
+      scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    const trusted = turn("search-scope-gone", "account-a"), binding = files.bindTurn(trusted);
+    const search = () => files.execute({ toolId, toolVersion: 2, arguments: args }, trusted);
+    try {
+      if (searchedBefore) expect(JSON.stringify(await search())).toContain("Files/inside.md");
+      fs.rmSync(directory, { recursive: true });
+      if (change !== "deleted") fs.symlinkSync(outside, directory, "dir");
+      await expect(search()).rejects.toThrow(/^(?:file_sandbox|local_file)_[a-z_]+$/u);
+    } finally { await binding.release(); await files.close(); }
+  });
+});
+
 describe("local_file_mutation_contract_regression", () => {
   it("rejects an actual FIFO before create or overwrite without blocking or replacing it", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-fifo-"));
@@ -1604,6 +1641,200 @@ describe("local_file_mutation_contract_regression", () => {
   });
 });
 
+// Results show every file as `<label>/<path below the root>`, and a model copies that form into files.write: a real-model
+// Executor wrote `demo-vault/discount-project/review/…` under the grant labelled demo-vault. The grant's directory is named
+// differently from its label here, so the cases follow the label the model sees.
+describe("local_file_grant_name_addressing", () => {
+  const grant = (prefix: string, label = "demo-vault") => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); temporaryDirectories.push(root);
+    const directory = path.join(root, "granted"); fs.mkdirSync(directory);
+    const tools = new LocalFileTools({ get: () => ({ moduleId: "notes", revision: 1, saved: true,
+      scopes: [{ scopeId: "vault", label, directory, read: true, write: true }] }) },
+    { moduleIds: ["notes"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    return { directory, tools };
+  };
+  const create = (relativePath: string, scopeRef: string, content = "content") =>
+    ({ toolId: "files.write", toolVersion: 1, arguments: { scopeRef, relativePath, content, overwrite: false } });
+
+  it("lands a write addressed by the grant's name at the grant's root, for a create and for an overwrite", async () => {
+    const { directory, tools } = grant("grant-name-write-");
+    const trusted = turn("grant-name-write", "account-a"), binding = tools.bindTurn(trusted);
+    const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+    const named = "demo-vault/discount-project/review/fix.patch", landed = path.join(directory, "discount-project", "review", "fix.patch");
+    try {
+      const created = await tools.execute(create(named, scopeRef, "first"), trusted) as { sha256: string };
+      expect(fs.readdirSync(directory)).toEqual(["discount-project"]);
+      expect(fs.readFileSync(landed, "utf8")).toBe("first");
+      expect(created).toMatchObject({ relativePath: "discount-project/review/fix.patch", displayPath: named, created: true });
+      const replaced = await tools.execute({ toolId: "files.write", toolVersion: 1,
+        arguments: { scopeRef, relativePath: named, content: "second", overwrite: true, expectedSha256: created.sha256 } }, trusted);
+      expect(fs.readFileSync(landed, "utf8")).toBe("second");
+      expect(replaced).toMatchObject({ relativePath: "discount-project/review/fix.patch", displayPath: named, created: false });
+      expect(fs.readdirSync(directory)).toEqual(["discount-project"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it.each([
+    ["a directory", (entry: string) => fs.mkdirSync(entry), true],
+    ["a file", (entry: string) => fs.writeFileSync(entry, "occupied"), false],
+    ["a dangling symlink", (entry: string) => fs.symlinkSync(path.join(path.dirname(entry), "absent"), entry), false],
+  ] as const)("keeps the path literal when the root holds %s of the grant's name", async (_kind, occupy, writable) => {
+    const { directory, tools } = grant("grant-name-literal-");
+    occupy(path.join(directory, "demo-vault"));
+    const trusted = turn("grant-name-literal", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      const written = tools.execute(create("demo-vault/x.md", binding.promptLines[0]!.split(":", 1)[0]!, "literal"), trusted);
+      if (writable) {
+        await expect(written).resolves.toMatchObject({ relativePath: "demo-vault/x.md", displayPath: "demo-vault/demo-vault/x.md", created: true });
+        expect(fs.readFileSync(path.join(directory, "demo-vault", "x.md"), "utf8")).toBe("literal");
+      } else await expect(written).rejects.toThrow("local_file_mutation_failed");
+      expect(fs.existsSync(path.join(directory, "x.md"))).toBe(false);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it.each(["demo-vault-2/x.md", "sub/demo-vault/x.md", "demo-vault"])("takes only a leading segment equal to the name as the name: %s", async (relativePath) => {
+    const { directory, tools } = grant("grant-name-segment-");
+    const trusted = turn("grant-name-segment", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      await expect(tools.execute(create(relativePath, binding.promptLines[0]!.split(":", 1)[0]!, "literal"), trusted)).resolves.toMatchObject({ relativePath });
+      expect(fs.readFileSync(path.join(directory, ...relativePath.split("/")), "utf8")).toBe("literal");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // The name is recognized as it is written. A first folder that differs from it in case, or in how its letters are composed,
+  // is a folder of its own.
+  it.each([
+    ["case", "demo-vault", "Demo-Vault/x.md"],
+    ["Unicode normalization", "résumé", "résumé/x.md"],
+  ])("takes a first folder that differs from the name only in %s as a folder", async (_kind, label, relativePath) => {
+    const { directory, tools } = grant("grant-name-folding-", label);
+    const trusted = turn("grant-name-folding", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      await expect(tools.execute(create(relativePath, binding.promptLines[0]!.split(":", 1)[0]!, "literal"), trusted)).resolves.toMatchObject({
+        relativePath, displayPath: `${label}/${relativePath}`, created: true });
+      expect(fs.readdirSync(directory)).toEqual([relativePath.split("/")[0]]);
+      expect(fs.readFileSync(path.join(directory, ...relativePath.split("/")), "utf8")).toBe("literal");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // A label may hold a slash. Whether the root holds an entry of that name cannot be told when a file stands where the label's
+  // first folder would be, and the path then stays literal.
+  it.each([
+    ["nothing", undefined, true],
+    ["a file where the name's first folder would be", (directory: string) => fs.writeFileSync(path.join(directory, "shared"), "occupied"), false],
+  ] as const)("takes a name with a slash as the name only when the root is known to hold no entry of it: root holds %s", async (_kind, occupy, named) => {
+    const { directory, tools } = grant("grant-name-slash-", "shared/docs");
+    occupy?.(directory);
+    const trusted = turn("grant-name-slash", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      const written = tools.execute(create("shared/docs/x.md", binding.promptLines[0]!.split(":", 1)[0]!, "by name"), trusted);
+      if (named) await expect(written).resolves.toMatchObject({ relativePath: "x.md", displayPath: "shared/docs/x.md" });
+      else await expect(written).rejects.toThrow("local_file_mutation_failed");
+      expect(fs.readdirSync(directory)).toEqual([named ? "x.md" : "shared"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it.each([
+    ["named, then plain", "demo-vault/notes/a.md", "notes/a.md"],
+    ["plain, then named", "notes/a.md", "demo-vault/notes/a.md"],
+  ])("treats the two forms of one retried dispatch write as one write: %s", async (_order, first, second) => {
+    const { directory, tools } = grant("grant-name-retry-");
+    const original = { ...turn("grant-name-retry", "account-a"), target: "feishu.group.test", requesterRef: "ou_owner", dispatchRequestId: "dispatch-request" };
+    let binding = tools.bindTurn(original);
+    try {
+      const written = await tools.execute(create(first, binding.promptLines[0]!.split(":", 1)[0]!), original) as { sha256: string; modifiedAt: number };
+      await binding.release();
+      const retry = { ...original, dispatchRetry: true }; binding = tools.bindTurn(retry);
+      const repeated = await tools.execute(create(second, binding.promptLines[0]!.split(":", 1)[0]!), retry);
+      expect(fs.readdirSync(directory, { recursive: true }).map(String).sort()).toEqual(["notes", "notes/a.md"]);
+      expect(tools.dispatchEvidence("dispatch-request")).toEqual({ completed: 1, unknown: 0 });
+      expect(repeated).toMatchObject({ relativePath: "notes/a.md", sha256: written.sha256, modifiedAt: written.modifiedAt, created: true });
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // The reading is taken from the directory as it is at each call. A folder of the grant's name makes the named form literal from
+  // then on, whoever created it, so each case below ends with a file one level deeper than its first write put one.
+  it("reads a retried named write literally once a folder of the grant's name has appeared, as a second write", async () => {
+    const { directory, tools } = grant("grant-name-appeared-");
+    const original = { ...turn("grant-name-appeared", "account-a"), target: "feishu.group.test", requesterRef: "ou_owner", dispatchRequestId: "dispatch-request" };
+    let binding = tools.bindTurn(original);
+    try {
+      await tools.execute(create("demo-vault/notes/a.md", binding.promptLines[0]!.split(":", 1)[0]!), original);
+      await binding.release();
+      fs.mkdirSync(path.join(directory, "demo-vault"));
+      const retry = { ...original, dispatchRetry: true }; binding = tools.bindTurn(retry);
+      await expect(tools.execute(create("demo-vault/notes/a.md", binding.promptLines[0]!.split(":", 1)[0]!), retry)).resolves.toMatchObject({
+        relativePath: "demo-vault/notes/a.md", created: true });
+      expect(fs.readdirSync(directory, { recursive: true }).map(String).sort()).toEqual(["demo-vault", "demo-vault/notes", "demo-vault/notes/a.md", "notes", "notes/a.md"]);
+      expect(tools.dispatchEvidence("dispatch-request")).toEqual({ completed: 2, unknown: 0 });
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it("counts a folder of the grant's name that an earlier write of the turn created", async () => {
+    const { directory, tools } = grant("grant-name-created-");
+    const trusted = turn("grant-name-created", "account-a"), binding = tools.bindTurn(trusted);
+    const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+    try {
+      await expect(tools.execute(create("demo-vault/demo-vault/a.md", scopeRef), trusted)).resolves.toMatchObject({ relativePath: "demo-vault/a.md" });
+      await expect(tools.execute(create("demo-vault/demo-vault/b.md", scopeRef), trusted)).resolves.toMatchObject({ relativePath: "demo-vault/demo-vault/b.md" });
+      expect(fs.readdirSync(directory, { recursive: true }).map(String).sort()).toEqual(["demo-vault", "demo-vault/a.md", "demo-vault/demo-vault", "demo-vault/demo-vault/b.md"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it("shows each file's path below the root next to its display path in find, grep and edit results", async () => {
+    const { directory, tools } = grant("grant-name-results-");
+    fs.mkdirSync(path.join(directory, "discount-project", "src"), { recursive: true });
+    fs.writeFileSync(path.join(directory, "discount-project", "src", "discount.ts"), "export const off = 1;\n");
+    fs.writeFileSync(path.join(directory, "blob.bin"), Buffer.from([0, 1, 2]));
+    const trusted = turn("grant-name-results", "account-a"), binding = tools.bindTurn(trusted);
+    const shown = { relativePath: "discount-project/src/discount.ts", displayPath: "demo-vault/discount-project/src/discount.ts" };
+    try {
+      const found = await tools.execute({ toolId: "files.find", toolVersion: 2, arguments: { query: "discount.ts", kind: "file" } }, trusted) as { entries: Array<{ fileRef: string }> };
+      expect(found.entries).toMatchObject([shown]);
+      const grepped = await tools.execute({ toolId: "files.grep", toolVersion: 2, arguments: { pattern: "off" } }, trusted) as { skipped: unknown[] };
+      expect(grepped).toMatchObject({ matches: [shown] });
+      // A skipped file cannot be acted on by path, so it is shown by its display path only.
+      expect(grepped.skipped).toEqual([{ scopeRef: binding.promptLines[0]!.split(":", 1)[0]!, displayPath: "demo-vault/blob.bin", reason: "binary" }]);
+      const read = await tools.execute({ toolId: "files.read", toolVersion: 2, arguments: { fileRef: found.entries[0]!.fileRef } }, trusted) as { sha256: string };
+      await expect(tools.execute({ toolId: "files.edit", toolVersion: 1,
+        arguments: { fileRef: found.entries[0]!.fileRef, expectedSha256: read.sha256, oldText: "1", newText: "2" } }, trusted)).resolves.toMatchObject({ ...shown, changed: true });
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // A glob is matched against the path below the root and is never read as addressed by the grant's name: one that begins with
+  // the name matches only inside a folder of that name.
+  it.each([
+    ["files.find", (globs: object) => ({ toolId: "files.find", toolVersion: 2, arguments: { kind: "file", ...globs } }), "entries"],
+    ["files.grep", (globs: object) => ({ toolId: "files.grep", toolVersion: 2, arguments: { pattern: "off", ...globs } }), "matches"],
+  ] as const)("matches a glob that begins with the grant's name literally in %s", async (_tool, call, key) => {
+    const { directory, tools } = grant("grant-name-glob-");
+    fs.mkdirSync(path.join(directory, "discount-project"));
+    fs.writeFileSync(path.join(directory, "discount-project", "discount.ts"), "export const off = 1;\n");
+    const trusted = turn("grant-name-glob", "account-a"), binding = tools.bindTurn(trusted);
+    const matched = async (globs: object) =>
+      (await tools.execute(call(globs), trusted) as Record<string, Array<{ relativePath: string }>>)[key]!.map((item) => item.relativePath);
+    try {
+      expect(await matched({ include: ["demo-vault/**"] })).toEqual([]);
+      expect(await matched({ include: ["discount-project/**"] })).toEqual(["discount-project/discount.ts"]);
+      fs.mkdirSync(path.join(directory, "demo-vault"));
+      fs.writeFileSync(path.join(directory, "demo-vault", "inner.ts"), "export const off = 2;\n");
+      expect(await matched({ include: ["demo-vault/**"] })).toEqual(["demo-vault/inner.ts"]);
+      expect(await matched({ exclude: ["demo-vault/**"] })).toEqual(["discount-project/discount.ts"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // With the directory gone, nothing of the grant's name is found in it either, so the write is taken as addressed by name.
+  it("fails closed and creates nothing when the grant's directory is gone", async () => {
+    const { directory, tools } = grant("grant-name-gone-");
+    const trusted = turn("grant-name-gone", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      fs.rmSync(directory, { recursive: true });
+      await expect(tools.execute(create("demo-vault/x.md", binding.promptLines[0]!.split(":", 1)[0]!), trusted)).rejects.toThrow("local_file_mutation_failed");
+      expect(fs.existsSync(directory)).toBe(false);
+    } finally { await binding.release(); await tools.close(); }
+  });
+});
+
 describe("local_file_service_state_boundary", () => {
   // Shapes as the service lays them out: a runtime root under the state directory, a single-file configuration root,
   // a LaunchAgent file that does not exist yet and a Codex home holding auth.json.
@@ -1638,8 +1869,10 @@ describe("local_file_service_state_boundary", () => {
       const targets = [`${runtime}/workspace/.agents/skills/x/SKILL.md`, `${runtime}/codex-home/skills/x/SKILL.md`, `${runtime}/home/.agents/skills/x/SKILL.md`,
         "state/state.json", "channel.json", "LaunchAgents/svc.plist", "codex/auth.json",
         // Case variants name the same files on a case-insensitive volume (APFS).
-        "LaunchAgents/SVC.PLIST", "OPENCLAW/config.json"];
-      expect(targets).toHaveLength(9);
+        "LaunchAgents/SVC.PLIST", "OPENCLAW/config.json",
+        // Addressed by the grant's name: the path below the root is the one that is checked.
+        "Home/state/state.json"];
+      expect(targets).toHaveLength(10);
       for (const relativePath of targets) {
         await expect(execute("files.write", 1, { scopeRef, relativePath, content: "planted", overwrite: false }), relativePath).rejects.toThrow(/^local_file_permission_denied$/u);
       }
@@ -1661,7 +1894,7 @@ describe("local_file_service_state_boundary", () => {
         "group-model-runtimes/feishu.group.x/home", "group-model-runtimes/feishu.group.x/workspace", "item.md", "state.json"]);
       expect(tree("codex")).toEqual(["auth.json"]);
       expect(tree("LaunchAgents")).toEqual([]);
-      expect(fs.readdirSync(grant).filter((name) => name.toLowerCase() === "openclaw")).toEqual([]);
+      expect(fs.readdirSync(grant).filter((name) => ["openclaw", "home"].includes(name.toLowerCase()))).toEqual([]);
       for (const relativePath of ["state/state.json", "state/item.md", "channel.json", "codex/auth.json"]) {
         expect(fs.readFileSync(path.join(grant, relativePath), "utf8")).toBe(files[relativePath]);
       }
