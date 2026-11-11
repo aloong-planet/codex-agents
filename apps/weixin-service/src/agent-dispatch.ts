@@ -645,8 +645,12 @@ export class AgentDispatch {
       accepting(job.agentId);
       const plan = await this.options.leader.plan(this.leaderInput(job, team), 0);
       cancelled();
+      // The request holds its lead's removal, but a lead that stopped accepting work during its plan turn, or while the parts it
+      // asked for were placed, gets no new Assignment either.
+      accepting(job.agentId);
       const added = toPlanned(plan.assignments, job.agentId);
       const placed = await this.place(job, plan.help, added.length, views, signal);
+      accepting(job.agentId);
       this.addAssignments(job, views, { added: [...added, ...placed.added], affected: [], decisions: { texts: plan.decisions, byTeam: placed.decisions },
         parts: placed.parts, needs: placed.needs });
       return;
@@ -682,6 +686,8 @@ export class AgentDispatch {
     // A relayed team's Assignments are of an earlier attempt until this division is stored, so they did not hold its removal
     // through the turns that followed its own.
     for (const teamId of relayed) accepting(teamId);
+    // Nor does the lead get the Assignments its answer adds, if it stopped accepting work during those turns.
+    if (answer.assignments.length) accepting(job.agentId);
     for (const [teamId, texts] of Object.entries(placed.decisions)) byTeam[teamId] = [...(byTeam[teamId] ?? []), ...texts];
     this.addAssignments(job, views, { added: [...added, ...placed.added], affected, decisions: { texts: answer.decisions, byTeam },
       parts: [...(job.parts ?? []), ...placed.parts], needs: [...(job.needs ?? []), ...needs, ...placed.needs] });
@@ -717,9 +723,10 @@ export class AgentDispatch {
     const chosen = [...new Set(placed.parts.map(({ teamId: id }) => id).filter((id): id is string => id !== null))];
     // Until its plan is stored, a chosen team has no Assignment of the request, and nothing holds its removal from the group.
     const accepts = (teamId: string) => this.options.roster(job.event).some(({ id }) => id === teamId);
+    const left = new Set<string>();
     for (const teamId of chosen) {
-      // One that stopped accepting work there since it was offered plans nothing.
-      if (!accepts(teamId)) continue;
+      // One that stopped accepting work there since it was offered plans nothing, and has left even if it accepts work again later.
+      if (!accepts(teamId)) { left.add(teamId); continue; }
       const view = this.options.team(teamId, job.definitionsVersion!)!;
       const plan = await this.options.leader.plan(this.leaderInput(job, view, this.crossRelay(job, teamId, placed.parts)), planned + placed.added.length);
       if (signal.aborted) throw new Error("dispatch_cancelled");
@@ -729,7 +736,7 @@ export class AgentDispatch {
       views.set(teamId, view);
     }
     // One that stopped during a plan turn, its own or a later team's, has its plan dropped. Either way its parts are not taken.
-    const left = new Set(chosen.filter((teamId) => !accepts(teamId)));
+    for (const teamId of chosen) if (!accepts(teamId)) left.add(teamId);
     if (!left.size) return placed;
     for (const teamId of left) delete placed.decisions[teamId];
     return { ...placed, added: placed.added.filter(({ teamId }) => !left.has(teamId)), needs: placed.needs.filter(({ teamId }) => !left.has(teamId)),
