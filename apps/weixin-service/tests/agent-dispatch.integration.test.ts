@@ -942,7 +942,7 @@ it("closes a cancelled request's open file choice, so answering it afterwards se
     expect(sendRuns(cancelled).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
     expectNothingSent(answered);
     expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "completed" }, { status: "cancelled" }] });
-    // One cancel report after the start message and the choice; no post, Team Leader turn or Executor run follows the cancel.
+    // One cancel report after the start message and the choice; no Team Leader post, Team Leader turn or Executor run follows the cancel.
     expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
       `已停止继续处理：\n执行者 1「整理要点」已完成\n执行者 2「发送笔记」已停止\n已经完成的操作不会自动撤销。`]);
     expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
