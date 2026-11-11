@@ -52,7 +52,7 @@
       $("asl-rows").innerHTML = '<tr><td colspan="6"><div class="acv2-empty"><strong>还没有 skill。</strong><p>点「从文件夹导入」导入本机的 skill 文件夹。</p></div></td></tr>';
       return;
     }
-    $("asl-rows").innerHTML = skills.map((skill) => `<tr aria-selected="${selected === skill.id}"><td><button class="acv5-name" type="button" data-open="${esc(skill.id)}">${esc(skill.name)}<small>${esc(skill.description)}</small></button></td>`
+    $("asl-rows").innerHTML = skills.map((skill) => `<tr aria-selected="${selected === skill.id}"><td><button class="acv5-name" type="button" data-open="${esc(skill.id)}">${esc(skill.name)}<small>${esc(skill.description)}</small></button>${skill.refused ? '<span class="acv2-badge acv2-failed asl-refused">Codex 未加载</span>' : ""}</td>`
       + `<td><code class="asl-code" title="${esc(skill.source)}">${esc(skill.source)}</code></td>`
       + `<td>${skill.files.length} 个${skill.files.some((file) => file.script) ? " · 含脚本" : ""}</td><td>${dateTime(skill.importedAt)}</td>`
       + `<td>${STATES[skill.state.state](skill.state)}</td><td>${skill.usedBy.length ? `${skill.usedBy.length} 个能力档` : "未使用"}</td></tr>`).join("");
@@ -107,6 +107,13 @@
     return `<section class="acf-section"><h3>与来源文件夹比较</h3>${body}${errorHtml(detail.error)}</section>`;
   }
 
+  /** Only for a skill an Executor's runtime did not load: Codex's message for its SKILL.md, or that it gave none (skill-library::REQ-002). */
+  function refusedHtml(skill) {
+    if (!skill.refused) return "";
+    const what = skill.refused.reason === undefined ? "执行者启动时，Codex 没有加载这个 skill，也没有给出原因。" : `执行者启动时，Codex 没有加载这个 skill：<code>${esc(skill.refused.reason)}</code>。`;
+    return `<section class="acf-section"><h3>Codex 加载</h3><div class="asl-error">${what}选了它的能力档，执行者会在开始前失败；请在来源文件夹里修改 SKILL.md 后重新导入。</div></section>`;
+  }
+
   function detailHtml(skill) {
     const source = `<section class="acf-section"><div class="acv-tip-row"><h3>来源</h3>${tip("说明来自 SKILL.md。\n· 内容在来源文件夹里修改后重新导入；页面不能编辑内容。")}</div><p class="asl-desc">${esc(skill.description)}</p>`
       + `<div class="acf-sub">来源文件夹</div><code class="asl-code asl-wrap">${esc(skill.source)}</code>`
@@ -119,7 +126,7 @@
       : detail.deleting
         ? `<div class="acf-inline-confirm">从 Skill 库删除「${esc(skill.name)}」；来源文件夹不受影响。<div class="acf-row-actions"><button class="acv2-button acf-danger-button" type="button" data-delete-confirm>确认删除</button><button class="acv2-button" type="button" data-delete-cancel>取消</button></div></div>`
         : '<p class="acf-section-note">没有能力档使用它，可以删除。来源文件夹不受影响。</p><button class="acv2-button acf-danger-button" type="button" data-delete>删除 skill</button>'}${errorHtml(detail.deleteError)}</section>`;
-    return source + compareHtml(skill) + usage + danger;
+    return refusedHtml(skill) + source + compareHtml(skill) + usage + danger;
   }
 
   function render() {

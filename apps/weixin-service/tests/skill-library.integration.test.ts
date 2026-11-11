@@ -103,6 +103,51 @@ it("gives each Executor exactly its profile's skills as its request was admitted
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
 }, 60000);
 
+// skill-library::REQ-002 and agent-dispatch::REQ-016/AC-04: a selected skill the runtime's App Server does not list fails each
+// Assignment before its first turn, naming it, and the library shows it as not loaded with Codex's reason. Two `name:` lines
+// are a shape the library imports and the installed App Server refuses with this very message (measured 2026-11-12).
+type RefusedView = { skills: Array<{ id: string; name: string; refused?: { reason?: string } }> };
+it("fails each Assignment before its first turn when its runtime does not load a selected skill, shows the skill as not loaded, and runs once it is fixed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "skill-library-refused-")), sources = realpathSync(mkdtempSync(join(tmpdir(), "skill-library-sources-")));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const trip = await importSkill(running, folder(sources, "trip-check", "逐段核对站名与换乘"));
+    const mealSource = folder(sources, "meal-plan", "按预算安排菜单");
+    writeFileSync(join(mealSource, "SKILL.md"), "---\nname: meal-plan\nname: meal-plan\ndescription: 按预算安排菜单\n---\n\n# meal-plan\n\nbody-v1\n");
+    const meal = await importSkill(running, mealSource);
+    await billSelects(running, [trip, meal]);
+
+    // Two Assignments, so the first to fail is posted with its cause while the other is still unfinished.
+    const plan = { assignments: [{ profileId: "executor-1", title: "规划周六行程", brief: "周六" }, { profileId: "executor-1", title: "规划周日行程", brief: "周日" }], decisions: [] };
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_refused", "请帮我规划周末两天行程", decision("bill", "规划周末两天行程"), { leaderPlan: plan, modelReply: completedReply("规划行程") }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    const posts = failed.agentFixtureOutboxes!.bill!.text.map(({ message }) => message);
+    const refusedView = await running.get<RefusedView>("/api/skills");
+    console.log(JSON.stringify({ kind: "skill_library_refused", commands: ["import trip-check", "import meal-plan (two name lines)", "Bill 能力档 1 selects both", "请帮我规划周末两天行程"],
+      jobs: failed.agentDispatch, posts, executorTurns: failed.fixtureModelRequests?.length ?? 0, skills: refusedView.skills.map(({ name, refused }) => ({ name, refused })) }));
+    // No Executor turn ran.
+    expect(failed.fixtureModelRequests ?? []).toEqual([]);
+    expect(posts).toContainEqual(expect.stringMatching(/^\S+ \d+（能力档 1）的分工「规划周[六日]行程」未能完成：Codex 没有加载技能「meal-plan」。其余分工继续处理。$/u));
+    // The closing turn reads each Assignment's result; without an injected closing the fixture repeats them.
+    const closing = failed.fixtureLeaderRequests!.filter(({ phase }) => phase === "close").at(-1)!.input.assignments!;
+    expect(closing.map(({ status, result }) => ({ status, result }))).toEqual([{ status: "failed", result: "Codex 没有加载技能「meal-plan」，这项分工没有执行。" },
+      { status: "failed", result: "Codex 没有加载技能「meal-plan」，这项分工没有执行。" }]);
+    expect(refusedView.skills.map(({ id, refused }) => [id, refused])).toEqual([[meal, { reason: "invalid YAML: duplicate field `name`" }], [trip, undefined]]);
+
+    // The owner fixes the folder and imports it again: the new version has no record, and a new request runs with both skills.
+    writeFileSync(join(mealSource, "SKILL.md"), skillMd("meal-plan", "按预算安排菜单", "body-v2"));
+    const changed = (await running.get<SkillsView>("/api/skills")).skills.find(({ id }) => id === meal)!.state;
+    await running.post(`/api/skills/${meal}/reimport`, { confirmed: changed.fingerprint });
+    expect((await running.get<RefusedView>("/api/skills")).skills.map(({ refused }) => refused)).toEqual([undefined, undefined]);
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_fixed", "再帮我规划下周六行程", decision("bill", "规划下周六行程"), { modelReply: completedReply("规划下周六行程") }));
+    const done = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+    expect(done.fixtureModelRequests!.map(({ input }) => (input as Array<{ type: string; name?: string }>).filter(({ type }) => type === "skill").map(({ name }) => name)))
+      .toEqual([["trip-check", "meal-plan"]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
+}, 60000);
+
 // Unchecking every dispatch group turns dispatch off at the next start and leaves the teams stored for when it is enabled again
 // (agent-console::US-009). No team management and no dispatch run meanwhile: the library reads which profiles select a skill
 // from the stored definitions, and removes no version, because the requests that may need one cannot be read.

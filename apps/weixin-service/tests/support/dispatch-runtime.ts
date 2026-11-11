@@ -12,5 +12,7 @@ export function conversation(threadId: string, finalText = '{"message":"已整�
     releaseThread: vi.fn<CodexConversation["releaseThread"]>(),
     interruptThread: vi.fn<CodexConversation["interruptThread"]>().mockResolvedValue(undefined),
     close: vi.fn<CodexConversation["close"]>().mockResolvedValue(undefined),
+    // Lists no skill: a case whose runtime has skills says what its App Server lists.
+    listSkills: vi.fn<CodexConversation["listSkills"]>().mockResolvedValue({ skills: [], errors: [] }),
   };
 }

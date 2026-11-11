@@ -7,6 +7,7 @@ import type { CrossTeamDecision, DispatchAgent, DispatchAssignment, DispatchClas
 import { parseCrossTeamDecision, parseDispatchDecision } from "./agent-dispatch-classifier.js";
 import { LeaderOutputError, type LeaderHelp, type LeaderPlanAssignment, type LeaderRelay, type LeaderSessionKey, type LeaderTurnInput, type TeamLeader } from "./agent-dispatch-leader.js";
 import { COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN } from "./team-registry.js";
+import { SkillsNotLoaded } from "./agent-dispatch-executor.js";
 import type { AgentMemoryScope } from "./agent-profile.js";
 import type { PendingPresentation } from "./workflow-pending-response-coordinator.js";
 
@@ -83,6 +84,7 @@ export type AssignmentFailure = Readonly<{ kind: "reported"; toolRefused: boolea
 export function failureCause(failure: AssignmentFailure): string {
   if (failure.kind === "reported") return failure.toolRefused ? "有工具调用被拒绝" : "执行者报告无法完成";
   if (failure.kind === "shutdown") return "服务中断";
+  if (failure.error instanceof SkillsNotLoaded) return notLoaded(failure.error);
   const code = failure.error instanceof Error ? failure.error.message : "";
   if (code.includes("无进展超时")) return "执行超时";
   if (code === "dispatch_model_unavailable" || code === "dispatch_group_unbound") return "运行环境不可用";
@@ -1467,7 +1469,10 @@ export class AgentDispatch {
   private failure(code: string) { try { this.options.report(code); } catch { /* Diagnostics cannot change task outcomes. */ } }
 }
 
+/** The skills an Assignment's runtime did not load, as group posts name them (skill-library::REQ-002). */
+const notLoaded = ({ names }: SkillsNotLoaded) => `Codex 没有加载技能${names.map((name) => `「${name}」`).join("")}`;
 function failureReason(error: unknown): string {
+  if (error instanceof SkillsNotLoaded) return `${notLoaded(error)}，这项分工没有执行。`;
   const code = error instanceof Error ? error.message : "";
   if (code === "dispatch_authorization_changed") return "权限或可用上下文发生变化，本次处理已停止。";
   if (code === "dispatch_model_unavailable") return "当前模型不可用，本次未能继续处理。";

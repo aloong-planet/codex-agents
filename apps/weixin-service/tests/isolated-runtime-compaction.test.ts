@@ -76,7 +76,7 @@ describe.skipIf(!runsInstalledAppServer)("Runtime home compaction on the install
               const started = await conversation.startOrResume(saved, ...rest); threads.push({ saved, started }); return started;
             },
             releaseThread: (threadId: string) => conversation.releaseThread(threadId), interruptThread: (threadId: string) => conversation.interruptThread(threadId),
-            close: () => conversation.close() },
+            listSkills: (cwd: string) => conversation.listSkills(cwd), close: () => conversation.close() },
           cwd: runtime.cwd,
           exited: async () => {
             await Promise.all(exits);
@@ -163,7 +163,7 @@ describe.skipIf(!runsInstalledAppServer)("Runtime home compaction on the install
               const started = await conversation.startOrResume(saved, ...rest); threads.push({ saved, started }); return started;
             },
             releaseThread: (threadId: string) => conversation.releaseThread(threadId), interruptThread: (threadId: string) => conversation.interruptThread(threadId),
-            close: () => conversation.close() },
+            listSkills: (cwd: string) => conversation.listSkills(cwd), close: () => conversation.close() },
           cwd: runtime.cwd,
           exited: async () => { await Promise.all(exits); homesAtExit.push({ listing: homeListing(home), rollouts: hashes(home) }); },
         };

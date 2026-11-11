@@ -4,9 +4,11 @@
 // Gaps, each needing a file to change at a moment no case can choose: a SKILL.md rewritten between the first look at it and the
 // walk of the same read (refused as changed); a SKILL.md that opens but then fails to be read; and a file removed, or replaced
 // by a link or a named pipe, between being listed and being opened (opened without following and without waiting).
-// Another gap: a SKILL.md that the App Server refuses to list for a reason nobody measured is imported all the same (skill-library,
-// failure modes). The two measured refusals are refused below; that the installed App Server still refuses exactly those is the
-// opt-in case in isolated-model-runtime.test.ts, to be run again after a Codex upgrade.
+// A SKILL.md that the App Server refuses for a reason the library does not check is imported all the same, and caught when an
+// Executor's runtime starts (skill-library, failure modes): the record of that is under "whether Codex loaded a skill" below, and
+// the runtime check in agent-dispatch-executor.test.ts and skill-library.integration.test.ts. The two measured refusals are
+// refused below; that the installed App Server still refuses exactly those is the opt-in case in isolated-model-runtime.test.ts,
+// to be run again after a Codex upgrade.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -359,6 +361,46 @@ describe("keeping a skill in step with its source", () => {
     const home = temporary("skill-home-");
     library.materialize([skill], home);
     expect(tree(home)).toEqual(expected(SAMPLE_FILES, skill.id));
+  });
+});
+
+// skill-library::REQ-002: what an Executor's runtime made of a version when it started. The record belongs to that version, so
+// the page shows it for a skill's current version only.
+describe("whether Codex loaded a skill", () => {
+  const view = async (library: SkillLibrary) => (await library.view()).map(({ name, refused }) => ({ name, ...(refused ? { refused } : {}) }));
+  it("shows a version Codex did not load, with its reason or none, until a runtime lists that version, also when the library is opened anew", async () => {
+    const { library, settings } = open();
+    const patch = await imported(library, sample());
+    const other = await imported(library, write(path.join(temporary("skill-source-"), "trip-check"), { "SKILL.md": skillMd("trip-check", "body") }));
+    expect(await view(library)).toEqual([{ name: "patch-writer" }, { name: "trip-check" }]);
+
+    library.recordLoading(patch, { loaded: false, reason: "invalid YAML: duplicate field `name`" });
+    library.recordLoading(other, { loaded: true });
+    expect(await view(library)).toEqual([{ name: "patch-writer", refused: { reason: "invalid YAML: duplicate field `name`" } }, { name: "trip-check" }]);
+    // What the service holds is found again at its next start.
+    expect(await view(new SkillLibrary(settings))).toEqual([{ name: "patch-writer", refused: { reason: "invalid YAML: duplicate field `name`" } }, { name: "trip-check" }]);
+
+    library.recordLoading(other, { loaded: false });
+    expect(await view(library)).toEqual([{ name: "patch-writer", refused: { reason: "invalid YAML: duplicate field `name`" } }, { name: "trip-check", refused: {} }]);
+    // A later runtime that lists the same version clears its record.
+    library.recordLoading(patch, { loaded: true });
+    expect(await view(library)).toEqual([{ name: "patch-writer" }, { name: "trip-check", refused: {} }]);
+    expect(await view(new SkillLibrary(settings))).toEqual([{ name: "patch-writer" }, { name: "trip-check", refused: {} }]);
+  });
+
+  it("starts a re-imported skill's new version without a record, whatever is recorded for the version a request still runs with", async () => {
+    const needed = new Set<string>();
+    const { library } = open({ needed: () => needed });
+    const folder = sample();
+    const first = await imported(library, folder);
+    needed.add(skillKey(first));
+    library.recordLoading(first, { loaded: false, reason: "invalid YAML: duplicate field `name`" });
+    fs.writeFileSync(path.join(folder, "SKILL.md"), skillMd("patch-writer", "body-v2"));
+    await library.reimport(first.id, ((await library.compare(first.id)) as { fingerprint: string }).fingerprint, BROWSER);
+    expect(await view(library)).toEqual([{ name: "patch-writer" }]);
+    // A runtime of a request admitted earlier still reports on version 1; the page shows version 2.
+    library.recordLoading({ id: first.id, version: 1 }, { loaded: false, reason: "invalid YAML: duplicate field `name`" });
+    expect(await view(library)).toEqual([{ name: "patch-writer" }]);
   });
 });
 

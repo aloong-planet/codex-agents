@@ -6,7 +6,7 @@ import { expect, type Locator, type Page, type TestInfo } from "@playwright/test
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
-import { importSkill, post, read, registerMcpServer } from "./console-api.js";
+import { dispatchTo, groupMessage, importSkill, post, read, registerMcpServer } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // 团队管理 (docs/specs/team-management.md) in a real browser, against the fixture service with Feishu dispatch and the fake
@@ -48,14 +48,6 @@ type ServiceState = { agentDispatch?: { jobs: Array<{ id: string; status: string
   workflowModulePermissions?: { modules: Array<{ moduleId: string; revision: number; scopes: Array<{ scopeId: string }> }> } };
 const serviceState = (server: Server) => read<ServiceState>(server, "/api/state");
 const jobStatuses = async (server: Server) => (await serviceState(server)).agentDispatch?.jobs.map(({ status }) => status);
-/** The fixture Coordinator's decision to dispatch a request to `agentId`. */
-const dispatchTo = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
-/** A text message in 银河护卫队 with the fixture Coordinator's decision for it; `extra` adds fixture inputs for the turns it starts. */
-const groupMessage = (server: Server, messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {},
-  from = { sender: "ou_owner", pathname: "/api/fixture/inbound" }) => post(server, from.pathname, {
-  event: { app_id: SAM_APP, sender: { sender_type: "user", sender_id: { open_id: from.sender } },
-    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
-      content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision, ...extra });
 /** Saves a team bound to `groups` only, with everything else as the service has it, and returns the view after the save. */
 async function bindTo(server: Server, teamId: string, groups: string[]) {
   const view = await read<TeamsView>(server, "/api/teams");
