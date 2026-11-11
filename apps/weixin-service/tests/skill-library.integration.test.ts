@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { processWaitLimitMs } from "./support/process-wait.js";
-import { decision, dispatchConfig, groupMessage, start, type State } from "./support/real-main.js";
+import { config, decision, dispatchConfig, groupMessage, start, type State } from "./support/real-main.js";
 
 // Real main composition (docs/specs/skill-library.md, Testing Decisions "Runtime boundary"): skills imported and selected through
 // the console API, a group request through the fixture-only Feishu ingress, and each Executor's runtime home as it is when its
@@ -163,3 +163,33 @@ it("keeps what stored teams and requests need of the library while the service r
       [[trip, skillMd("trip-check", "逐段核对站名与换乘", "body-v1")]], [[trip, skillMd("trip-check", "逐段核对站名与换乘", "body-v3")]]]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
 }, 120000);
+
+// A service that never had dispatch has no team registry file, and so no profile that could select a skill. One whose registry
+// file cannot be opened does not need it to run either: it starts, and since it cannot tell the uses, it deletes no skill.
+it("runs without dispatch with no team registry, where an unused skill can be deleted, and with one that cannot be opened, where none is deleted", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "skill-library-plain-")), sources = realpathSync(mkdtempSync(join(tmpdir(), "skill-library-sources-")));
+  let running: Running | undefined;
+  const listed = async (service: Running) => (await service.get<SkillsView>("/api/skills")).skills.map(({ id, usedBy }) => [id, usedBy]);
+  try {
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("feishu")));
+    running = await start(directory);
+    expect(await running.get("/api/teams")).toEqual({ configured: false });
+    expect(existsSync(join(directory, "team-registry.sqlite"))).toBe(false);
+    const trip = await importSkill(running, folder(sources, "trip-check", "逐段核对站名与换乘"));
+    const meal = await importSkill(running, folder(sources, "meal-plan", "按预算安排菜单"));
+    expect(await listed(running)).toEqual([[meal, []], [trip, []]]);
+    expect(await running.send(`/api/skills/${trip}/delete`, {})).toMatchObject({ status: 200, body: { deleted: trip } });
+    expect(await listed(running)).toEqual([[meal, []]]);
+    await running.close(); running = undefined;
+
+    // A registry file that is not a database, as a damaged one is.
+    writeFileSync(join(directory, "team-registry.sqlite"), "not a database");
+    running = await start(directory);
+    expect(running.output()).toContain("skill_library_stored_teams_unreadable");
+    // The page shows what it shows for an unused skill; the deletion is what is refused.
+    expect(await listed(running)).toEqual([[meal, []]]);
+    expect(await running.send(`/api/skills/${meal}/delete`, {})).toEqual({ status: 409,
+      body: { error: "读不了已保存的团队配置，无法确认是否还有能力档在使用它，暂时不能删除。", refusal: { kind: "uses_unknown" } } });
+    expect(await listed(running)).toEqual([[meal, []]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
+}, 60000);

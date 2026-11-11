@@ -17,7 +17,7 @@ import { createIsolatedModelRuntime, installDirectModelCatalog, type IsolatedMod
 import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, type IsolatedRuntimeKind } from "../src/isolated-runtime-kinds.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
-import { SkillLibrary } from "../src/skill-library.js";
+import { SkillLibrary, SkillRefusal } from "../src/skill-library.js";
 import { resolveCodexExecutable } from "../src/stdio-app-server-transport.js";
 import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 import { AppServerSession, assistantMessage, type BundledSkillSample, FakeResponsesEndpoint, isolatedConversationPlacements, type IsolatedPlacement,
@@ -263,6 +263,35 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       expect(input).toContain("PROFILE-SKILL-BODY-4F2B");
       for (const absent of ["UNSELECTED-SKILL-BODY-9C7D", marker.own, marker.ownHome, marker.host, bundled.bodyLine]) expect(input, absent).not.toContain(absent);
     } finally { await conversation.close(); }
+  }, 60_000);
+
+  // The library refuses at import what the App Server would not list, and accepts what it lists: a skill it accepted and the
+  // App Server did not list would reach an Executor and never be read (skill-library, failure modes). These are the shapes
+  // measured on 2026-11-11; after a Codex upgrade this case says whether the library's two refusals still match.
+  it("lists exactly the SKILL.md shapes the Skill Library accepts", async () => {
+    const shapes: Array<[folder: string, skillMd: string, listedAs: string | undefined]> = [
+      ["name-64", `---\nname: ${"n".repeat(64)}\ndescription: d\n---\nbody\n`, "n".repeat(64)],
+      ["name-65", `---\nname: ${"m".repeat(65)}\ndescription: d\n---\nbody\n`, undefined],
+      ["byte-order-mark", "\u{FEFF}---\nname: marked\ndescription: d\n---\nbody\n", undefined],
+      ["crlf", "---\r\nname: crlf\r\ndescription: d\r\n---\r\nbody\r\n", "crlf"],
+      ["description-5000", `---\nname: long-description\ndescription: ${"d".repeat(5000)}\n---\nbody\n`, "long-description"],
+      ["spaced-name", "---\nname: trip check\ndescription: d\n---\nbody\n", "trip check"],
+      ["chinese-name", "---\nname: 行程核对\ndescription: 逐段核对站名与换乘\n---\nbody\n", "行程核对"],
+      ["colon", "---\nname: colon\ndescription: Use when: checking a trip\n---\nbody\n", "colon"],
+    ];
+    const plant = (directory: string) => { for (const [folder, skillMd] of shapes) { fs.mkdirSync(path.join(directory, folder), { recursive: true }); fs.writeFileSync(path.join(directory, folder, "SKILL.md"), skillMd); } };
+    const state = path.join(work, "shape-state"), sources = path.join(work, "shape-sources");
+    plant(sources);
+    const library = new SkillLibrary({ directory: path.join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }) });
+    const accepted = await Promise.all(shapes.map(([folder]) => library.read(path.join(sources, folder)).then(({ name }) => name,
+      (error: unknown) => { if (error instanceof SkillRefusal) return undefined; throw error; })));
+    expect(accepted).toEqual(shapes.map(([, , listedAs]) => listedAs));
+
+    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, instance: `dispatch-${"d".repeat(64)}`, mediaRoot: media("skill-shapes"), environment, skills: plant });
+    const session = await AppServerSession.open(model.route(runtime));
+    try {
+      expect((await session.listSkills(runtime.cwd)).map(({ name }) => name).sort()).toEqual(shapes.flatMap(([, , listedAs]) => listedAs ?? []).sort());
+    } finally { session.close(); }
   }, 60_000);
 
   it("a skill input item cannot load a host or bundled skill", async () => {

@@ -1,5 +1,5 @@
 // The console's API as an authorized browser session calls it, for what console journeys set up and check beside the page.
-// Shared by the spec files of the console pages, so that how a journey authorizes and sends a request is written once.
+// Shared by team-management.spec.ts and skill-library.spec.ts. Other spec files still send such requests with helpers of their own.
 
 /** The fixture service a journey runs against: its origin and the harness's own authorized cookie. */
 export type ConsoleServer = { url: string; cookie: string };

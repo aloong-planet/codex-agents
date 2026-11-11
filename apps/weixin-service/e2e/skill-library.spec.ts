@@ -236,8 +236,9 @@ test("shows a skill's source, files and the profiles that use it, keeps a skill 
 });
 
 // agent-console::REQ-005/AC-04: a skill's name and description, its file names and a link's target are supplied by the folder.
-// The page shows them as the text they are, in the import drawer, the table and the details. The team page's checkboxes are
-// driven the same way in team-management.spec.ts.
+// The page shows them as the text they are: in the import drawer, the table and the details, on the re-import card, in the delete
+// confirmation, and in a refusal that names the skill. The team page's checkboxes are driven the same way in
+// team-management.spec.ts.
 test("shows what a folder supplies as plain text, whatever it looks like", async ({ page }, testInfo) => {
   const NAME = '<b data-markup="name">粗体</b>', DESCRIPTION = '<img src=x onerror="window.__skillMarkup=1"> 描述';
   const FILE = 'references/<i data-markup="file">note</i>.md', TARGET = '<img src=x onerror="window.__skillMarkup=2">';
@@ -269,6 +270,30 @@ test("shows what a folder supplies as plain text, whatever it looks like", async
   await expect(drawer(page).locator(".asl-desc")).toHaveText(DESCRIPTION);
   await expect(drawer(page).locator(".acv5-list li").nth(1)).toHaveText(FILE);
   await expect(injected).toHaveCount(0);
-  expect(await ran()).toBeUndefined();
   await testInfo.attach("markup-as-text", { body: await page.screenshot(), contentType: "image/png" });
+
+  // The re-import card lists a file the source gained.
+  const ADDED = 'references/<u data-markup="added">new</u>.md';
+  fs.mkdirSync(path.dirname(path.join(source, ADDED)), { recursive: true });
+  fs.writeFileSync(path.join(source, ADDED), "new\n");
+  await drawer(page).getByRole("button", { name: "重新检查" }).click();
+  await drawer(page).getByRole("button", { name: "重新导入", exact: true }).click();
+  await expect(drawer(page).locator(".acf-grant")).toContainText(`替换这 1 个文件：${ADDED}（新增）`);
+  await expect(injected).toHaveCount(0);
+  // Exact names: the sections' tip buttons carry these words in their labels too.
+  await drawer(page).getByRole("button", { name: "取消", exact: true }).click();
+
+  // The delete confirmation names the skill.
+  await drawer(page).getByRole("button", { name: "删除 skill", exact: true }).click();
+  await expect(drawer(page).locator(".acf-inline-confirm")).toContainText(`从 Skill 库删除「${NAME}」；来源文件夹不受影响。`);
+  await expect(injected).toHaveCount(0);
+  await drawer(page).getByRole("button", { name: "取消", exact: true }).click();
+
+  // A refusal that names the skill: another folder with the same name. The open drawer covers the import button.
+  await page.keyboard.press("Escape");
+  await expect(drawer(page)).toBeHidden();
+  await openImport(page, folder("twin", "x", { "SKILL.md": `---\nname: '${NAME}'\ndescription: 同名的另一个\n---\n` }));
+  await expect(drawer(page).locator(".asl-error")).toHaveText(`已有同名 skill「${NAME}」。要更新它，请在它的详情里重新导入；或换一个文件夹。`);
+  await expect(injected).toHaveCount(0);
+  expect(await ran()).toBeUndefined();
 });

@@ -230,10 +230,12 @@ const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // The Skill Library: skills imported from local folders as copies, which Executor profiles select (skill-library spec). Its
 // directory is service state, outside every file grant (ADR-0029). Which versions requests can still run with is known once
 // the dispatch records can be read; until then, and whenever the service runs without dispatch, the library removes none.
-// `dormantTeams` are the stored team definitions of a service without dispatch: its profiles still select skills.
-const skillSnapshots: { needed?: () => ReadonlySet<string> | undefined; dormantTeams?: TeamDefinitions } = {};
+// `dormantTeams` are the stored team definitions of a service without dispatch: its profiles still select skills. When they
+// could not be read, `dormantUnreadable` is set and no skill's uses can be told.
+const skillSnapshots: { needed?: () => ReadonlySet<string> | undefined; dormantTeams?: TeamDefinitions; dormantUnreadable?: true } = {};
 const skillLibrary = new SkillLibrary({ directory: path.join(consoleStateDirectory, "skill-library"), audit: consoleAudit,
   usedBy: (id) => {
+    if (skillSnapshots.dormantUnreadable) return undefined;
     const definitions = teamManagement?.current().definitions ?? skillSnapshots.dormantTeams;
     return definitions ? skillUsesIn(definitions, id) : [];
   },
@@ -290,9 +292,16 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
 })();
 // Without dispatch nothing can save a team, so the stored definitions are read once: a skill one of their profiles selects stays
 // in use, and cannot be deleted, until dispatch is enabled again and the profile unchecks it (agent-console::US-009).
+// Nothing else of a service without dispatch needs the registry, so one that cannot be opened does not stop the start: the
+// library then cannot tell which skills are in use, and deletes none (skill-library, failure modes).
 if (!teamManagement) {
-  const stored = storedDefinitions(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
-  if (stored) skillSnapshots.dormantTeams = stored;
+  try {
+    const stored = storedDefinitions(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
+    if (stored) skillSnapshots.dormantTeams = stored;
+  } catch (error) {
+    skillSnapshots.dormantUnreadable = true;
+    process.stderr.write(`skill_library_stored_teams_unreadable: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
 }
 const directChannel = fixtureMode || !weixinConfiguration
   ? undefined

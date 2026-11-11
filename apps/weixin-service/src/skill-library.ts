@@ -31,9 +31,10 @@ export type SkillView = Readonly<{ id: string; name: string; description: string
  * Why the library refuses: `folder`, the path is missing, not a folder, not absolute or unreadable; `skill_md`, no SKILL.md
  * at its root; `front_matter`, SKILL.md lacks a name or a description; `bom`, SKILL.md starts with a byte order mark;
  * `name_length`, its name is too long; `links`, entries that are not files or folders; `duplicate`, another skill has the
- * name; `changed`, the folder is not what was confirmed; `in_use`, profiles select the skill; `unknown`, no such skill.
+ * name; `changed`, the folder is not what was confirmed; `in_use`, profiles select the skill; `uses_unknown`, it cannot be told
+ * whether any does; `unknown`, no such skill.
  */
-export type SkillRefusalKind = Readonly<{ kind: "folder" | "skill_md" | "front_matter" | "bom" | "name_length" | "changed" | "unknown" } | { kind: "links"; links: readonly string[] }
+export type SkillRefusalKind = Readonly<{ kind: "folder" | "skill_md" | "front_matter" | "bom" | "name_length" | "changed" | "uses_unknown" | "unknown" } | { kind: "links"; links: readonly string[] }
   | { kind: "duplicate"; name: string } | { kind: "in_use"; uses: number }>;
 export class SkillRefusal extends Error {
   /** `cause` is the file-system error behind a `folder` refusal, which tells a missing source from an unreadable one. */
@@ -44,8 +45,11 @@ export type SkillLibraryOptions = Readonly<{
   /** The library's own directory under the service's state directory; no file grant reaches it (ADR-0029). */
   directory: string;
   audit: ConsoleAudit;
-  /** The profiles of the current definitions that select a skill. */
-  usedBy?(id: string): readonly SkillUse[];
+  /**
+   * The profiles of the current definitions that select a skill; undefined while that cannot be told. The skill is then shown
+   * with no uses, and it is not deleted.
+   */
+  usedBy?(id: string): readonly SkillUse[] | undefined;
   /** Called when a re-import made `version` a skill's current one, so that profiles selecting it follow. */
   reimported?(ref: SkillRef): void;
   /**
@@ -66,6 +70,12 @@ const LEFTOVER = /^\.(?:staging|removed)-[0-9a-f-]{36}$/u;
 const SKILL_MD = "SKILL.md";
 /** The longest name, in characters, under which the App Server lists a skill. */
 const NAME_LIMIT = 64;
+/**
+ * How a file of a source folder is opened once it was seen to be a regular file: never through a link put in its place since,
+ * and without waiting when a named pipe was put there, whose open would otherwise wait for a writer and hold one of the
+ * process's few file-system threads. What was opened is checked to be a regular file before anything is read.
+ */
+const SOURCE_OPEN = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
 const MANIFEST = "manifest.json";
 const DELETED = "deleted";
 const SCRIPT_EXTENSIONS = new Set([".sh", ".bash", ".zsh", ".fish", ".command", ".py", ".rb", ".pl", ".php", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".bat", ".cmd"]);
@@ -225,13 +235,14 @@ export class SkillLibrary {
 
   /**
    * Deletes a skill no profile selects (skill-library::US-003); its source folder is not touched. Versions that a request
-   * can still run with stay stored until `prune` finds them free.
+   * can still run with stay stored until `prune` finds them free. Refused also while it cannot be told who selects it.
    */
   remove(id: string, actor: SkillActor): void {
     const skill = this.current(id);
     if (!skill) throw new SkillRefusal({ kind: "unknown" });
-    const uses = this.options.usedBy?.(id).length ?? 0;
-    if (uses) throw new SkillRefusal({ kind: "in_use", uses });
+    const uses = this.options.usedBy ? this.options.usedBy(id) : [];
+    if (!uses) throw new SkillRefusal({ kind: "uses_unknown" });
+    if (uses.length) throw new SkillRefusal({ kind: "in_use", uses: uses.length });
     this.audit(actor, { event: "skill_deleted", skill: id, name: skill.name, version: skill.version, source: skill.source });
     fs.writeFileSync(path.join(this.directory, id, DELETED), "", { mode: 0o600 });
     this.deleted.add(id);
@@ -391,7 +402,7 @@ const byPath = (left: Readonly<{ path: string }>, right: Readonly<{ path: string
 
 /** Hashes one file, read without following a link put in its place since the walk listed it; copies it when asked. */
 async function hashFile(source: string, relative: string, target: string | undefined): Promise<SkillFile> {
-  const handle = await fs.promises.open(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const handle = await fs.promises.open(source, SOURCE_OPEN);
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new SkillRefusal({ kind: "changed" });
@@ -463,17 +474,22 @@ function described(text: string): Readonly<{ name: string; description: string }
 /**
  * What the SKILL.md at a folder's root declares, read before anything below the folder: a folder that is not a skill, or whose
  * SKILL.md cannot be used, is refused without reading the rest, however large it is. The hash is of the bytes read. A SKILL.md
- * that is a link or not a file gives undefined and is left to the walk, which reports it.
+ * that is not a regular file (a link, a folder, a named pipe, a socket) gives undefined without being opened, and is left to the
+ * walk, which reports it.
  */
 async function rootSkill(root: string): Promise<Readonly<{ name: string; description: string; sha256: string }> | undefined> {
+  const file = path.join(root, SKILL_MD);
+  const gone = (cause: unknown) => (cause as NodeJS.ErrnoException).code === "ENOENT" ? new SkillRefusal({ kind: "skill_md" }) : new SkillRefusal({ kind: "folder" }, cause);
+  let entry: fs.Stats;
+  try { entry = await fs.promises.lstat(file); } catch (cause) { throw gone(cause); }
+  if (!entry.isFile()) return undefined;
   let handle: fs.promises.FileHandle;
-  try { handle = await fs.promises.open(path.join(root, SKILL_MD), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); }
+  try { handle = await fs.promises.open(file, SOURCE_OPEN); }
   catch (cause) {
+    // Replaced by a symbolic link since the look at it: not followed, and the walk reports it.
     const code = (cause as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") throw new SkillRefusal({ kind: "skill_md" });
-    // A symbolic link is not followed: opening it fails this way.
     if (code === "ELOOP" || code === "EMLINK") return undefined;
-    throw new SkillRefusal({ kind: "folder" }, cause);
+    throw gone(cause);
   }
   try {
     if (!(await handle.stat()).isFile()) return undefined;

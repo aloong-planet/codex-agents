@@ -135,6 +135,7 @@ function skillRefusal(refusal: SkillRefusalKind, reimport: boolean): [number, st
       : `已有同名 skill「${refusal.name}」。要更新它，请在它的详情里重新导入；或换一个文件夹。`];
     case "changed": return [409, reimport ? "文件夹在核对之后有变化，没有重新导入。请重新检查后再确认。" : "文件夹在读取之后有变化，没有导入。请重新读取后再确认。"];
     case "in_use": return [409, `被 ${refusal.uses} 个能力档使用。先在团队管理解绑，才能删除。`];
+    case "uses_unknown": return [409, "读不了已保存的团队配置，无法确认是否还有能力档在使用它，暂时不能删除。"];
     case "unknown": return [404, "这个 skill 已不存在，请刷新页面。"];
   }
 }

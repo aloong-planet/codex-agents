@@ -2,12 +2,15 @@
 // "Library"). The sample folder has the shape of the owner's real skill folders: scripts at the root with and without the
 // executable bit, a quoted description, front matter keys the library does not read, nested data, a vendored bundle.
 // Gaps, each needing a file to change at a moment no case can choose: a SKILL.md rewritten between the first look at it and the
-// walk of the same read (refused as changed), and a SKILL.md that opens but then fails to be read. In real main, the answer
-// "no uses" of a service that has neither team management nor a stored registry is covered only by its two halves, here and
-// in team-registry.test.ts.
+// walk of the same read (refused as changed); a SKILL.md that opens but then fails to be read; and a file removed, or replaced
+// by a link or a named pipe, between being listed and being opened (opened without following and without waiting).
+// Another gap: a SKILL.md that the App Server refuses to list for a reason nobody measured is imported all the same (skill-library,
+// failure modes). The two measured refusals are refused below; that the installed App Server still refuses exactly those is the
+// opt-in case in isolated-model-runtime.test.ts, to be run again after a Codex upgrade.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +19,10 @@ import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { frontMatter, skillKey, SkillLibrary, type SkillLibraryOptions, SkillRefusal, type SkillUse } from "../src/skill-library.js";
 
 const directories: string[] = [];
+/** What a case must undo while its folders still exist. */
+const finishing: Array<() => void> = [];
 afterEach(() => {
+  for (const step of finishing.splice(0)) step();
   for (const directory of directories.splice(0)) {
     // A case may have closed a folder to reading.
     try { fs.chmodSync(directory, 0o700); } catch { /* Already gone. */ }
@@ -197,8 +203,9 @@ describe("importing a folder", () => {
 
   it("lists a SKILL.md that is itself a link among the refused links, and reads nothing through it", async () => {
     const { library, settings } = open();
-    const elsewhere = path.join(temporary("skill-elsewhere-"), "SKILL.md");
-    fs.writeFileSync(elsewhere, skillMd("patch-writer", "from elsewhere"));
+    // Not a usable SKILL.md: read through the link, it would have the folder refused for its front matter instead.
+    const elsewhere = path.join(temporary("skill-elsewhere-"), "notes.md");
+    fs.writeFileSync(elsewhere, "# Notes kept outside the folder\n");
     const folder = write(path.join(temporary("skill-source-"), "linked-root"), { "references/testing.md": "# Testing\n" });
     fs.symlinkSync(elsewhere, path.join(folder, "SKILL.md"));
     const why = { kind: "links", links: [`SKILL.md → ${elsewhere}`] };
@@ -213,6 +220,30 @@ describe("importing a folder", () => {
     // A named pipe: opening it for reading would wait for a writer that never comes.
     execFileSync("mkfifo", [path.join(folder, "references", "queue")]);
     const why = { kind: "links", links: ["references/queue（不是普通文件）"] };
+    expect(await refusal(library.read(folder))).toEqual(why);
+    expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual(why);
+    expect(tree(settings.directory)).toEqual({});
+  });
+
+  // The root SKILL.md is looked at before the walk. A pipe there must not be opened: the open would wait for a writer and
+  // hold one of the process's few file-system threads. A socket there cannot be opened at all.
+  it.each([
+    ["a named pipe", async (file: string) => {
+      execFileSync("mkfifo", [file]);
+      // Should a read wait on the pipe after all, a writer lets it go, so that the failed case does not keep its thread.
+      finishing.push(() => { try { fs.closeSync(fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK)); } catch { /* Nothing waits on it. */ } });
+    }],
+    ["a socket", async (file: string) => {
+      const server = net.createServer();
+      finishing.push(() => { server.close(); });
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(file, resolve); });
+    }],
+  ])("refuses a folder whose SKILL.md is %s, and lists it, without opening it", async (_what, put) => {
+    const { library, settings } = open();
+    // A short path: a socket's is limited to about a hundred bytes.
+    const folder = write(path.join(temporary("sk-"), "s"), { "references/testing.md": "# Testing\n" });
+    await put(path.join(folder, "SKILL.md"));
+    const why = { kind: "links", links: ["SKILL.md（不是普通文件）"] };
     expect(await refusal(library.read(folder))).toEqual(why);
     expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual(why);
     expect(tree(settings.directory)).toEqual({});
@@ -351,6 +382,19 @@ describe("deleting a skill", () => {
     expect(tree(folder)).toEqual(expected(SAMPLE_FILES, ""));
     // Its name is free again.
     expect((await imported(library, folder)).name).toBe("patch-writer");
+  });
+
+  it("deletes nothing while it cannot be told which profiles select a skill, and shows it with no uses", async () => {
+    const told: { uses?: SkillUse[] } = {};
+    const { library } = open({ usedBy: () => told.uses, needed: () => new Set() });
+    const skill = await imported(library, sample());
+    expect(refused(() => library.remove(skill.id, BROWSER))).toEqual({ kind: "uses_unknown" });
+    expect(library.list()).toEqual([skill]);
+    expect((await library.view()).map(({ id, usedBy }) => [id, usedBy])).toEqual([[skill.id, []]]);
+    // Told again, and unused: it goes.
+    told.uses = [];
+    library.remove(skill.id, BROWSER);
+    expect(library.list()).toEqual([]);
   });
 
   it("keeps the versions that a request can still run with, of a re-imported and of a deleted skill, and removes them once nothing needs them", async () => {

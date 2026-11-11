@@ -17,7 +17,7 @@ import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { createConsoleRoutes } from "../src/console-routes.js";
 import { McpCatalog } from "../src/mcp-catalog.js";
 import { TeamAnnouncements } from "../src/team-announcements.js";
-import { TeamManagement, type TeamManagementOptions, type TeamsView } from "../src/team-management.js";
+import { skillUsesIn, TeamManagement, type TeamManagementOptions, type TeamsView } from "../src/team-management.js";
 import { FixtureOnboardingPlatform } from "../src/team-onboarding.js";
 import { TeamRegistry } from "../src/team-registry.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
@@ -169,7 +169,8 @@ describe("team management API", () => {
     expect(teamOf(saved, "bill")!.profiles[0]!.skills).toEqual(["skill-aaaaaaaa"]);
     expect(teams.current().definitions.teams.find(({ id }) => id === "bill")!.executorProfiles[0]!.skills).toEqual([{ id: "skill-aaaaaaaa", version: 3 }]);
     // What the skill's details list as its use, and what a deletion is refused for.
-    expect([teams.skillUses("skill-aaaaaaaa"), teams.skillUses("skill-bbbbbbbb")]).toEqual([[{ teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" }], []]);
+    const { definitions } = teams.current();
+    expect([skillUsesIn(definitions, "skill-aaaaaaaa"), skillUsesIn(definitions, "skill-bbbbbbbb")]).toEqual([[{ teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" }], []]);
     expect(auditEntries().filter(({ event }) => event === "team_profile_saved").map(({ team, profile, by }) => [team, profile, by])).toEqual([["bill", "executor-1", "browser"]]);
 
     library.pop();

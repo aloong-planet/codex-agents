@@ -211,9 +211,6 @@ export class TeamManagement {
     this.settle();
   }
 
-  /** The profiles of the current definitions that select a skill, as the skill's details list them (skill-library::US-003/AC-01). */
-  skillUses(skillId: string): SkillUse[] { return skillUsesIn(this.current().definitions, skillId); }
-
   /**
    * Moves the profiles that select the given skills to the versions given for them, so requests admitted from now on load
    * those and requests admitted earlier keep theirs (agent-dispatch::REQ-017/AC-01). Called after a re-import, and at
