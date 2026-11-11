@@ -20,7 +20,7 @@ import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import type { DynamicToolDefinition, DynamicToolHost } from "../src/dynamic-tool-host.js";
 import { McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
 import { McpProxyToolHost } from "../src/mcp-proxy-tools.js";
-import { SECRET_SENTINEL, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { receivedCalls, SECRET_SENTINEL, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 
 const actor = { browser: { id: "b1", label: "Chrome · macOS", authorizedAt: "2026-11-11T00:00:00.000Z", lastUsedAt: "2026-11-11T00:00:00.000Z" } };
@@ -41,11 +41,11 @@ function setup() {
   const audit = new ConsoleAudit({ directory: state });
   const catalog = new McpCatalog({ stateDirectory: state, homeDirectory: home, audit, retryMs: 0, refreshMs: 0 });
   cleanup.push(() => catalog.close());
-  /** Registers a test server, with the line its confirmation card shows, and waits until it is connected. */
+  /** Registers a test server that records the calls it receives, with the line its confirmation card shows, and waits until it is connected. */
   async function server(name: string, tools: unknown[] = [], extra: Partial<McpServerInput> = {}): Promise<TestServerFiles> {
     const files = testServerFiles(work, name);
     writeTools(files.tools, tools);
-    const input: McpServerInput = { name, command: process.execPath, args: testServerArgs(files), env: { SECRET_TOKEN: SECRET_SENTINEL }, ...extra };
+    const input: McpServerInput = { name, command: process.execPath, args: testServerArgs(files, { calls: true }), env: { SECRET_TOKEN: SECRET_SENTINEL }, ...extra };
     catalog.register(input, { confirmed: catalog.preview(input).launchLine, actor });
     await vi.waitFor(() => expect(catalog.viewServer(name).state).toBe("connected"), WAIT);
     return files;
@@ -114,6 +114,15 @@ describe("the tools an Executor is offered", () => {
     expect(await call(tools, "mcp-twins", "a_b_2e7336dc")).toEqual({ success: true, body: { text: "called a_b_2e7336dc" } });
   });
 
+  // agent-dispatch::CON-003: what an Executor is told it may do follows this grant, not what a server lists at the moment.
+  it("grants a server by the attachment alone: attached when the request was admitted and still attached", () => {
+    const { proxy } = setup();
+    expect([proxy(["amap"]).grantsMcp(), proxy(["amap", "docs"], () => ["docs"]).grantsMcp()]).toEqual([true, true]);
+    // Unbound since; attached only after the request was admitted; the profile is gone; nothing attached.
+    expect([proxy(["amap"], () => []).grantsMcp(), proxy([], () => ["amap"]).grantsMcp(), proxy(["amap"], () => undefined).grantsMcp(), proxy([]).grantsMcp()])
+      .toEqual([false, false, false, false]);
+  });
+
   it("keeps the host tools' contract when the profile attached no server, and its own whatever the attached servers list", async () => {
     const { catalog, server, proxy } = setup();
     await server("amap", [LOOKUP]);
@@ -130,7 +139,7 @@ describe("a call to a proxy tool", () => {
   // mcp-catalog::REQ-003/AC-05: nothing confirms a single call. The server's own effect shows that the call arrived.
   it("reaches the attached server at once and returns its answer, by the tool's own name when it was offered under another", async () => {
     const { work, server, proxy, refusals, reached } = setup();
-    await server("amap", [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
+    const files = await server("amap", [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
       { name: "screenshot", description: "Shoots.", inputSchema: { type: "object" }, _meta: { "test/image": true } }]);
     const tools = proxy(["amap"]);
     const written = path.join(work, "written.txt");
@@ -143,24 +152,36 @@ describe("a call to a proxy tool", () => {
     expect(await call(tools, "mcp-amap", "read_file", { path: path.join(work, "absent.txt") })).toMatchObject({ success: false, body: { ok: false, error: { code: "mcp_tool_error" } } });
     await call(tools, "files", "read");
     expect([reached, refusals()]).toEqual([["files.read"], []]);
+    // The server's own record of what it received, which the refusal rows below read as empty.
+    expect(receivedCalls(files)).toEqual(["write_file", "admin.tools.list", "screenshot", "read_file"]);
   });
 
   // agent-dispatch::REQ-016/AC-03, REQ-017/AC-01 and AC-02, mcp-catalog::REQ-003/AC-03, agent-console::REQ-004. Each row is one
-  // way a call falls outside the request's snapshot or the current configuration.
+  // way a call falls outside the request's snapshot or the current configuration. `admin_tools_list_ce33de31` is the name the
+  // runtime is offered `admin.tools.list` under; the audit names the tool itself.
   type Arranged = { snapshot: string[]; current: string[] | undefined; namespace?: string; tool?: string };
+  const DERIVED = "admin_tools_list_ce33de31";
+  const disableServer = ({ catalog }: ReturnType<typeof setup>, files: TestServerFiles) =>
+    catalog.update("amap", { name: "amap", command: process.execPath, args: testServerArgs(files, { calls: true }), env: { SECRET_TOKEN: "••••••" }, enabled: false }, { actor });
   const refused: Array<[string, (context: ReturnType<typeof setup>, files: TestServerFiles) => Promise<Arranged> | Arranged, string, string]> = [
     ["a server the profile attached only after the request was admitted", () => ({ snapshot: [], current: ["amap"] }), "mcp__amap__write_file", "not_attached"],
+    ["such a server, by the derived name of one of its tools", () => ({ snapshot: [], current: ["amap"], tool: DERIVED }), "mcp__amap__admin.tools.list", "not_attached"],
     ["a server the profile has unbound since", () => ({ snapshot: ["amap"], current: [] }), "mcp__amap__write_file", "unbound"],
+    ["a server the profile has unbound since, by the derived name the tool was offered under", () => ({ snapshot: ["amap"], current: [], tool: DERIVED }), "mcp__amap__admin.tools.list", "unbound"],
+    // `a_b_2e7336dc` is a tool's own name and also the name `a.b` would be offered under: it stands for the tool of that name.
+    ["a server the profile has unbound since, by a name that is one tool's own and another's derived", () => ({ snapshot: ["amap"], current: [], tool: "a_b_2e7336dc" }), "mcp__amap__a_b_2e7336dc", "unbound"],
     ["any server once the profile is gone", () => ({ snapshot: ["amap"], current: undefined }), "mcp__amap__write_file", "unbound"],
-    ["a server the owner has disabled since", ({ catalog }, files) => {
-      catalog.update("amap", { name: "amap", command: process.execPath, args: testServerArgs(files), env: { SECRET_TOKEN: "••••••" }, enabled: false }, { actor });
-      return { snapshot: ["amap"], current: ["amap"] };
-    }, "mcp__amap__write_file", "server_disabled"],
+    ["a server the owner has disabled since", (context, files) => { disableServer(context, files); return { snapshot: ["amap"], current: ["amap"] }; }, "mcp__amap__write_file", "server_disabled"],
+    // A disabled server lists nothing; the catalog still knows the tool by the definition it pinned.
+    ["a server the owner has disabled since, by the derived name the tool was offered under", (context, files) => {
+      disableServer(context, files);
+      return { snapshot: ["amap"], current: ["amap"], tool: DERIVED };
+    }, "mcp__amap__admin.tools.list", "server_disabled"],
     ["a tool the owner has disabled since", ({ catalog }) => { catalog.setToolEnabled("amap", "write_file", false, actor); return { snapshot: ["amap"], current: ["amap"] }; },
       "mcp__amap__write_file", "tool_disabled"],
     ["a tool the owner has disabled since, called by the derived name it was offered under", ({ catalog }) => {
       catalog.setToolEnabled("amap", "admin.tools.list", false, actor);
-      return { snapshot: ["amap"], current: ["amap"], tool: "admin_tools_list_ce33de31" };
+      return { snapshot: ["amap"], current: ["amap"], tool: DERIVED };
     }, "mcp__amap__admin.tools.list", "tool_disabled"],
     ["a tool whose definition changed and waits for review", async ({ catalog }, files) => {
       writeTools(files.tools, [{ ...LOOKUP, description: "Finds an item by name." }, NEEDS_PERSON]);
@@ -173,13 +194,14 @@ describe("a call to a proxy tool", () => {
   ];
   it.each(refused)("refuses and audits a call to %s, and the server gets nothing", async (_case, arrange, tool, reason) => {
     const context = setup();
-    const files = await context.server("amap", [LOOKUP, NEEDS_PERSON, { name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } }]);
+    const files = await context.server("amap", [LOOKUP, NEEDS_PERSON, { name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
+      { name: "a.b", description: "Dotted.", inputSchema: { type: "object" } }, { name: "a_b_2e7336dc", description: "Plain.", inputSchema: { type: "object" } }]);
     const arranged = await arrange(context, files);
     const written = path.join(context.work, "written.txt");
     const result = await call(context.proxy(arranged.snapshot, () => arranged.current), arranged.namespace ?? "mcp-amap", arranged.tool ?? "write_file", { path: written, text: "x", q: "x" });
     expect(result).toEqual({ success: false, body: REFUSAL });
     expect(context.refusals()).toEqual([{ by: "service", event: "mcp_call_refused", ...AGENT, tool, reason }]);
-    expect(fs.existsSync(written)).toBe(false);
+    expect([receivedCalls(files), fs.existsSync(written)]).toEqual([[], false]);
   });
 
   // mcp-catalog::REQ-003/AC-03: the server's timeout bounds the call. The tool answers after 10 s; the server's timeout is 1 s.
@@ -209,11 +231,11 @@ describe("a call to a proxy tool", () => {
     const derived = offered(tools.definitions()).at(-1)!.slice("mcp-amap.".length);
     expect(derived).toBe("admin_tools_list_ce33de31");
 
-    // The program fails to start: the server lists nothing, so nothing of it is offered, and a call gets a failure.
+    // The program fails to start: the server lists nothing, so nothing of it is offered while the grant stands, and a call gets a failure.
     fs.writeFileSync(files.failFlag, "");
     catalog.reconnect("amap");
     await vi.waitFor(() => expect(catalog.viewServer("amap").state).toBe("failed"), WAIT);
-    expect(offered(tools.definitions())).toEqual(["files.read"]);
+    expect([offered(tools.definitions()), tools.grantsMcp()]).toEqual([["files.read"], true]);
     expect(await call(tools, "mcp-amap", derived)).toMatchObject({ success: false, body: { ok: false, error: { code: "mcp_server_unavailable", retryable: false } } });
     // It starts again: the next call connects it and reaches the tool by its own name.
     fs.rmSync(files.failFlag);

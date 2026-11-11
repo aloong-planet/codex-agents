@@ -1,7 +1,7 @@
 // A real stdio MCP server for the MCP Catalog tests, built on the official server SDK so that the wire format
 // does not come from our own implementation.
 //
-// Usage: node mcp-test-server.mjs --tools <file> [--marker <file>] [--fail-flag <file>] [--no-list-changed]
+// Usage: node mcp-test-server.mjs --tools <file> [--marker <file>] [--fail-flag <file>] [--calls <file>] [--no-list-changed]
 //
 // - --tools: a JSON array of extra tool definitions (MCP Tool objects), re-read when the file changes. Unless
 //   --no-list-changed is given, the server declares tools.listChanged and notifies the client on every change.
@@ -9,6 +9,7 @@
 //   the SECRET_TOKEN it received, or null.
 // - --fail-flag: while this file exists, the server prints its SECRET_TOKEN to stderr, ending with a line that holds
 //   the token and a piece of HTML, and exits with code 1.
+// - --calls: the server appends the name of every tool call it receives to this file, one per line, before it answers.
 //
 // Fixed tools: `env` (the process environment and working directory), `whoami` (pid and argv), `read_file` and
 // `write_file` (for the sandbox case).
@@ -32,6 +33,7 @@ function option(name) {
 const toolsFile = option("--tools");
 const marker = option("--marker");
 const failFlag = option("--fail-flag");
+const callsFile = option("--calls");
 const listChanged = !process.argv.includes("--no-list-changed");
 
 if (marker) fs.appendFileSync(marker, `${JSON.stringify({ pid: process.pid, argv: process.argv.slice(2), cwd: process.cwd(), secretToken: process.env.SECRET_TOKEN ?? null })}\n`);
@@ -67,6 +69,7 @@ const server = new Server(
 server.setRequestHandler("tools/list", async () => ({ tools: [...FIXED, ...extraTools()] }));
 server.setRequestHandler("tools/call", async (request) => {
   const { name, arguments: args = {} } = request.params;
+  if (callsFile) fs.appendFileSync(callsFile, `${name}\n`);
   try {
     switch (name) {
       case "env":

@@ -258,15 +258,62 @@ export function needsConfirmation(previous: ServerTarget | undefined, next: Serv
   return previous === undefined || (previous.transport ?? "stdio") !== (next.transport ?? "stdio") || launchLine(previous) !== launchLine(next);
 }
 
-/** Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors and logs. */
+/** How many times over JSON text may be carried as a string inside JSON text for a secret in it still to be masked. */
+const JSON_NESTING_LIMIT = 4;
+const JSON_SHORT_ESCAPES = new Map([['"', '"'], ["\\", "\\"], ["/", "/"], ["b", "\b"], ["f", "\f"], ["n", "\n"], ["r", "\r"], ["t", "\t"]]);
+
+/** A text, and where each of its characters begins and ends in the text it was read from. */
+type Spelled = Readonly<{ text: string; from(at: number): number; to(at: number): number }>;
+
+/** `spelled` with its JSON string escapes undone once; undefined when it holds none. Any other backslash stays. */
+function unescaped({ text, from, to }: Spelled): Spelled | undefined {
+  if (!text.includes("\\")) return undefined;
+  const units: string[] = [], starts: number[] = [], ends: number[] = [];
+  for (let at = 0; at < text.length; at += 1) {
+    let unit = text[at]!, last = at;
+    if (unit === "\\") {
+      const short = JSON_SHORT_ESCAPES.get(text[at + 1] ?? "");
+      const hex = text[at + 1] === "u" ? /^[0-9a-fA-F]{4}/.exec(text.slice(at + 2, at + 6))?.[0] : undefined;
+      if (short !== undefined) { unit = short; last = at + 1; }
+      else if (hex) { unit = String.fromCharCode(Number.parseInt(hex, 16)); last = at + 5; }
+    }
+    units.push(unit); starts.push(from(at)); ends.push(to(last));
+    at = last;
+  }
+  return units.length === text.length ? undefined : { text: units.join(""), from: (at) => starts[at]!, to: (at) => ends[at]! };
+}
+
+/**
+ * Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors, logs and what a tool call returns
+ * (mcp-catalog::REQ-001). A secret is found as it is and in every spelling JSON text gives it: any character may be written
+ * as `\uXXXX`, and a quote, a backslash, a slash or a control character by its short escape. JSON text may itself be carried
+ * as a string inside JSON text, so escapes are undone up to `JSON_NESTING_LIMIT` times over, and whatever then reads as a
+ * secret is masked where it stands in `text`.
+ */
 export function redactSecrets(text: string, secrets: Iterable<string>): string {
-  let out = text;
-  // A secret is also masked as JSON writes it, with its quotes, backslashes and control characters escaped: a program
-  // or a tool often returns its values inside JSON text.
-  const forms = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH).flatMap((secret) => [secret, JSON.stringify(secret).slice(1, -1)]);
-  const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
-  for (const form of longestFirst) out = out.split(form).join("***");
-  return out;
+  const values = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH);
+  if (!values.length) return text;
+  // Where a spelling of a secret begins and ends in `text`.
+  const found: Array<[number, number]> = [];
+  let spelled: Spelled = { text, from: (at) => at, to: (at) => at + 1 };
+  for (let depth = 0; ; depth += 1) {
+    for (const secret of values) {
+      for (let at = spelled.text.indexOf(secret); at >= 0; at = spelled.text.indexOf(secret, at + 1)) found.push([spelled.from(at), spelled.to(at + secret.length - 1)]);
+    }
+    const next = depth < JSON_NESTING_LIMIT ? unescaped(spelled) : undefined;
+    if (!next) break;
+    spelled = next;
+  }
+  // Spellings that overlap are masked as one.
+  const spans: Array<[number, number]> = [];
+  for (const [start, end] of found.sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    const last = spans.at(-1);
+    if (last && start < last[1]) last[1] = Math.max(last[1], end);
+    else spans.push([start, end]);
+  }
+  let out = "", done = 0;
+  for (const [start, end] of spans) { out += `${text.slice(done, start)}***`; done = end; }
+  return out + text.slice(done);
 }
 
 /** `redactSecrets` over every string of a JSON value, keys included, at any depth. */

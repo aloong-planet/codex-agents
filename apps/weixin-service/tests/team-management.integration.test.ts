@@ -8,6 +8,7 @@ import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, 
 import { processWaitLimitMs } from "./support/process-wait.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { allowNotes, config, decision, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
+import { attachMcpServers, editOf, type TeamView, type View } from "./support/team-console.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures, and the
 // onboarding platform is the fake fixture mode uses (team-onboarding.test.ts covers its answers). The first two cases read and save
@@ -119,23 +120,6 @@ it("onboards a team saved while the service runs: Sam announces it, its genuine 
 }, 45000);
 
 type Running = Awaited<ReturnType<typeof start>>;
-/** What a removal in one group still waits for (team-management::US-004). */
-type Removal = { active: number; awaitingRequester: number; closing: number; tasks: Array<{ id: string; name: string; when: string }>;
-  waiting: Array<{ requestId: string; label: string; summary: string; requester: string; waitingFor: string[] }> };
-type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string }; deleting: boolean;
-  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>;
-  bindings: Array<{ chatId: string; state: string; join?: { status: string; reason?: string }; removal?: Removal }>;
-  announcements: Record<string, { kind: string; state: string }> };
-type View = { version: number; teams: TeamView[]; preview: Record<string, string[]> };
-type Edit = { id: string; teamName: string; responsibility: string; leader: TeamView["leader"];
-  executorProfiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; groups: string[] };
-/** The console's edit of a team as the team view shows it, changed by `change`. */
-function editOf(view: View, id: string, change: (team: Edit) => Edit = (team) => team): Edit {
-  const team = view.teams.find((candidate) => candidate.id === id)!;
-  return change({ id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader },
-    executorProfiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools }) => ({ id: profileId, name, noun, instructions, hostTools })),
-    groups: team.bindings.filter(({ state }) => state !== "draining").map(({ chatId }) => chatId) });
-}
 async function viewUntil(running: Running, predicate: (view: View) => boolean): Promise<View> {
   let view!: View;
   await vi.waitFor(async () => { view = await running.get<View>("/api/teams"); expect(predicate(view)).toBe(true); }, { timeout: 15000, interval: 50 });
@@ -561,17 +545,13 @@ it("gives a registered MCP server's tools only to Executors of the profile that 
     type McpView = View & { mcpServers: Array<{ name: string; state: string }> };
     await vi.waitFor(async () => expect((await running!.get<McpView>("/api/teams")).mcpServers).toMatchObject([{ name: "amap", state: "connected" }]), { timeout: processWaitLimitMs, interval: 50 });
     const call = (name: string) => [{ namespace: "mcp-amap", tool: "write_file", arguments: { path: written(name), text: name } }];
-    const attach = async (mcpServers: unknown[]) => {
-      const view = await running!.get<View>("/api/teams");
-      await running!.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, executorProfiles: bill.executorProfiles.map((profile) => ({ ...profile, mcpServers })) })) });
-    };
     const retry = (messageId: string, requestId: string, name: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
       { modelToolCalls: call(name), modelReply: completedReply("规划行程") });
 
     // Admitted before the attachment: Bill's Executor is offered no MCP tool.
     await running.post("/api/fixture/inbound", groupMessage("om_mcp_before", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelReply: failedReply("规划行程") }));
     const before = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
-    await attach([{ name: "amap", confirmed: launchLine }]);
+    await attachMcpServers(running, "bill", [{ name: "amap", confirmed: launchLine }]);
     // The same request, retried after the attachment, keeps the definitions it was admitted under: its call is refused.
     await running.post("/api/fixture/inbound", retry("om_mcp_before_retry", before.agentDispatch!.jobs[0]!.id, "before"));
     await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
@@ -583,7 +563,7 @@ it("gives a registered MCP server's tools only to Executors of the profile that 
     await running.until((state) => state.agentDispatch?.jobs[2]?.status === "completed");
 
     // Unbound while that request is unfinished: its next call is refused, and a request admitted now is told nothing of the server.
-    await attach([]);
+    await attachMcpServers(running, "bill", []);
     await running.post("/api/fixture/inbound", retry("om_mcp_after_retry", after.agentDispatch!.jobs[1]!.id, "unbound"));
     await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
     await running.post("/api/fixture/inbound", groupMessage("om_mcp_unbound", "再帮我规划下周行程", decision("bill", "规划下周行程"), { modelReply: completedReply("规划行程") }));
@@ -608,63 +588,13 @@ it("gives a registered MCP server's tools only to Executors of the profile that 
       { ...billExecutor(1), reason: "unbound" }]);
     expect(["请帮我规划周末一日行程", "再帮我规划周日行程", "再帮我规划下周行程"].map(planNamesServer)).toEqual([false, true, false]);
     expect(turns.find((input) => input.includes("生活团队的负责人") && input.includes("再帮我规划周日行程"))).toContain("route_plan（Plans a route between two places.）");
-    // Only the Executor that is offered the server's tools is told that what its tools do may be done (agent-dispatch::CON-003):
-    // of the six Executor turns, the third, which is the first of the request admitted while the server was attached.
+    // Only an Executor whose profile attached the server when its request was admitted and still attaches it is told that what
+    // its tools do may be done (agent-dispatch::CON-003): of the six Executor turns, the third, which is the first of the request
+    // admitted while the server was attached. The fifth is that request's retry after the unbinding.
     expect(result.fixtureModelRequests!.map(({ input }) => JSON.stringify(input).includes("提供给你的工具能完成的操作可以执行"))).toEqual([false, false, true, false, false, false]);
     await running.close(); running = undefined;
     // Stopping the service stops the server it started.
     expect(runningPrograms(directory)).toEqual([]);
-  } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
-}, 90000);
-
-// agent-dispatch::REQ-011/AC-01 with REQ-017/AC-01 and AC-02: a Team Leader is told of a server only when its preset attached it
-// in the request's definitions version and still attaches it. A request whose plan stays invalid fails before it is divided and
-// is planned again on retry, under the version it was admitted with, so its retried plan turn meets other current definitions.
-it("tells a Team Leader of a preset's MCP server neither when it was attached after the request was admitted nor once it is unbound", async () => {
-  const directory = mkdtempSync(join(tmpdir(), "team-mcp-leader-told-"));
-  let running: Running | undefined;
-  try {
-    dispatchConfig(directory);
-    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
-    const files = testServerFiles(directory, "amap");
-    const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
-    const { launchLine } = await running.post<{ launchLine: string }>("/api/mcp/preview", { server });
-    await running.post("/api/mcp/servers", { server, confirmed: launchLine });
-    await vi.waitFor(async () => expect((await running!.get<{ mcpServers: Array<{ state: string }> }>("/api/teams")).mcpServers).toMatchObject([{ state: "connected" }]), { timeout: processWaitLimitMs, interval: 50 });
-    const attach = async (mcpServers: unknown[]) => {
-      const view = await running!.get<View>("/api/teams");
-      await running!.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, executorProfiles: bill.executorProfiles.map((profile) => ({ ...profile, mcpServers })) })) });
-    };
-    const undivided = { leaderPlan: [{ kind: "x" }, { kind: "x" }] };
-    const retry = (messageId: string, requestId: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" }, { modelReply: completedReply("规划行程") });
-
-    await running.post("/api/fixture/inbound", groupMessage("om_told_before", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), undivided));
-    const before = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
-    await attach([{ name: "amap", confirmed: launchLine }]);
-    await running.post("/api/fixture/inbound", groupMessage("om_told_attached", "再帮我规划周日行程", decision("bill", "规划周日行程"), undivided));
-    const attached = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed");
-    // Planned again while the server is attached, but admitted before it was.
-    await running.post("/api/fixture/inbound", retry("om_told_before_retry", before.agentDispatch!.jobs[0]!.id));
-    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
-    await attach([]);
-    // Planned again once the server is unbound, but admitted while it was attached.
-    await running.post("/api/fixture/inbound", retry("om_told_attached_retry", attached.agentDispatch!.jobs[1]!.id));
-    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
-
-    const jobs = result.agentDispatch!.jobs;
-    const turns = result.fixtureCoordinationRequests!.map(({ input }) => JSON.stringify(input));
-    // Bill's plan turns of a request, in order: whether each names what the server gives the preset's Executors.
-    const told = (brief: string) => turns.filter((input) => input.includes("生活团队的负责人") && input.includes(brief) && input.includes("capabilities")).map((input) => input.includes("通过 MCP 服务器「amap」："));
-    console.log(JSON.stringify({ kind: "team_mcp_leader_told", commands: ["请帮我规划周末一日行程", "attach amap", "再帮我规划周日行程", "重试", "unbind amap", "重试"],
-      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, told: { before: told("请帮我规划周末一日行程"), attached: told("再帮我规划周日行程") } }));
-    expect(jobs.map(({ definitionsVersion, status, assignments }) => [definitionsVersion, status, assignments.length])).toEqual([[1, "completed", 1], [2, "completed", 1]]);
-    const first = told("请帮我规划周末一日行程"), second = told("再帮我规划周日行程");
-    // The request admitted before the attachment: never told, also in its plan turn after the attachment.
-    expect(first.length).toBeGreaterThanOrEqual(2);
-    expect(first).not.toContain(true);
-    // The request admitted while the server was attached: told then, and not in its plan turn after the unbinding.
-    expect([second[0], second.at(-1)]).toEqual([true, false]);
-    expect(second.length).toBeGreaterThanOrEqual(2);
   } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
 }, 90000);
 

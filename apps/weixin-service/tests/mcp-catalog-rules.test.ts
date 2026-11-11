@@ -409,6 +409,33 @@ describe("masking a secret as JSON text writes it", () => {
     expect(redactSecrets(`plain ${password} and ${key}; json ${JSON.stringify({ password, key })}`, [password, key]))
       .toBe('plain *** and ***; json {"password":"***","key":"***"}');
   });
+
+  // The first three texts are what `go run` (encoding/json), `python3` (json.dumps) and `php` (json_encode) printed for these
+  // values on 2026-11-11, and the nested one is what Node printed for `JSON.stringify({ output: JSON.stringify({ v }) })`.
+  it.each([
+    ["a secret written with Go's \\u0026 for &", ["postgres://app:S3cr3t@db/x?sslmode=require&connect_timeout=10"],
+      String.raw`{"DATABASE_URL":"postgres://app:S3cr3t@db/x?sslmode=require\u0026connect_timeout=10"}`, '{"DATABASE_URL":"***"}'],
+    ["secrets written with Python's \\uXXXX for a character outside ASCII, one of them as a surrogate pair", ["pässwort-2026", "key-😀-2026"],
+      String.raw`{"PASSWORD": "p\u00e4sswort-2026", "KEY": "key-\ud83d\ude00-2026"}`, '{"PASSWORD": "***", "KEY": "***"}'],
+    ["a secret written with PHP's \\/ for /", ["tok/abc/def-123456"], String.raw`{"TOKEN":"tok\/abc\/def-123456"}`, '{"TOKEN":"***"}'],
+    ["a secret whose line breaks are written as \\u000A", ["BEGIN\nMIIEvQ\nEND"], String.raw`{"KEY":"BEGIN\u000AMIIEvQ\u000aEND"}`, '{"KEY":"***"}'],
+    ["a secret in JSON text carried as a string inside JSON text", ['pa"ss\\word-1'], String.raw`{"output":"{\"v\":\"pa\\\"ss\\\\word-1\"}"}`, String.raw`{"output":"{\"v\":\"***\"}"}`],
+    // Backslashes that belong to the text: nothing but the secret changes, whether they read as JSON escapes (`\t`, `\\`) or
+    // not (`\q`, and `\u` before letters that are no hexadecimal number).
+    ["a secret beside a path whose backslashes read as JSON escapes", ["abcdef"], String.raw`dir C:\temp "C:\\x" key abcdef`, String.raw`dir C:\temp "C:\\x" key ***`],
+    ["a secret beside backslashes that are no JSON escapes", ["abcdef"], String.raw`C:\q\users key abcdef`, String.raw`C:\q\users key ***`],
+    // The secret is a backslash and five letters: the JSON text holds it both as written (from the second backslash) and escaped.
+    ["a secret found under two spellings at once", ["\\abcde"], String.raw`{"k":"\\abcde"}`, '{"k":"***"}'],
+  ])("masks %s", (_case, secrets, text, expected) => {
+    expect(redactSecrets(text, secrets)).toBe(expected);
+  });
+
+  // REQ-001's limit: a secret is masked under up to four layers of JSON text, counting the one that holds it.
+  it("masks a secret in JSON text nested four deep and leaves one nested five deep", () => {
+    const secret = 'pa"ss\\word-1';
+    const nested = (value: string, depth: number): string => depth === 0 ? value : nested(JSON.stringify({ v: value }), depth - 1);
+    expect([redactSecrets(nested(secret, 4), [secret]), redactSecrets(nested(secret, 5), [secret])]).toEqual([nested("***", 4), nested(secret, 5)]);
+  });
 });
 
 describe("masking every string of a call's structured result", () => {

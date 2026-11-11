@@ -252,13 +252,17 @@ it.each([
   } finally { await executor.close(); }
 });
 
-// agent-dispatch::CON-003: what an Executor is told it may do. An Executor that is offered an attached MCP server's tools is told
-// that what those tools do may be done; every other Executor keeps the sentence that rules out operating a website.
-it.each([
-  ["no MCP tool", [], "只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。"],
-  ["an attached MCP server's tools", [{ type: "namespace" as const, name: "mcp-xianyu", description: "MCP", tools: [{ type: "function" as const, name: "open_page", description: "Opens.", inputSchema: {} }] }],
+// agent-dispatch::CON-003: what an Executor is told it may do. An Executor whose tool host grants it an MCP server is told that
+// what its tools do may be done; every other Executor keeps the sentence that rules out operating a website. The host lists no
+// tool in any row: a granted server may list nothing at the moment of a turn, while the Executor's thread keeps the tools it
+// started with.
+const PLAIN_AUTHORITY = "只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。";
+it.each<[string, (() => boolean) | undefined, string]>([
+  ["whose tool host knows no MCP server", undefined, PLAIN_AUTHORITY],
+  ["that is granted no MCP server", () => false, PLAIN_AUTHORITY],
+  ["that is granted an MCP server, also while the server lists no tool", () => true,
     "只能使用本轮已授权能力：提供给你的工具能完成的操作可以执行，除此之外不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。"],
-])("tells an Executor that is offered %s what it may do", async (_case, definitions, sentence) => {
+])("tells an Executor %s what it may do", async (_case, grantsMcp, sentence) => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-authority-")); directories.push(directory);
   const agent = conversation("thread-1");
   const prompts: string[] = [];
@@ -272,8 +276,8 @@ it.each([
     runtimes: new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: ({ agent: owned }) => owned.close() }),
     createRuntime: (_job, scope) => ({ agent, cwd: `/isolated/${scope}` }),
     tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
-    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools: { definitions: () => definitions, contractHash: () => "contract-1",
-      execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools: { definitions: () => [], contractHash: () => "contract-1",
+      execute: async () => { throw new Error("tool calls are not part of this case"); }, ...(grantsMcp ? { grantsMcp } : {}) } }),
     contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
     memory: () => "", capture: async () => {}, existingResult: () => undefined,
   });

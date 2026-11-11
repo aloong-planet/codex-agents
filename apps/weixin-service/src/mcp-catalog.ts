@@ -553,6 +553,16 @@ export class McpCatalog {
   }
 
   /**
+   * The own name of the tool `called` stands for, for a record such as the audit: `called` when the server has a pinned tool
+   * of that name, else the first pinned tool that is offered under it, else `called` as it is. Every tool that was ever
+   * offered is pinned, and a pin stays while the server is registered. Nothing is asked of the server.
+   */
+  toolName(name: string, called: string): string {
+    const pinned = Object.keys(this.find(name)?.pins ?? {});
+    return pinned.includes(called) ? called : pinned.find((tool) => offeredToolName(tool) === called) ?? called;
+  }
+
+  /**
    * Calls a tool through the host, re-checking the current configuration on every call: a disabled server or tool,
    * an unreviewed definition or a tool that needs a person is refused (mcp-catalog::US-004/AC-01, AC-03, AC-04). The
    * call is bounded by the server's timeout. Every string it returns, and the message of a failure, has the server's

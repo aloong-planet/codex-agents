@@ -3,7 +3,7 @@
 > Status: the team registry and the team management page are implemented locally. Teams are edited, bound to groups, onboarded by QR creation or with an existing application, announced, removed from groups and deleted from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: parts of the page are not built.
-> - Not built yet: skills (US-003/AC-05); and the link to skill management (US-001/AC-04).
+> - Not built yet: skills, with the link to skill management for importing one (US-003/AC-05; its link to MCP management is built); and the link to skill management (US-001/AC-04).
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. These points are open:
 > - whether Feishu's application-management APIs accept an application created by QR code, and whether the permissions asked for at creation let it change its own configuration; team-management::US-002/AC-08 says what the owner sees and does when they do not;
 > - whether a created application is already released when the scan ends, or only by step 3;

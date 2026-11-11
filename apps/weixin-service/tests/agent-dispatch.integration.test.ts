@@ -5,17 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { runFeishuPairing } from "../src/feishu-pairing.js";
 import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { RuntimePool } from "../src/runtime-pool.js";
 import { TeamRegistry } from "../src/team-registry.js";
+import { stopRunningPrograms, testServerArgs, testServerFiles } from "./fixtures/mcp-test-server-control.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 import { allowNotes, decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
+import { attachMcpServers } from "./support/team-console.js";
 import { scriptedPairing } from "./support/feishu-pairing.js";
 import { memoryAccountId } from "../src/agent-profile.js";
 import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
@@ -1442,6 +1444,53 @@ it("tells a Team Leader what its preset's Executors can do now, in its plan and 
     for (const prompt of leaderTurns) expect(prompt).not.toContain("规则 R38");
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 60000);
+
+// agent-dispatch::REQ-011/AC-01 with REQ-017/AC-01 and AC-02: a Team Leader is told of a server only when its preset attached it
+// in the request's definitions version and still attaches it. A request whose plan stays invalid fails before it is divided and
+// is planned again on retry, under the version it was admitted with, so its retried plan turn meets other current definitions.
+it("tells a Team Leader of a preset's MCP server neither when it was attached after the request was admitted nor once it is unbound", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-mcp-leader-told-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
+    const files = testServerFiles(directory, "amap");
+    const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
+    const { launchLine } = await running.post<{ launchLine: string }>("/api/mcp/preview", { server });
+    await running.post("/api/mcp/servers", { server, confirmed: launchLine });
+    await vi.waitFor(async () => expect((await running!.get<{ mcpServers: Array<{ state: string }> }>("/api/teams")).mcpServers).toMatchObject([{ state: "connected" }]), { timeout: processWaitLimitMs, interval: 50 });
+    const undivided = { leaderPlan: [{ kind: "x" }, { kind: "x" }] };
+    const retry = (messageId: string, requestId: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" }, { modelReply: executorReply("行程已规划好。", "规划行程") });
+
+    await running.post("/api/fixture/inbound", groupMessage("om_told_before", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), undivided));
+    const before = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    await attachMcpServers(running, "bill", [{ name: "amap", confirmed: launchLine }]);
+    await running.post("/api/fixture/inbound", groupMessage("om_told_attached", "再帮我规划周日行程", decision("bill", "规划周日行程"), undivided));
+    const attached = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed");
+    // Planned again while the server is attached, but admitted before it was.
+    await running.post("/api/fixture/inbound", retry("om_told_before_retry", before.agentDispatch!.jobs[0]!.id));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    await attachMcpServers(running, "bill", []);
+    // Planned again once the server is unbound, but admitted while it was attached.
+    await running.post("/api/fixture/inbound", retry("om_told_attached_retry", attached.agentDispatch!.jobs[1]!.id));
+    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+
+    const jobs = result.agentDispatch!.jobs;
+    const turns = result.fixtureCoordinationRequests!.map(({ input }) => JSON.stringify(input));
+    // Bill's plan turns of a request, in order: whether each names what the server gives the preset's Executors.
+    const told = (brief: string) => turns.filter((input) => input.includes("生活团队的负责人") && input.includes(brief) && input.includes("capabilities")).map((input) => input.includes("通过 MCP 服务器「amap」："));
+    console.log(JSON.stringify({ kind: "team_mcp_leader_told", commands: ["请帮我规划周末一日行程", "attach amap", "再帮我规划周日行程", "重试", "unbind amap", "重试"],
+      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, told: { before: told("请帮我规划周末一日行程"), attached: told("再帮我规划周日行程") } }));
+    expect(jobs.map(({ definitionsVersion, status, assignments }) => [definitionsVersion, status, assignments.length])).toEqual([[1, "completed", 1], [2, "completed", 1]]);
+    const first = told("请帮我规划周末一日行程"), second = told("再帮我规划周日行程");
+    // The request admitted before the attachment: never told, also in its plan turn after the attachment.
+    expect(first.length).toBeGreaterThanOrEqual(2);
+    expect(first).not.toContain(true);
+    // The request admitted while the server was attached: told then, and not in its plan turn after the unbinding.
+    expect([second[0], second.at(-1)]).toEqual([true, false]);
+    expect(second.length).toBeGreaterThanOrEqual(2);
+  } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
+}, 90000);
 
 it("reports interrupted Assignments after a crash and closes the request", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-crash-three-"));

@@ -13,19 +13,21 @@ export const HEADER_SENTINEL = "hdr-7d21-SENTINEL-c0de";
 /** A URL server's OAuth client secret. */
 export const CLIENT_SECRET_SENTINEL = "cs-41aa-SENTINEL-77f2";
 
-export type TestServerFiles = { tools: string; marker: string; failFlag: string };
+export type TestServerFiles = { tools: string; marker: string; failFlag: string; calls: string };
 
 export function testServerFiles(directory: string, label = "server"): TestServerFiles {
   return {
     tools: path.join(directory, `${label}-tools.json`),
     marker: path.join(directory, `${label}-started.jsonl`),
     failFlag: path.join(directory, `${label}-fail`),
+    calls: path.join(directory, `${label}-calls.txt`),
   };
 }
 
-/** The test server's arguments; extra tool definitions come from `files.tools`. */
-export function testServerArgs(files: TestServerFiles, options: { listChanged?: boolean } = {}): string[] {
-  return [TEST_SERVER, "--tools", files.tools, "--marker", files.marker, "--fail-flag", files.failFlag, ...(options.listChanged === false ? ["--no-list-changed"] : [])];
+/** The test server's arguments; extra tool definitions come from `files.tools`. With `calls`, it records every tool call it receives. */
+export function testServerArgs(files: TestServerFiles, options: { listChanged?: boolean; calls?: boolean } = {}): string[] {
+  return [TEST_SERVER, "--tools", files.tools, "--marker", files.marker, "--fail-flag", files.failFlag, ...(options.calls ? ["--calls", files.calls] : []),
+    ...(options.listChanged === false ? ["--no-list-changed"] : [])];
 }
 
 export function writeTools(file: string, tools: unknown[]): void {
@@ -36,6 +38,12 @@ export function writeTools(file: string, tools: unknown[]): void {
 export function starts(files: TestServerFiles): Array<{ pid: number; argv: string[]; cwd: string; secretToken: string | null }> {
   if (!fs.existsSync(files.marker)) return [];
   return fs.readFileSync(files.marker, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+/** The tool calls a test server started with `calls` has received, oldest first, by the tool's name. */
+export function receivedCalls(files: TestServerFiles): string[] {
+  if (!fs.existsSync(files.calls)) return [];
+  return fs.readFileSync(files.calls, "utf8").split("\n").filter(Boolean);
 }
 
 /**
