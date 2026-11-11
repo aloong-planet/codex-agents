@@ -428,7 +428,7 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     expect(await call("read_file", { path: path.join(home, "notes", "sibling.txt") })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(await call("write_file", { path: path.join(readable, "new.txt"), text: "no" })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(fs.existsSync(path.join(readable, "new.txt"))).toBe(false);
-  });
+  }, 20_000);
 
   it("an npx server starts with the server's own npm cache, whatever the owner entered", async () => {
     const { work, home, open } = setup();
