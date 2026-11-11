@@ -24,7 +24,7 @@ A team-management page in the local console lists every Agent Team beside an edi
 
 As the owner, I want to define a team once and choose the groups where it works, so that one team serves several groups without separate configurations or Feishu applications.
 
-- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state, its bound groups, its number of Executor profiles and its active Assignments.
+- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state (固定 for Sam, otherwise 正常接单 or 接入未完成), its bound groups, its number of Executor profiles and its active Assignments.
 - team-management::US-001/AC-02: "新增团队" adds an unnamed team to the list and opens it in the editor.
 - team-management::US-001/AC-03: The groups section has a checkbox for each dispatch group. Each group shows a preview of the teams the Coordinator can dispatch to there. A team appears in the preview only when it accepts work in that group under team-management::REQ-003.
 - team-management::US-001/AC-04: Links lead from the page to the team overview, the MCP management page and the skill management page.
@@ -35,15 +35,15 @@ As the owner, I want to create the Team Leader's Feishu application by scanning 
 
 - team-management::US-002/AC-01: QR creation shows a QR code with 「用飞书扫码，在手机上确认创建。创建完成后，App ID 与 App Secret 自动回填，你不需要复制任何凭证。」 and 「刷新二维码」. Scanning it in Feishu and confirming creates a new agent application; it never selects an existing one. The credentials fill in automatically: the application becomes the team's without another save. Afterwards the section shows 「已创建应用 <App ID>」 with 「凭证已自动保存，不显示」, and the secret is saved and never displayed.
 - team-management::US-002/AC-02: The owner can instead enter an existing application: an App ID and an App Secret that can only be written or replaced. Progress then starts at the credential check.
-- team-management::US-002/AC-03: A progress list shows one line per step, each with one of the statuses not started, in progress, awaiting review, needs action and done. QR creation has six steps, and an existing application the last three:
+- team-management::US-002/AC-03: A progress list shows one line per step, each with one of the statuses not started, in progress, awaiting review, needs action and done, shown as 未开始, 进行中, 等待审核, 需处理 and 已完成. QR creation has six steps, and an existing application the last three:
   1. Create the application by scan.
   2. Configure its permissions and bot capability.
   3. Publish a version; this awaits admin review unless review exemption is enabled.
-  4. Check the credentials and read the bot information.
-  5. The Coordinator adds the bot to each bound group.
+  4. Check the credentials and read the bot information (校验凭证并读取机器人信息).
+  5. The Coordinator adds the bot to each bound group (加入所绑定的群), with one row per group.
   6. Send a test message, after the owner confirms it.
 
-  Until the scan has created the application, steps 2 to 6 are not started, and neither 「重新检查」 nor the test message is offered.
+  A step or group row that awaits review or needs action says why. Until the scan has created the application, steps 2 to 6 are not started, and neither 「重新检查」 nor the test message is offered.
 - team-management::US-002/AC-04: When a group lets only its owner or admins add members, that group's joining step shows needs action with this reason. An expired QR code or a failed scan shows the creation step as needs action and offers a new QR code: the QR area shows 「二维码已过期」 and 「这个二维码已过期，或扫码没有完成。刷新后重新扫码即可，不会创建重复的应用。」 with 「刷新二维码」 as its main action, and the step's reason is 「二维码已过期，或扫码没有完成。请刷新二维码后重新扫码。」
 - team-management::US-002/AC-05: The Coordinator's entry shows its existing application with every step done and no actions.
 - team-management::US-002/AC-06: 接入方式 is a choice between 「扫码一键创建」 and 「已有应用，手动填写」, saved with the team. A new team starts with 「扫码一键创建」. The save that chooses 「扫码一键创建」 requests the team's QR code; afterwards only 「刷新二维码」 requests one, and the page shows the new code in place of a code that still waits. Until that save, nothing is asked of Feishu: the QR area shows 「保存后显示」 and 「保存团队后，这里显示二维码；用飞书扫码即可创建应用。」, and the creation step is not started. While the code is being fetched the area shows 「正在生成」 and 「正在向飞书取二维码。」, and the creation step is in progress, as it is while the code waits for its scan. When Feishu gives no code, the area shows 「未取得二维码」 and 「暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」再试。」 with 「刷新二维码」 as its main action, and the creation step needs action with 「暂时连不上飞书，没有取得二维码。稍后点「刷新二维码」。」
@@ -60,7 +60,7 @@ As the owner, I want to set each team's responsibility, its Team Leader's instru
 - team-management::US-003/AC-03: "绑定 MCP" lists the enabled servers of the [MCP Catalog](mcp-catalog.md) that the profile does not yet attach, with their transport, state and usable tool count. Choosing one shows a confirmation card that names the team and profile, the `mcp__<server>__…` tools they gain and the exact command or address. The card states that the service holds the connection and Executors never see the credentials. Only confirming the card attaches the server.
 - team-management::US-003/AC-04: Each attached server can be unbound. Unbinding is a revocation under [agent-dispatch::REQ-017/AC-02](agent-dispatch.md).
 - team-management::US-003/AC-05: Skills are checked from the [Skill Library](skill-library.md). Links lead to MCP management for registering a server and to skill management for importing a skill.
-- team-management::US-003/AC-06: A save bar shows unsaved, saved and clean states. A saved change applies under [agent-dispatch::REQ-017](agent-dispatch.md).
+- team-management::US-003/AC-06: A save bar shows unsaved (有未保存的修改), saved and clean states. A saved change applies under [agent-dispatch::REQ-017](agent-dispatch.md).
 
 ### team-management::US-004 Remove a team from a group, or delete it
 
@@ -70,7 +70,7 @@ As the owner, I want to take a team out of a group, or delete it, without cancel
 - team-management::US-004/AC-02: Active Assignments of the team in the affected groups finish, and its Team Leader closes them. The removal then completes: the team is unbound from those groups and, when deleted, leaves the team list, with a note in the editor that the deletion is complete. History keeps the team's identity and records.
 - team-management::US-004/AC-03: Scheduled tasks that send with the team's identity in an affected group are listed with the removal. Each must be moved to another team that accepts work in that group, or deleted, before the removal completes.
 - team-management::US-004/AC-04: Requests with Assignments of the team that wait for their requester keep waiting, and the removal stays pending. The page lists those requests with links to their records. The owner can confirm or cancel the ones the owner requested; the others wait for their own requester ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)).
-- team-management::US-004/AC-05: An unchecked group is marked as removed after saving; once saved, it shows as draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
+- team-management::US-004/AC-05: An unchecked group is marked 「保存后移除」; once saved, it shows 「移除中 · 停止接单」, draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
 
 ## Functional Requirements
 
@@ -106,7 +106,7 @@ Moving a scheduled task changes only its sending identity to the chosen team's T
 
 ### team-management::CON-001 Write-only application secrets (direct acceptance)
 
-Applies to: App Secrets entered by hand or filled in by QR creation. They are stored locally, never displayed, never returned by any console API and never written to logs, diagnostics or the audit ([agent-console::REQ-004](agent-console.md)).
+Applies to: App Secrets entered by hand or filled in by QR creation. They are stored locally, never displayed, never returned by any console API and never written to logs, diagnostics or the audit ([agent-console::REQ-004](agent-console.md)). For an existing application, 填写 or 替换 on the page opens a password field, and a saved secret shows as 「已保存 · 不显示」.
 
 ## Failure modes and boundaries
 
@@ -209,9 +209,9 @@ The team's 接入方式 is one of its editable fields, so a save from a page tha
 - joining: 「<负责人>（<团队名>）已加入本群，负责：<职责>」;
 - leaving: 「<负责人>（<团队名>）已离开本群，不再接新的事务；进行中的事务会做完。」.
 
-Each announcement keeps its delivery state: accepted, failed or unknown. A send cut off by a restart is unknown, and nothing is resent automatically.
+Each announcement keeps its delivery state: accepted, failed or unknown. The page lists the announcements under each group with that state: 飞书已接收, 发送失败 · 不会自动重发 or 发送结果未知 · 不会自动重发. A send cut off by a restart is unknown, and nothing is resent automatically.
 
-**Executor profiles and effective tools.** A profile's 执行者称呼 names its Executors `<noun> <n>`; the default is 执行者. The page shows the effective tools: the checked tools that module permissions grant. Each host tool's gate decides this:
+**Executor profiles and effective tools.** A profile's 执行者称呼 names its Executors `<noun> <n>`; the default is 执行者, and the field's hint shows the form, such as 「视觉执行者 51」. Profiles can be added and removed. The page groups the host tools as 文件, 发送 and 定时任务 and shows the effective tools as 「实际可用：…」: the checked tools that module permissions grant. Each host tool's gate decides this:
 - `files.find`, `files.grep`, `files.read` and `weixin.send_files` need read on a saved scope;
 - `files.write` needs write;
 - `files.edit` needs read and write on one scope;

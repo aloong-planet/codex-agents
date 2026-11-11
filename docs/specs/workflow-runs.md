@@ -1,6 +1,6 @@
 # 微信工作流与运行面板
 
-> 关联：[features](../features/workflow-runs.md) · ADR-0004 · ADR-0008 · ADR-0009
+> 关联：ADR-0004 · ADR-0008 · ADR-0009
 
 ## Problem Statement
 
@@ -76,9 +76,9 @@ Agent Loop 由 Codex Agent Runtime 通过 App Server 协议持有。微信宿主
 7. 模型调用 `files.edit/write`：宿主持久记录本地修改，按稳定资源身份串行，返回新 reference 与内容 hash，并保持模型 owner；模型可以继续读取、验证或请求发送。
 8. 查询或写入请求越权、引用无效或 schema 非法：不执行文件操作，返回结构化且不含内部路径的错误并允许模型修正；外发预检失败同样不转移 owner。未知或拼错的 scope reference 返回可重试的引用无效错误，不得误报权限不足；模型只能从当前 File Access Context 重新选取并原样使用引用，宿主不纠正引用、不扩大 scope。已识别 scope 的实际授权不足仍返回权限拒绝。
 9. 工具目录变化：同一模型可见工具名同一时刻只允许一个活动版本；`toolContractHash` 随名称、版本、description 和 schema 变化。旧主微信 thread 不再 resume，创建带新契约的 thread，并恢复持久记忆与 Pending 投影。
-10. 用户收窄或撤销读取 scope：递增账户的访问上下文代际，该账户已启用目标的旧 App Server thread 不再 resume；不得把旧文件正文、grep 片段或其自动摘要复制到新 thread。
+10. 用户收窄或撤销读取 scope：递增账户的访问上下文代际，该账户已启用目标的旧 App Server thread 不再 resume；不得把旧文件正文、grep 片段或其自动摘要复制到新 thread。已保存的账户记忆不随文件读取权限撤销而删除。
 
-主模型路径并发边界：同一账户与目标已有活动 Turn 时，后续独立入站保留为独立 Durable Inbox 项并按 FIFO 等待，不合并进当前 Turn；只有命中可信 Pending response binding 的确定性回答快路径可以在不启动新 Turn 的情况下恢复既有 Run。
+主模型路径并发边界：同一账户与目标已有活动 Turn 时，后续独立入站保留为独立 Durable Inbox 项并按 FIFO 等待，不合并进当前 Turn；只有命中可信 Pending response binding 的确定性回答快路径可以在不启动新 Turn 的情况下恢复既有 Run。正常停止服务时等待已经开始的操作收尾，尚未开始处理的入站在重启后按原顺序处理；强制结束进程不保证收尾。
 
 终止接管状态机为 `model_owned -> terminal_preflighting -> workflow_owned`。预检或持久接受失败时回到 `model_owned` 并把结构化错误交回模型；进入 `terminal_preflighting` 后拒绝接纳新的修改类和终止型调用，等待已接纳修改完成后再快照和接管，已运行读取可以完成但不能改变 Owner；进入 `workflow_owned` 后不允许回退，所有新工具请求返回 `workflow_turn_already_claimed`，binding 只在 App Server Turn 完成或 watchdog 清理后释放。
 
@@ -340,7 +340,7 @@ metrics 使用低优先级排队：默认总队列仍为 256 条，其中预留 
 - **FR-34** 自动化沿用生产等价微信入站和真实文件执行器；fixture 模型只证明结构及异常分支，不伪装成 live 模型分类验收。
 - **FR-35** 测试每轮交互默认连续 30 秒无有效进度才超时，单用例默认 120 秒总上限；用例独立进程与状态目录，多轮同用例共享上下文，超时保留首次失败证据。
 - **FR-36** 实现代码回归后重启服务，报告完整口令、实际回复、结构化结果、执行证据和未验证项；自动化仅候选通过，真实微信同口令结果经用户确认才算验收。
-- **FR-37** 实现交付同时同步 spec、features、相关 ADR 与 CONTEXT 的本次范围；未实现事实保持 Pending，不把本次文档检查当成运行验收。
+- **FR-37** 实现交付同时同步 spec、相关 ADR 与 CONTEXT 的本次范围；未实现事实保持 Pending，不把本次文档检查当成运行验收。
 
 ### Out of Scope
 
@@ -367,7 +367,7 @@ metrics 使用低优先级排队：默认总队列仍为 256 条，其中预留 
 - `item/agentMessage/delta` 只作为非权威流式信号；微信最终模型回复来自 `item/completed` 的权威 `agentMessage` 集合。优先最后一个 `phase=final_answer`，没有时再取最后一个未提供 `phase` 的消息；明确标记为 commentary 的消息永不成为回复。模型仍持有 Owner 且没有候选时按 Turn 失败处理，不回退 delta。
 - Tool Host 以 `model_owned -> terminal_preflighting -> workflow_owned` 管理终止型接管。开始预检后停止接纳新 mutation/terminal，等待已接纳 mutation 完成再持久化产物和 Run；成功后返回 `workflow_claimed`，用户可见回复 Owner 交给 Durable Workflow且不可回退。App Server Turn 随后正常完成，binding 保留到 Turn 完成或 watchdog 清理，接管后的新工具请求返回 `workflow_turn_already_claimed`。成功路径不调用 `turn/interrupt`，宿主丢弃该 Turn 的模型侧用户回复候选并使用持久工作流回执。
 - Owner 一旦在持久预检后转移，App Server 后续生成失败、断流或收口超时只记为模型侧诊断，不能撤销 Run、重复提交 Effect 或把最终回复 Owner 退回模型；Durable Workflow 的推进与用户回执不依赖后续模型文本成功生成。
-- Gateway 在可信 submit 返回后先保留接受身份，再读取运行并投影回执；投影失败时仍向 Tool Host 返回已接管事实及诊断错误码。现有微信入口在排空后读取该事实，有回执只使用回执，没有回执沿用现有失败提示，不解析模型尾文、不伪造发送成功、不重新提交。诊断分别记录接管身份、回执投影失败与协议/清理结果，模型阶段的结束时间取清理开始前，成功或失败状态等协议收口后再填写。
+- Gateway 在可信 submit 返回后先保留接受身份，再读取运行并投影回执；投影失败时仍向 Tool Host 返回已接管事实及诊断错误码。现有微信入口在排空后读取该事实，有回执只使用回执，没有回执沿用现有失败提示，不解析模型尾文、不伪造发送成功、不重新提交；该提示不表示已经接管的附件发送被撤销，用户可先检查微信中的实际附件。诊断分别记录接管身份、回执投影失败与协议/清理结果，模型阶段的结束时间取清理开始前，成功或失败状态等协议收口后再填写。
 - 工具领域结果统一编码为有界 JSON envelope，并放入 Dynamic Tool 的文本 content：成功为 `{ok:true,data,meta}`，预期内的参数、权限、引用、预算和业务拒绝为 `{ok:false,error:{code,retryable,action,fieldIssues?}}`。这类可修正领域错误在协议层以 `success:true` 完成请求，使 envelope 能稳定回到模型；只有 Tool Host 崩溃、未处理内部异常或协议传输失败使用 `success:false`，并在协议允许时附带不含敏感信息的安全错误 content。
 - 除结果条数外，工具结果还受序列化字节预算约束；大量 skipped 项按原因聚合，分页或截断必须显式返回完整性和 cursor，不把无限明细写入模型上下文。
 - Agent Loop 的生命周期信号分层：`item/*` 是工作单元权威状态，`turn/completed` 是 Turn 状态，Durable Workflow 是外部副作用与待选状态真源。三个层级不得互相伪造完成或中断。
@@ -404,6 +404,7 @@ metrics 使用低优先级排队：默认总队列仍为 256 条，其中预留 
 - `weixin.submit_file` 是内部单文件通道能力，不对模型公开；旧 `weixin.send_file@1` 只服务可恢复冻结 Run，迁移完成后删除。
 - 本地图片的媒体语义暂保留独立 member，但移除其中的查询、排序和 Resolver 职责；它只消费可信媒体/file reference 与可选 caption。
 - 文件沙箱设计见 `workflow-module-permissions.md`；该沙箱仅覆盖 `files.*` 本地访问，不包裹微信通道 Effect。
+- 本地“工作流运行”页只读：显示最近运行、需要关注的运行、步骤状态、耗时和外发结果，不取消任务、不确认未知结果、不重放外发、不修改权限。
 - 本轮不改变运行面板和权限页布局；补充“读取结果会进入当前 Codex 会话”和“账户目录可供该账户下已启用目标使用”的权限说明属于纯文案调整，显式豁免新增视觉原型。
 
 ## Testing Decisions

@@ -91,11 +91,11 @@ When an explicitly mentioned Team Leader receives a request outside its team's r
 
 ### agent-dispatch::REQ-006 Initial team deliverables
 
-The first concrete deliverables remain as follows. Each is produced by the team's Executors and delivered by its Team Leader. They use research, controlled file access, artifact delivery and only the capabilities that the team's Agent Profiles grant.
+The first concrete deliverables remain as follows. Each is produced by the team's Executors and delivered by its Team Leader. They use research, controlled file access, artifact delivery and only the capabilities that the team's Agent Profiles grant. A step that none of these capabilities supports is reported as not executed.
 
 - agent-dispatch::REQ-006/AC-01: Given user-supplied product facts, Alice's team produces an editable listing package for Xianyu/Taobao: platform-appropriate titles, descriptions, condition disclosures and buyer FAQ. Unknown product facts are requested or marked as missing rather than invented; the package is saved and delivered to the originating group.
 - agent-dispatch::REQ-006/AC-02: Given city, date, party size, preferences and budget, Bill's team produces a one-day itinerary with transport, meals, budget estimates and alternatives, and delivers the saved plan to the originating group. Time-sensitive claims identify their sources; estimates are distinguishable from verified facts. Missing essential inputs are clarified.
-- agent-dispatch::REQ-006/AC-03: Given an authorized project location and a reproducible TypeScript problem description, Jack's team inspects relevant source and produces a reviewable patch with regression-test cases and an explanation. The group receives the artifact and an accurate validation status; no claim is made that tests ran when command execution is unavailable.
+- agent-dispatch::REQ-006/AC-03: Given an authorized project location and a reproducible TypeScript problem description, Jack's team inspects relevant source and produces a reviewable patch with regression-test cases and an explanation. The group receives the artifact and an accurate validation status; no claim is made that tests ran when command execution is unavailable. Completion is judged against the work requested: when the requester asks for code and test cases without running them, delivering them completes the request, with a statement that the tests were not run; requested execution that cannot happen leaves that work incomplete.
 
 ### agent-dispatch::REQ-007 Requester-owned active work
 
@@ -520,4 +520,4 @@ These tests do not inspect prompt text.
 
 ## Further Notes
 
-Implementation checks do not establish production deployment or real-group receipt. No execution SLA, model replacement, ingress provider or public hostname is implied by these requirements. Concurrency is bounded only as agent-dispatch::QR-001 states.
+Implementation checks do not establish production deployment or real-group receipt. Team selection and generated content depend on the model: time-sensitive sources and estimates need review, and a saved or delivered file does not by itself prove its facts accurate. No execution SLA, model replacement, ingress provider or public hostname is implied by these requirements. Concurrency is bounded only as agent-dispatch::QR-001 states.
