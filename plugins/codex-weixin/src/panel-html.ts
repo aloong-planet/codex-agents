@@ -224,6 +224,10 @@ export const weixinPanelHtml = String.raw`<!doctype html>
         const accountBefore = el("account").value;
         const targetBefore = el("target").value;
         renderSelection(pendingSelection || { accountId: state.selectedAccountId, target: state.selectedTarget });
+        if (pendingSelection?.target === "" && el("account").value === pendingSelection.accountId) {
+          // The chosen account had no target yet: take the one it offers now, as choosing the account would.
+          pendingSelection = { ...pendingSelection, target: el("target").value };
+        }
         if (pendingSelection && (el("account").value !== pendingSelection.accountId || el("target").value !== pendingSelection.target)) {
           // The chosen option is gone: drop the choice and show the session the update gives.
           pendingSelection = null;

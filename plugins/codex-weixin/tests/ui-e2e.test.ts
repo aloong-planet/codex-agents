@@ -8,6 +8,7 @@ const qrDataUrl =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nNwAAAAASUVORK5CYII=";
 
 const inboundConfirmation = "我确认刚刚已从这个微信目标给 bot 发过消息";
+const sendConfirmation = "我确认将向上方选择的微信目标发送这条真实消息";
 const fixtureTargets = [
   { accountId: "fixture-bot", target: "fixture-user@im.wechat", label: "最近联系人" },
   { accountId: "fixture-bot", target: "other-user@im.wechat", label: "另一位联系人" },
@@ -194,7 +195,7 @@ describe("MCP Apps panel in a simulated Codex host", () => {
     await panel.getByRole("button", { name: "在 Codex Desktop 中查看（实验）" }).click();
     await eventually(() => panel.locator("#feedback").textContent()).toContain("已请求 Codex Desktop");
 
-    await panel.getByLabel("我确认将向上方选择的微信目标发送这条真实消息").check();
+    await panel.getByLabel(sendConfirmation).check();
     await eventually(() => panel.getByRole("button", { name: "发送测试消息" }).isEnabled()).toBe(true);
     await panel.getByRole("button", { name: "发送测试消息" }).click();
     await eventually(() => panel.locator("#feedback").textContent()).toBe("渠道已接受发送请求，请在微信端确认是否收到。");
@@ -223,23 +224,23 @@ describe("MCP Apps panel in a simulated Codex host", () => {
     await page.close();
   }, 20_000);
 
-  it("keeps a switched account through a state update until it is confirmed, then follows the service again", async () => {
+  it("keeps a switched account through state updates until it is confirmed, then follows the service again", async () => {
     const { page, panel, pushState, confirmedSessions } = await openPanel(browser, {
       accounts: [
         { accountId: "fixture-bot", label: "我的微信" },
         { accountId: "work-bot", label: "工作微信" },
-      ],
-      targets: [
-        { accountId: "fixture-bot", target: "fixture-user@im.wechat", label: "最近联系人" },
-        { accountId: "work-bot", target: "work-user@im.wechat", label: "工作联系人" },
       ],
     });
     await panel.getByLabel(inboundConfirmation).check();
     await panel.getByRole("button", { name: "确认会话与目标" }).click();
     await panel.locator("#send").waitFor({ state: "visible" });
 
+    // The chosen account has no target until its first inbound message arrives.
     await panel.locator("#account").selectOption("work-bot");
     await pushState({});
+    await pushState({
+      targets: [...fixtureTargets, { accountId: "work-bot", target: "work-user@im.wechat", label: "工作联系人" }],
+    });
     await panel.getByLabel(inboundConfirmation).check();
     await panel.getByRole("button", { name: "确认会话与目标" }).click();
     await eventually(confirmedSessions).toEqual([
@@ -247,11 +248,14 @@ describe("MCP Apps panel in a simulated Codex host", () => {
       { accountId: "work-bot", target: "work-user@im.wechat" },
     ]);
     await panel.locator("#send").waitFor({ state: "visible" });
+    await panel.getByLabel(sendConfirmation).check();
 
     // The service confirms another session, as a confirm made elsewhere would.
     await pushState({ selectedAccountId: "fixture-bot", selectedTarget: "fixture-user@im.wechat" });
     await eventually(() => panel.locator("#account").inputValue()).toBe("fixture-bot");
     await eventually(() => panel.getByLabel(inboundConfirmation).isChecked()).toBe(false);
+    await eventually(() => panel.getByLabel(sendConfirmation).isChecked()).toBe(false);
+    await eventually(() => panel.getByRole("button", { name: "发送测试消息" }).isEnabled()).toBe(false);
     await page.close();
   });
 
