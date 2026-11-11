@@ -19,6 +19,13 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   /** Injected outputs of one team's Team Leader turns on a message (`teamTurns`), keyed by message and team. */
   private readonly teamTurns = new Map<string, { leaderPlan?: unknown[]; leaderClosing?: unknown; leaderSupplement?: unknown }>();
   private readonly crossTeamDecisions = new Map<string, unknown>();
+  /**
+   * Coordinator turns held until the dispatch stops (`classificationHold`), by message: such a turn then answers with its decision
+   * (`complete`), or fails as a turn whose runtime closed (`abort`). Each classification turn is recorded with how it ended.
+   */
+  private readonly classificationHolds = new Map<string, "complete" | "abort">();
+  private readonly heldClassifications = new Set<() => void>();
+  private readonly classifications: Array<{ messageId: string; status: "held" | "answered" | "failed" }> = [];
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
   /** Private-conversation replies injected per agent, in order, and the one each agent's running reply turn took. */
@@ -35,7 +42,9 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     if (this.failStartup) throw new Error("fixture_feishu_startup_failed");
     this.handlers = handlers;
   }
-  close(): void { this.releaseText?.(); this.handlers = undefined; }
+  close(): void { this.releaseHeldText(); this.handlers = undefined; }
+  /** Lets a held send complete as accepted. */
+  releaseHeldText(): void { this.releaseText?.(); this.releaseText = undefined; }
   async botOpenId(): Promise<string> { return this.identity; }
   async sendText(input: Parameters<FeishuTransport["sendText"]>[0]) {
     if (!this.handlers) throw new Error("fixture_feishu_not_started");
@@ -54,6 +63,31 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     if (!this.decisions.has(messageId)) throw new Error("fixture_dispatch_decision_missing");
     return structuredClone(this.decisions.get(messageId));
   }
+  /** Coordinator decisions injected before any message arrives, by message ID, such as for messages a restart takes in again. */
+  injectDispatchDecisions(value: unknown): void {
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > 20) throw new Error("fixture_dispatch_decisions_invalid");
+    for (const [messageId, decision] of Object.entries(value)) this.decisions.set(messageId, structuredClone(decision));
+  }
+  /** The Coordinator's injected decision as a classification turn returns it: at once, or once the dispatch stops when the message holds it. */
+  async classify(messageId: string): Promise<unknown> {
+    const hold = this.classificationHolds.get(messageId);
+    this.classificationHolds.delete(messageId);
+    const turn = { messageId, status: "held" as "held" | "answered" | "failed" };
+    this.classifications.push(turn);
+    try {
+      if (hold) await new Promise<void>((resolve) => { this.heldClassifications.add(resolve); });
+      if (hold === "abort") throw new Error("fixture_classification_aborted");
+      const decision = this.dispatchDecision(messageId);
+      turn.status = "answered";
+      return decision;
+    } catch (error) { turn.status = "failed"; throw error; }
+  }
+  /** Ends every held classification turn, as the dispatch's stop does. */
+  releaseClassifications(): void {
+    for (const release of this.heldClassifications) release();
+    this.heldClassifications.clear();
+  }
+  getClassifications() { return structuredClone(this.classifications); }
   /** The Coordinator's injected cross-team decision for a message; its absence fails the turn, as a missing dispatch decision does. */
   crossTeamDecision(messageId: string): unknown {
     if (!this.crossTeamDecisions.has(messageId)) throw new Error("fixture_cross_team_decision_missing");
@@ -186,6 +220,10 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
     }
     const event = input.event as { message?: { message_id?: string; chat_id?: string; message_type?: string; content?: string } } | undefined;
     if (input.dispatchDecision !== undefined && event?.message?.message_id) this.decisions.set(event.message.message_id, structuredClone(input.dispatchDecision));
+    if (input.classificationHold !== undefined && event?.message?.message_id) {
+      if (input.classificationHold !== "complete" && input.classificationHold !== "abort") throw new Error("fixture_classification_hold_invalid");
+      this.classificationHolds.set(event.message.message_id, input.classificationHold);
+    }
     if (input.leaderPlan !== undefined && event?.message?.message_id) {
       const plans = Array.isArray(input.leaderPlan) ? input.leaderPlan : [input.leaderPlan];
       if (plans.length === 0 || plans.length > 5) throw new Error("fixture_leader_plan_invalid");
