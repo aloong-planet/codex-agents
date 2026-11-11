@@ -1131,8 +1131,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   });
   // Before any dispatch work can start an Executor runtime (agent-dispatch::QR-002/AC-02).
   executor.compactHomes();
-  // Under the real-model seam nothing is injected, so each turn of the three is recorded for the state to show what it decided.
-  const recorded = fixtureDispatchRealModel ? recordDispatchTurns({ classifier, leader, executor }) : { classifier, leader, executor, turns: undefined };
+  // Each reply is a tool-free turn on the agent's own private-chat runtime, in the dispatch pool and apart from every group runtime,
+  // and reads no memory (agent-console::CON-002). In fixture mode the injected reply stands in for the model, except under the
+  // real-model seam.
+  const fixturePrivate = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel ? new FixturePrivateReplier(fixtureFeishu!) : undefined;
+  const replier = fixturePrivate ?? new CodexPrivateReplier((agentId, work) => runtimes.use(`private-chat-${agentId}`,
+    () => isolatedConversation("privateChat", { instance: agentId }), ({ agent, cwd }) => work(agent, cwd)), model);
+  // Under the real-model seam nothing is injected, so each turn of the three, and each private reply, is recorded for the state to
+  // show what it decided.
+  const recorded = fixtureDispatchRealModel ? recordDispatchTurns({ classifier, leader, executor, replier }) : { classifier, leader, executor, replier, turns: undefined };
   fixtureDispatchTurns = recorded.turns;
   // A request's workflow runs are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
   const runEvents = (job: import("./agent-dispatch-types.js").DispatchJob, assignments: readonly import("./agent-dispatch-types.js").DispatchAssignment[]) =>
@@ -1247,12 +1254,6 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     bindFixtureApplications();
   };
   fixtureLeaderRequests = fixtureLeader?.requests;
-  // Each reply is a tool-free turn on the agent's own private-chat runtime, in the dispatch pool and apart from every group runtime,
-  // and reads no memory (agent-console::CON-002). In fixture mode the injected reply stands in for the model, except under the
-  // real-model seam.
-  const fixturePrivate = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel ? new FixturePrivateReplier(fixtureFeishu!) : undefined;
-  const replier = fixturePrivate ?? new CodexPrivateReplier((agentId, work) => runtimes.use(`private-chat-${agentId}`,
-    () => isolatedConversation("privateChat", { instance: agentId }), ({ agent, cwd }) => work(agent, cwd)), model);
   privateConversations = new PrivateConversations(path.join(path.dirname(privateStatePath), "private-conversations.sqlite"), {
     definitions: () => teams.current().definitions,
     records: () => dispatch.records(),
@@ -1267,7 +1268,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         if (!team && version !== undefined) { try { team = definitionsFor(version).teams.find(({ id }) => id === agentId); } catch { /* the version is gone: its ID */ } }
         return team?.leader.name ?? agentId;
       } },
-    replier, report: (code) => process.stderr.write(`${code}\n`) });
+    replier: recorded.replier, report: (code) => process.stderr.write(`${code}\n`) });
   fixturePrivateTurns = fixturePrivate?.turns;
   return dispatch;
 })() : undefined;
