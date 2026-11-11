@@ -49,6 +49,11 @@ export type DispatchJob = {
    * a changed application fails its work instead of sending under another identity (agent-dispatch::REQ-008/AC-04, REQ-010/AC-01).
    */
   senders?: Record<string, string>;
+  /**
+   * The workflow runs whose choices a supplement superseded. An Assignment that reruns for the supplement gets a run of its own, so
+   * these stay with the request: their choices take no answer any more, and are closed again with the request's other choices.
+   */
+  supersededRuns?: string[];
 };
 /** A part of a request the lead asked another team to take; `teamId` is the team the Coordinator placed it with, or null. */
 /**
@@ -116,7 +121,12 @@ export interface DispatchClassifier {
   assign(input: CrossTeamInput): Promise<CrossTeamDecision[]>;
   close?(): void | Promise<void>;
 }
-export type DispatchPendingResult = { handled: false; cancelledRunRef?: string } | { handled: true; senderAccountId?: string; runRef?: string; result: DispatchExecutionResult };
+/**
+ * What the host made of a message while a choice is open. `held`: the message answers the choice of `runRef`, a run the dispatch
+ * named as taking no answer, and the host resumed, cancelled and replaced nothing.
+ */
+export type DispatchPendingResult = { handled: false; cancelledRunRef?: string } | { handled: true; senderAccountId?: string; runRef?: string; result: DispatchExecutionResult }
+  | { handled: true; held: true; runRef: string };
 /** `cause` is set when the host saw a tool call refused during a turn the Executor reported unfinished. */
 export type DispatchExecutionResult = { status: "completed" | "waiting" | "failed" | "cancelled"; message: string; runRef?: string; cause?: "tool_refused" };
 export interface DispatchExecutor {
