@@ -227,6 +227,37 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
   } finally { await executor.close(); }
 });
 
+// skill-library failure mode: skills that cannot be written leave no runtime, so the Assignment fails instead of running with
+// other content, and its run holds no pool slot afterwards.
+it("fails an Assignment's run without starting a turn when its skills cannot be written, and leaves the slot to the next run", async () => {
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 60_000, close: ({ agent }) => agent.close() });
+  const agent = conversation("thread-B");
+  let creations = 0;
+  const executor = new CodexDispatchExecutor(join(scratch(), "agent-sessions.sqlite"), {
+    agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
+      { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
+    runtimes,
+    // As the service's own creation does when the library no longer holds a version the request names.
+    createRuntime: (_job, scope, _tools, _agentId, skills) => {
+      creations++;
+      if (skills.some(({ version }) => version === 7)) throw new Error("skill_version_unavailable");
+      return { agent, cwd: `/isolated/${scope}` };
+    },
+    tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+    profile: (_job, assigned) => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" },
+      ...(assigned.id === "assignment-a" ? { skills: [{ id: "skill-aaaaaaaa", version: 7 }] } : {}),
+      tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined,
+  });
+  try {
+    await expect(executor.run(job("request-one"), assignment("assignment-a"), new AbortController().signal)).rejects.toThrow(/^skill_version_unavailable$/u);
+    expect(agent.startOrResume).not.toHaveBeenCalled();
+    await expect(executor.run(job("request-one"), assignment("assignment-b"), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(creations).toBe(2);
+  } finally { await executor.close(); }
+});
+
 it("leaves a home whose process does not exit to the next start's sweep, which also compacts a pre-05 home", async () => {
   vi.useFakeTimers();
   const root = scratch(), database = join(scratch(), "agent-sessions.sqlite"), reports: string[] = [];
