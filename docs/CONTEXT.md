@@ -434,7 +434,7 @@ _Avoid_: message-wide suppression, final reply Owner
 - 模型不得提供 Signal 的账户、目标、run、revision、候选 hash、路径或幂等键；这些字段只能来自可信回合绑定与 Engine 实时状态。
 - 待处理响应一旦被工作流接管，普通聊天不得再生成该回合的最终回复或副作用。
 - 明确取消只终结仍在等待的待处理请求，不执行后续 capability；完整新目标仍以 superseded 终结旧请求。
-- The rule that a complete new goal ends the old Pending Request as superseded has one exception: a Pending Request that a supplement to its Dispatch Request superseded and that could not be closed. It takes no answer, and a new goal does not end it ([agent-dispatch](specs/agent-dispatch.md)).
+- The rule that a complete new goal ends the old Pending Request as superseded has one exception: a Pending Request that could not be closed after a supplement to its Dispatch Request superseded it, or after its Dispatch Request was cancelled. It takes no answer, and a new goal does not end it ([agent-dispatch](specs/agent-dispatch.md)).
 - 批量外部 effect 的 accepted、rejected 与 unknown 必须逐项保存；任一 unknown 都不得触发自动重发。
 - 未声明最新单项选择的图片来源中，多个合法候选必须经过 Input Gate；没有候选时结束当前运行，不把请求交回旧媒体动态工具。
 

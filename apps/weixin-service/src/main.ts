@@ -1260,8 +1260,13 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       const result = await groupWorkflowAdapter.tryHandlePending(event);
       const cancelled = workflowEngine.get(request.runId)?.status === "cancelled";
       if (!result.handled) return { handled: false, ...(cancelled ? { cancelledRunRef: request.runId } : {}) };
+      // A choice the message left as it was is still open, whatever the handling's outcome, so its Assignment still waits: a selection
+      // whose reference matches no open choice, or a signal the engine refused. The requester is asked to answer the open choice.
+      const open = !cancelled && workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId)
+        .some((item) => item.signalRef === request.signalRef && item.revision === request.revision && item.expiresAt > Date.now());
+      const status = cancelled ? "cancelled" : result.outcome === "needs_input" || open ? "waiting" : result.outcome === "succeeded" ? "completed" : "failed";
       return { handled: true, ...destination, runRef: request.runId,
-        result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
+        result: { status, message: open && result.outcome !== "needs_input" ? "这条选择对应的选项已经结束；这项请求仍在等你选择，请按最新提示回复。" : result.reply } };
     },
     closeChoices: async (job, assignments) => {
       // Each Executor's run, found by the message that keys it, and the runs a supplement superseded: an Assignment that reran for the

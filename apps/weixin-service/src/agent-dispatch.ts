@@ -492,8 +492,9 @@ export class AgentDispatch {
         if (pending?.handled) {
           const held = pending.runRef ? this.heldRequest(pending.runRef, event) : undefined;
           if (held || "held" in pending) {
-            // An answer to a choice that a supplement superseded changes nothing in the request or its Assignments and starts nothing,
-            // whatever the host made of it. The choice is closed again, and the requester is told once, in a post of its own.
+            // An answer to a choice that a supplement superseded, or to one of a request that is cancelled or being cancelled, changes
+            // nothing in the request or its Assignments and starts nothing, whatever the host made of it. The choice is closed again,
+            // and the requester is told once, in a post of its own.
             if (held) await this.closeChoices(held);
             await this.coordinate(event, bindingHash, held !== undefined && goesOn(held) ? CHOICE_SUPERSEDED : REQUEST_ENDED);
             this.finishInput(event.key); continue;
@@ -501,11 +502,6 @@ export class AgentDispatch {
           const agent = this.options.agents().find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = pending.runRef ? this.requestOfRun(pending.runRef, event) : undefined;
-          if (original && (original.cancelRequested || original.status === "cancelled")) {
-            // The requester stopped this request: an answer to its choice changes nothing, starts nothing and gets the reply of an ended request.
-            await this.coordinate(event, bindingHash, REQUEST_ENDED);
-            this.finishInput(event.key); continue;
-          }
           // An answer settles the Assignment that keeps the choice's run. One that asked back without a workflow run keeps none: it
           // is settled only by the reply to its own question, which the Coordinator takes as a supplement.
           const waiting = original && this.assignments(original.id).find((assignment) => assignment.status === "waiting" && assignment.runRef === pending.runRef);
@@ -526,11 +522,15 @@ export class AgentDispatch {
           const presentation = pending.result.status === "waiting" && pending.runRef ? this.options.presentation(event, pending.runRef) : undefined;
           const shown = { ...notice, ...(presentation ? { presentation } : {}) };
           if (original) {
-            // A choice that is asked again leaves its Assignment waiting, and the request in the status its Assignments give it: running
-            // while another of them runs, so that a cancel still stops that one's Executor and the request's worker reports it once.
-            if (!waiting || pending.result.status !== "waiting") original.status = pending.result.status;
+            // A request with Assignments takes its status from them. A choice that is asked again leaves its Assignment waiting, and
+            // the request running while another of them runs, so that a cancel still stops that one's Executor and the request's
+            // worker reports it once. An answer to a choice whose Assignment no longer waits on it changes no Assignment, and so no
+            // status. A cancelled choice of the request's only Assignment cancels both. Only a request stored before Assignments
+            // existed takes the answer's status.
+            if (waiting && pending.result.status === "cancelled") {
+              waiting.status = "cancelled"; waiting.result = pending.result.message; this.saveAssignment(waiting); original.status = "cancelled";
+            } else if (!this.assignments(original.id).length) original.status = pending.result.status;
             original.result = pending.result.message;
-            if (waiting && pending.result.status === "cancelled") { waiting.status = "cancelled"; waiting.result = pending.result.message; this.saveAssignment(waiting); }
             this.recordResult(original, `${event.key}:pending`, shown);
           } else this.queueNotice(`${event.key}:pending`, shown);
           await this.deliverNotice(`${event.key}:pending`, shown);
@@ -1220,9 +1220,8 @@ export class AgentDispatch {
 
   /**
    * Has the host close the choices the request's Executors left open (agent-dispatch::REQ-007/AC-03). A choice that cannot be
-   * closed stops nothing: the failure is reported. Where pending answers are taken in, a superseded choice's run is named to the
-   * host before it acts, so nothing of it is resumed. For a cancelled request's choice the host still acts on an answer before it
-   * hands the result over; the request, cancelled or being cancelled, and its Assignments are then kept as they are.
+   * closed stops nothing: the failure is reported. Where pending answers are taken in, the run of a superseded choice, and of a
+   * choice of a request that is cancelled or being cancelled, is named to the host before it acts, so nothing of it is resumed.
    */
   private async closeChoices(job: DispatchJob): Promise<void> {
     try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
@@ -1346,9 +1345,13 @@ export class AgentDispatch {
       (job.runRef === runRef || this.assignments(job.id).some((assignment) => assignment.runRef === runRef)));
   }
 
-  /** The requester's request that keeps `runRef` among the runs a supplement superseded: that run's choice takes no answer any more. */
+  /**
+   * The requester's request on whose behalf the choice of `runRef` takes no answer any more: one that keeps `runRef` among the runs
+   * a supplement superseded, or one that is cancelled, or is being cancelled, whose Assignment, or earlier single Executor, started it.
+   */
   private heldRequest(runRef: string, event: InboundContent): DispatchJob | undefined {
-    return this.jobs().find((job) => job.event.target === event.target && job.event.senderId === event.senderId && job.supersededRuns?.includes(runRef));
+    return this.jobs().find((job) => job.event.target === event.target && job.event.senderId === event.senderId && (job.supersededRuns?.includes(runRef) ||
+      ((job.cancelRequested || job.status === "cancelled") && (job.runRef === runRef || this.assignments(job.id).some((assignment) => assignment.runRef === runRef)))));
   }
 
   private recordResult(job: DispatchJob, id = `${job.id}:result:${job.attempt}`, notice = this.notice(job, job.result!)): { id: string; notice: Notice } {
