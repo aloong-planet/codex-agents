@@ -175,7 +175,7 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 
 - onboarding, until team-management::REQ-003 holds;
 - accepting;
-- draining, from the start of a removal until active Assignments, waiting requests and scheduled tasks are cleared;
+- draining, from the start of a removal until nothing of the team is left in that group (Removals, below);
 - removed.
 
 The Team Directory and the Coordinator's roster are derived from bindings in the accepting state. Announcements are durable outbound messages with their own delivery state.
@@ -185,7 +185,7 @@ The Team Directory and the Coordinator's roster are derived from bindings in the
 - no group post under its identity is still to be sent there;
 - no scheduled task of that group is sent with its application.
 
-The service checks this after every console save and deletion, after a scheduled task is moved or deleted, whenever dispatch work ends, after every scheduler round and at startup. A check that fails removes nothing; the service's diagnostics report `dispatch_work_change_failed` or, after a scheduler round, `team_removal_settle_failed`, and the next check tries again. A team that is being deleted is marked so in its definition. It leaves the definitions in the version that removes its last draining binding, and its application's secret is dropped with it; a team that accepts work nowhere leaves in the version that deletes it. Unbinding and deletion change the registry only: nothing is asked of Feishu. Deleting a team deletes none of its Team Leader or Executor memory. The accounts stay stored and are never recalled, because team IDs are generated and nothing runs under a deleted team's ID again.
+The service checks this after every console save and deletion, after a scheduled task is moved or deleted, whenever dispatch work ends, after every scheduler round and at startup. A check that fails removes nothing; the service's diagnostics report `dispatch_work_change_failed` or, after a scheduler round, `team_removal_settle_failed`, and the next check tries again. A team that is being deleted is marked so in its definition. It leaves the definitions in the version that removes its last draining binding, and its application's secret is dropped with it; a team that neither accepts work nor drains in any group leaves in the version that deletes it. Unbinding and deletion change the registry only: nothing is asked of Feishu. Deleting a team deletes none of its Team Leader or Executor memory. The accounts stay stored and are never recalled, because team IDs are generated and nothing runs under a deleted team's ID again.
 
 **Console saves.** The console saves one team at a time. A save carries the team's editable fields, its checked groups and the definitions version the page was based on. It is refused as stale only when that team's own editable fields changed since then, so another team's save or an onboarding step never refuses it. The registry derives binding states from the checked groups:
 - a kept group keeps its state;
@@ -259,7 +259,7 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 - `team_test_message_sent`, with each group's result;
 - `host_tool_refused`.
 
-**Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task. A task that is executing or being sent is neither moved nor deleted.
+**Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task. Its results and notices that are not yet sent go out with the new identity as well. A task that is executing or being sent is neither moved nor deleted.
 
 **Console API.** Team management is served by the local console under [agent-console::CON-001](agent-console.md), and every saved change is audited under [agent-console::REQ-004](agent-console.md).
 

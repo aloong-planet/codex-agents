@@ -130,6 +130,7 @@ The service appends an entry to a local audit file for each of these events:
 
 - a saved change to a team, a group binding, an Agent Profile, an MCP server or tool, or a skill;
 - a saved change to the dispatch groups, with the groups before and after;
+- a team's deletion, the unbinding that completes a team's removal from a group, and a scheduled task that a removal lists being moved to another team or deleted;
 - an onboarding action;
 - a browser authorization or revocation;
 - a refused MCP call.
