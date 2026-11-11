@@ -57,6 +57,10 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
 //   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
 //   closing is unit-tested.
+// - A fixture application refuses a post by answering with an error code, which the channel records as rejected. A refusal that
+//   Feishu answers with an HTTP error status reaches the channel as a failed send and is recorded as unknown, so Sam's sentence for
+//   a rejected start message does not follow it. Retest condition: the transport tells such a refusal from a lost answer; then a
+//   live refused send.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -331,6 +335,80 @@ it("fails a request whose start message was uncertain at a crash, without sendin
     expect(recovered.agentDispatch?.notices?.find(({ id }) => id.endsWith(":receipt:0"))?.state).toBe("unknown");
     expect(recovered.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
     expect(recovered.fixtureModelRequests).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// agent-dispatch::REQ-008/AC-04, the one post another identity makes for a team. The engine's rule (which outcomes of the start
+// message get the sentence, once per attempt, never resent) is covered at the AgentDispatch boundary; this case shows main's
+// wiring: the channel records the platform's refusal as rejected, and the sentence leaves through Sam's application to the
+// request's chat. The plan's title and Brief and the Coordinator's summary differ from the sentence, so the exact outboxes
+// show that nothing of the team's content went out.
+it("has Sam tell the group that the attempt has not started when the request's team has its start message rejected, and posts nothing else for the team", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-receipt-rejected-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    // Bill's application refuses its start message and then its failure report.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["rejected", "rejected"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_receipt_rejected", "帮我规划周末一日行程", decision("bill", "规划周末一日行程"),
+      { leaderPlan: { assignments: [{ profileId: "executor-1", title: "排周末行程", brief: "两人，预算 400 元" }], decisions: ["先核对天气"] } }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentDispatch.notices?.length === 3 &&
+      state.agentDispatch.notices.every(({ state: delivery }) => delivery !== "queued" && delivery !== "sending"));
+    console.log(JSON.stringify({ kind: "dispatch_receipt_rejected", command: "帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
+    expect(failed.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Bill 队的接单通知未能发出，本次尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。" })]);
+    expect(failed.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+    expect(failed.agentDispatch?.notices?.map(({ id, state }) => [id.split(":").slice(1).join(":"), state]))
+      .toEqual([["receipt:0", "rejected"], ["receipt-rejected:0", "accepted"], ["closing:0", "rejected"]]);
+    expect(failed.agentDispatch?.jobs[0]).toMatchObject({ agentId: "bill", status: "failed", result: "接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。",
+      assignments: [{ title: "排周末行程", status: "failed" }] });
+    expect([failed.fixtureModelRequests ?? [], failed.fixtureMediaOutbox ?? []]).toEqual([[], []]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// The channel-refused branch of the same rule through main, and the revalidation of authority at a restart
+// (agent-dispatch::REQ-008/AC-04): an application that is offline has its start message refused without a send.
+it.each(["member", "group", "application"] as const)("fails closed for an unavailable assignee and fences queued work after %s replacement", async (replacement) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-revocation-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const send = (id: string, sender: string, agentId: string, modelHold = false, chatId = "oc_alpha") => running!.post("/api/fixture/inbound", {
+    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
+      message: { message_id: id, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text: "处理当前请求" }) } },
+    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: "处理当前请求", message: "" }, modelHold,
+  });
+  try {
+    dispatchConfig(directory); running = await start(directory);
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "unavailable" } });
+    await send("om_assignee_offline", "ou_owner", "alice");
+    const unavailable = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    expect(unavailable.fixtureModelRequests).toEqual([]);
+    expect(unavailable.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
+    // The channel refuses the start message of an application that is offline, so it is recorded as rejected: Sam's one sentence
+    // is the only post, and nothing goes out for Alice under another identity (agent-dispatch::REQ-008/AC-04).
+    expect(unavailable.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Alice 队的接单通知未能发出，本次尚未开始处理。请检查 Alice 是否可在本群发言后明确重试。" })]);
+    expect(unavailable.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "ready" } });
+    await send("om_running_before_revocation", "ou_owner", "alice", true);
+    await running.until((state) => state.fixtureModelRequests?.length === 1);
+    await send("om_queued_before_revocation", "ou_owner", "alice");
+    const queued = await running.until((state) => state.agentDispatch?.jobs.length === 3);
+    expect(queued.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["failed", "running", "queued"]);
+    await running.close(); running = undefined;
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
+    if (replacement === "member") configuration.feishu.groups[0].allowedSenderIds = ["ou_colleague"];
+    else if (replacement === "group") {
+      configuration.feishu.groups[0].chatId = "oc_beta";
+      configuration.feishu.dispatch.groupChatIds = ["oc_beta"];
+    } else configuration.feishu.dispatch.agents[1].appId = "cli_dddddddddddddddd";
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
+    running = await start(directory);
+    await send("om_authorized_after_revocation", "ou_colleague", "bill", false, replacement === "group" ? "oc_beta" : "oc_alpha");
+    const restored = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
+    expect(restored.fixtureModelRequests).toHaveLength(1);
+    expect(restored.agentFixtureOutboxes?.alice?.text).toEqual([]);
+    expect(restored.fixtureTextOutbox).toEqual([]);
+    expect(restored.agentDispatch?.jobs[2]?.status).toBe(replacement === "application" ? "failed" : "cancelled");
+    expect(restored.agentDispatch?.jobs.some(({ requester, status }) => requester === "ou_owner" && ["running", "queued"].includes(status))).toBe(false);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
