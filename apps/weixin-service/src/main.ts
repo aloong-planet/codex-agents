@@ -114,7 +114,7 @@ import { IlinkMediaStore } from "./ilink-media.js";
 import { LocalFileTools } from "./local-file-tools.js";
 import { MacLocalNotifier } from "./local-notifier.js";
 import { MediaExportLibrary } from "./media-export-library.js";
-import { WorkflowEngine } from "./workflow-engine.js";
+import { pendingChoiceReplaced, WorkflowEngine } from "./workflow-engine.js";
 import { WorkflowMediaArtifactStore } from "./workflow-media-artifact-store.js";
 import { WorkflowMediaProvider } from "./workflow-media-provider.js";
 import { WorkflowMediaPermissionBridge } from "./workflow-media-permission-bridge.js";
@@ -1265,6 +1265,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
           accountRef: event.accountId, targetRef: event.target, ...(event.senderId ? { requesterRef: event.senderId } : {}) });
       }
     },
+    choiceReplaced: (runRef) => pendingChoiceReplaced(workflowEngine.get(runRef)),
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
   // Before any dispatch work can start a Team Leader runtime (agent-dispatch::QR-003/AC-03).
   codexLeader?.compactSupersededHomes();

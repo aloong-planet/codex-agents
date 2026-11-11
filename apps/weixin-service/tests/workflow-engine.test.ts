@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { WorkflowEngine, type WorkflowTemplate } from "../src/workflow-engine.js";
+import { pendingChoiceReplaced, WorkflowEngine, type WorkflowTemplate } from "../src/workflow-engine.js";
 import { ConversationWorkflowTriggerAdapter } from "../src/conversation-workflow-trigger-adapter.js";
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 
@@ -3399,6 +3399,61 @@ describe("WorkflowEngine", () => {
       status: "cancelled", errorCode: "workflow_pending_superseded",
     });
     await reopened.close();
+  });
+
+  it("tells a choice that a newer workflow replaced from one that still waits, was cancelled, was answered or expired", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "weixin-workflow-choice-replaced-"));
+    tempDirs.push(directory);
+    const fixture = inputGateFixture("fixture.choice-replaced", 1_000);
+    let now = 1_800_000_000_000, sequence = 0;
+    const engine = new WorkflowEngine(path.join(directory, "workflow.sqlite"), {
+      now: () => now,
+      createRunId: () => `run-choice-replaced-${++sequence}`,
+      templates: [fixture.template],
+      providers: [{
+        catalog: () => fixture.catalog,
+        invoke: async (request: { capabilityId: string }) => request.capabilityId === fixture.searchCapability
+          ? { status: "succeeded" as const, output: { matches: ["Inbox.md", "Archive.md"] } }
+          : { status: "succeeded" as const, output: null },
+      }],
+    });
+    await engine.start();
+    const source = { accountRef: "account-a", targetRef: "target-a" };
+    const submit = (occurredAt: number) => engine.submit({
+      triggerId: `fixture-choice-replaced-${occurredAt}`, source: "fixture", occurredAt, requestedWorkflowId: fixture.template.id, ...source,
+    });
+    const pendingOf = (runId: string) => engine.get(runId)!.pendingInput!;
+
+    // The second run's choice replaces the first one's, and waits itself.
+    const first = await submit(1), second = await submit(2);
+    expect(pendingChoiceReplaced(engine.get(first.runId))).toBe(true);
+    expect(pendingChoiceReplaced(engine.get(second.runId))).toBe(false);
+
+    await engine.cancelPending({
+      cancellationId: "cancel-choice-replaced", signalRef: pendingOf(second.runId).signalRef,
+      expectedRevision: pendingOf(second.runId).revision, ...source,
+    });
+    expect(engine.get(second.runId)).toMatchObject({ status: "cancelled" });
+    expect(pendingChoiceReplaced(engine.get(second.runId))).toBe(false);
+
+    const third = await submit(3);
+    await engine.signal({
+      signalId: "answer-choice-replaced", signalRef: pendingOf(third.runId).signalRef,
+      expectedRevision: pendingOf(third.runId).revision, ...source, selection: "Archive.md",
+    });
+    expect(engine.get(third.runId)).toMatchObject({ status: "succeeded" });
+    expect(pendingChoiceReplaced(engine.get(third.runId))).toBe(false);
+
+    const fourth = await submit(4), expiring = pendingOf(fourth.runId);
+    now = expiring.expiresAt;
+    await expect(engine.signal({
+      signalId: "late-choice-replaced", signalRef: expiring.signalRef, expectedRevision: expiring.revision, ...source, selection: "Inbox.md",
+    })).rejects.toThrow("workflow_signal_expired");
+    expect(engine.get(fourth.runId)).toMatchObject({ status: "blocked" });
+    expect(pendingChoiceReplaced(engine.get(fourth.runId))).toBe(false);
+
+    expect(pendingChoiceReplaced(engine.get("run-choice-replaced-unknown"))).toBe(false);
+    await engine.close();
   });
 
   it("does not let an older slow run supersede a newer run that reached the input gate first", async () => {
