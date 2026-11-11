@@ -27,8 +27,6 @@ import { conversation } from "./support/dispatch-runtime.js";
 // case shows it: only the pre-Assignment code produces such a request, and a case here could only write one by hand. The upgrade
 // case in agent-dispatch.integration.test.ts builds one with that code, but through main the fixture router never answers with a
 // new goal.
-// Gap: a group whose messages could not be taken in, because the pass over them failed, is free again for Executors' ends to ask
-// about replaced choices. No case shows it, for the same lack of a storage seam.
 // Not driven, by decision: the cancel of a queued or proposed request, and a cancel recovered at a start, are recorded before the
 // request's choices are closed, so a stop between the two leaves them open and no later start closes them (agent-dispatch
 // Implementation Decisions). No case pins that outcome.
@@ -1474,6 +1472,86 @@ it("keeps a supplement taken in while a request closes with a failed Assignment,
   expect(runs).toBe(3);
 });
 
+// What a kept supplement gets today when its request ends with every Assignment stopped (agent-dispatch failure mode "Requester
+// supplements a request while its Assignments run, and every one of them is then stopped, or supplements it while it closes
+// after a supplement turn that took no Assignment"). The row states today's handling.
+it.each([
+  ["a newer workflow replaced", "replaced"],
+  ["the requester cancelled", "cancelled"],
+] as const)("keeps a supplement taken in while the only Assignment ran, without a reply, and never acts on it when the request ends after %s that Assignment's choice", async (_name, how) => {
+  // The Executor ends, with the choice of run-1, only when the case lets it go.
+  const letGo = deferred();
+  const turns: string[] = [];
+  const leader: TeamLeader = { plan: async () => { turns.push("plan"); return JSON.parse(plan); }, supplement: async () => { turns.push("supplement"); return affectFirst(); },
+    close: async () => { turns.push("close"); return "已收尾。"; } };
+  let runs = 0;
+  const executor: DispatchExecutor = { run: async () => { runs += 1; await letGo.promise; return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }; }, close: () => {} };
+  const replaced = new Set<string>();
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, how === "cancelled" ? { pending: choosing("cancelled") } : { choiceReplaced: (runRef) => replaced.has(runRef) });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(classified).toEqual(["dispatch", "supplement"]), { timeout: 2000, interval: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", attempt: 0, assignments: [{ status: "running" }] });
+  } finally { letGo.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  // The choice is closed with the Assignment stopped: the requester cancels it, or a newer workflow replaced it, which is noticed
+  // once a message that concerns no request is dealt with.
+  if (how === "cancelled") dispatch.admit(event("three", "choose:1"));
+  else { replaced.add("run-1"); dispatch.admit(event("three", "retry:none")); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(messages(deliveries).at(-1)).toBe(how === "cancelled" ? "已取消这次选择。" : "已收尾。"), { timeout: 2000, interval: 10 });
+  // A cancelled request takes no retry, so nothing brings the supplement back.
+  dispatch.admit(event("four", "retry:one"));
+  await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe("cli_sam: 这项请求没有可重试的失败处理；已完成的操作不会重新执行。"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // Nothing was posted for the supplement, and nothing of it has started.
+  expect(posts(deliveries).slice(0, -1)).toEqual(how === "cancelled"
+    ? [`cli_alice: ${start(1)}`, "cli_alice: 请选择要发送的文件。", "cli_alice: 已取消这次选择。"]
+    : [`cli_alice: ${start(1)}`, "cli_alice: 请选择要发送的文件。", UNDETERMINED, `cli_alice: ${replacedPost(1, "处理请求")}`, "cli_alice: 已收尾。"]);
+  expect(dispatch.getState().jobs[0]).toMatchObject({ status: "cancelled", attempt: 0, assignments: [{ status: "cancelled", attempt: 0 }] });
+  expect(turns).toEqual(how === "cancelled" ? ["plan"] : ["plan", "close"]);
+  expect(runs).toBe(1);
+});
+
+it("keeps a supplement taken in while a request closes after a supplement turn that took no Assignment, without a reply, and never acts on it", async () => {
+  // The Assignment raises the choice of run-1. The Team Leader's supplement turn asks only for another team's part, which no team
+  // takes, so the supplement's attempt has no Assignment. The closing turn ends only when the case lets it.
+  const closing = deferred();
+  const turns: string[] = [];
+  const leader: TeamLeader = { plan: async () => { turns.push("plan"); return JSON.parse(plan); },
+    supplement: async () => { turns.push("supplement"); return { affected: [], assignments: [], decisions: [], parts: [], help: [HELP] }; },
+    close: async () => { turns.push("close"); await closing.promise; return "已收尾。"; } };
+  let runs = 0;
+  const executor: DispatchExecutor = { run: async () => { runs += 1; return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }; }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { assign: async ({ parts }) => parts.map(({ part }) => ({ part, agentId: null, summary: "" })) });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(turns).toEqual(["plan", "supplement", "close"]), { timeout: 2000, interval: 10 });
+    // The request's only Assignment was superseded, and the attempt that is being closed has none.
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", attempt: 1, assignments: [{ status: "cancelled", attempt: 0 }] });
+    dispatch.admit(event("three", "supplement:one"));
+    await vi.waitFor(() => expect(classified).toEqual(["dispatch", "supplement", "supplement"]), { timeout: 2000, interval: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally { closing.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  // The second supplement was neither refused nor acted on: the Coordinator posted nothing, and no turn or Executor started for it.
+  expect(from(deliveries, "cli_sam")).toEqual([]);
+  expect(from(deliveries, "cli_alice")).toHaveLength(3);
+  expect(dispatch.getState().jobs[0]).toMatchObject({ status: "cancelled", attempt: 1, assignments: [{ status: "cancelled", attempt: 0 }] });
+  expect(turns).toEqual(["plan", "supplement", "close"]);
+  expect(runs).toBe(1);
+});
+
 it("tells of a replaced choice also when the Executor whose end revealed it was being stopped by a cancel", async () => {
   // Alice's request waits on the choice of run-1. Bill's Executor ends, cancelled, only when the case lets it, after his request's
   // cancel was taken in, and from then on the host says that run-1's choice was replaced.
@@ -1578,6 +1656,134 @@ it("notices a choice that an Executor's end replaced while the last message of i
   // No further message arrives, and Bill's Assignment is stopped all the same.
   await vi.waitFor(() => expect(statuses()).toEqual(["cancelled", "cancelled", "completed"]), { timeout: 2000, interval: 10 });
   expect(from(deliveries, "cli_bill").filter((message) => message.includes("已被新的操作取代"))).toEqual([replacedPost(2, "处理请求")]);
+});
+
+/** Alice's request waits on the choice of run-1. Bill's Executor ends only once `letGo` does, and from then on `replaced` holds run-1. */
+function replacingLater(letGo: Promise<void>, replaced: Set<string>): DispatchExecutor {
+  return { run: async (job) => {
+    if (job.id === "one") return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    await letGo;
+    replaced.add("run-1");
+    return { status: "completed", message: "行程已安排。", runRef: "run-2" };
+  }, close: () => {} };
+}
+
+it("asks about replaced choices at an Executor's end that follows the step in which its group's messages were found dealt with", async () => {
+  const letGo = deferred();
+  const replaced = new Set<string>();
+  // A message that concerns no request is taken in. Once it is dealt with, the pass asks the host about run-1, which is not
+  // replaced yet, and the host lets Bill's Executor go in that very answer.
+  let lastAsk = false;
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), recordingLeader(JSON.parse(plan), []), replacingLater(letGo.promise, replaced), deliveries, {
+    classifying: (input) => { if (input.event.text === "retry:none") lastAsk = true; },
+    choiceReplaced: (runRef) => { if (lastAsk) { lastAsk = false; letGo.resolve(); } return replaced.has(runRef); } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "bill"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "retry:none"));
+    // No further message arrives and no other Executor ends: only the end of Bill's Executor can ask about run-1.
+    await vi.waitFor(() => expect(dispatch.getState().jobs.map(({ status }) => status)).toEqual(["cancelled", "completed"]), { timeout: 2000, interval: 10 });
+  } finally { letGo.resolve(); }
+  expect(from(deliveries, "cli_alice")).toEqual([start(1), "请选择要发送的文件。", replacedPost(1, "处理请求"), "one 已收尾。"]);
+});
+
+it("asks about replaced choices at an Executor's end after the pass over its group's messages failed", async () => {
+  const letGo = deferred();
+  const replaced = new Set<string>();
+  // While a message that concerns no request is classified, the host stops saying whether a sender is authorized, until the pass
+  // over the group's messages has failed. That message is left as it was, so nothing takes the group's messages in again.
+  let failing = false;
+  const reported: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), recordingLeader(JSON.parse(plan), []), replacingLater(letGo.promise, replaced), deliveries, {
+    choiceReplaced: (runRef) => replaced.has(runRef), reported, classifying: (input) => { if (input.event.text === "retry:none") failing = true; },
+    authorized: () => { if (failing && !reported.includes("dispatch_intake_failed")) throw new Error("authorization_unavailable"); return true; } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "bill"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "retry:none"));
+    await vi.waitFor(() => expect(reported).toEqual(["dispatch_intake_failed"]), { timeout: 2000, interval: 10 });
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "waiting", assignments: [{ status: "waiting" }] });
+  } finally { letGo.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs.map(({ status }) => status)).toEqual(["cancelled", "completed"]), { timeout: 2000, interval: 10 });
+  expect(from(deliveries, "cli_alice")).toEqual([start(1), "请选择要发送的文件。", replacedPost(1, "处理请求"), "one 已收尾。"]);
+});
+
+it("stops the waiting Assignment and keeps the supplement for the attempt's end when a supplement of a request that still runs is also the new goal replacing that Assignment's choice", async () => {
+  // The first Assignment raises the choice of run-1 and completes when it runs again. The second ends when the case lets it go.
+  const letGo = deferred();
+  let firstRuns = 0, supplementTurns = 0;
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    if (assignment.title === "核对价格") { await letGo.promise; return { status: "completed", message: "价格已核对。" }; }
+    firstRuns += 1;
+    return firstRuns === 1 ? { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" } : { status: "completed", message: "已按补充处理。" };
+  }, close: () => {} };
+  const closings: Closing[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  // This host takes the supplement as a new goal that replaces the choice of run-1; the Coordinator takes it as the request's supplement.
+  const dispatch = dispatchWith(directory(), recordingLeader(two, closings, async () => { supplementTurns += 1; return affectFirst(); }), executor, deliveries,
+    { pending: async (inbound) => inbound.text === "supplement:one" ? { handled: false, cancelledRunRef: "run-1" } : { handled: false } });
+  const request = () => dispatch.getState().jobs[0];
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(request()?.assignments.map(({ status }) => status)).toEqual(["cancelled", "running"]), { timeout: 2000, interval: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The request still runs its attempt. Nothing is posted for the stopped Assignment, and the supplement has started nothing.
+    expect(request()).toMatchObject({ status: "running", attempt: 0 });
+    expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]);
+    expect(supplementTurns).toBe(0);
+  } finally { letGo.resolve(); }
+  // The attempt ends completed, so the supplement starts an attempt of its own, which reruns the stopped Assignment.
+  await vi.waitFor(() => expect(request()).toMatchObject({ status: "completed", attempt: 1, assignments: [{ status: "completed", attempt: 1 }, { status: "completed", attempt: 0 }] }),
+    { timeout: 2000, interval: 10 });
+  expect(closings).toEqual([{ request: "one", reports: [{ status: "cancelled", result: "" }, { status: "completed", result: "价格已核对。" }] },
+    { request: "one", reports: [{ status: "completed", result: "已按补充处理。" }, { status: "completed", result: "价格已核对。" }] }]);
+  expect(supplementTurns).toBe(1);
+  expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", "one 已收尾。", "我安排执行者 1（能力档 1）处理：整理文案。完成后会在本群汇报。", "one 已收尾。"]);
+});
+
+it("stops an Assignment whose choice a new goal replaced before its Executor ended, with the post about a replaced choice in place of its prompt", async () => {
+  // Alice's Executor has raised the choice of run-1 and ends only when the case lets it go. The message `bill` is a new goal: the
+  // host replaces that choice, and from then on says that it was replaced.
+  const letGo = deferred();
+  const replaced = new Set<string>();
+  const executor: DispatchExecutor = { run: async (job) => {
+    if (job.id !== "one") return { status: "completed", message: "行程已安排。" };
+    await letGo.promise;
+    return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+  }, close: () => {} };
+  const closings: Closing[] = [];
+  const reported: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), recordingLeader(JSON.parse(plan), closings), executor, deliveries, { reported, choiceReplaced: (runRef) => replaced.has(runRef),
+    pending: async (inbound) => { if (inbound.text === "bill") replaced.add("run-1"); return replacingGoal(inbound); } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "bill"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+    // No Assignment keeps run-1 yet, so the new goal ends nothing and nothing is posted for the first request.
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "running" }] });
+    expect(from(deliveries, "cli_alice")).toEqual([start(1)]);
+  } finally { letGo.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs.map(({ status }) => status)).toEqual(["cancelled", "completed"]), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled"]);
+  expect(closings.filter(({ request }) => request === "one")).toEqual([{ request: "one", reports: [{ status: "cancelled", result: "" }] }]);
+  // The requester was never shown the prompt, and is told why the Assignment stopped.
+  expect(from(deliveries, "cli_alice")).toEqual([start(1), replacedPost(1, "处理请求"), "one 已收尾。"]);
+  expect(reported).toEqual([]);
 });
 
 /**

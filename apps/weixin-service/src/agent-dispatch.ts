@@ -1093,8 +1093,9 @@ export class AgentDispatch {
     let post: { id: string; notice: Notice } | undefined;
     const reporting = !this.closing && !current.cancelRequested;
     if (reporting && ended.status === "waiting" && ended.runRef !== undefined && this.choiceReplaced(ended.runRef)) {
-      // Its own choice was replaced before it ended, by a workflow that started after its own. The prompt takes no answer, so it
-      // is not posted, and the Assignment ends as for any replaced choice.
+      // Its own choice was replaced before it ended, by a workflow that started after its own or by its requester's new goal,
+      // which found no Assignment waiting on the run yet. The prompt takes no answer, so it is not posted, and the Assignment
+      // ends as for any replaced choice.
       ended.status = "cancelled"; delete ended.result; post = this.replacedPost(current, ended);
     }
     if (reporting && ended.status === "waiting") {
@@ -1253,7 +1254,10 @@ export class AgentDispatch {
     catch { this.failure("dispatch_choice_state_failed"); return false; }
   }
 
-  /** Ends the Assignment that waits on a choice its requester's new goal replaced, if it still waits on it. Nothing is posted for it. */
+  /**
+   * Ends the Assignment that waits on a choice its requester's new goal replaced, if it still waits on it. Nothing is posted for
+   * it. An Assignment whose Executor has not ended keeps no run yet, so nothing ends here: its own end finds the run replaced.
+   */
   private endReplacedByGoal(runRef: string, event: InboundContent): void {
     const request = this.requestOfRun(runRef, event);
     if (!request || !goesOn(request)) return;
