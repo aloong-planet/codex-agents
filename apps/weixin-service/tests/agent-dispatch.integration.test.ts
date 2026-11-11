@@ -44,6 +44,11 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
+// - Main closes a cancelled request's open choice for an Assignment's workflow run. For a request stored before Assignments existed,
+//   whose run is keyed by its message, it is not driven: the upgrade case leaves its waiting request alone. Retest condition: that
+//   case cancels its waiting request and reads the run's status.
+// - Which messages the real pending-choice router passes on to the Coordinator while a choice is open, so that it can cancel the
+//   request, is model behavior; the fixture router passes on every text that names no candidate.
 // - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
 //   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
 //   closing is unit-tested.
@@ -881,6 +886,43 @@ it("cancels the unfinished Assignments of a request and reports the completed on
     expect(cancelled.agentDispatch?.jobs[0]?.assignments.map(({ status }) => status)).toEqual(["completed", "cancelled", "cancelled"]);
     expect(readFileSync(join(business, "demo-vault", "weekly.txt"), "utf8")).toBe("内容 weekly.txt");
     expect(cancelled.fixtureModelRequests).toHaveLength(3);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("closes a cancelled request's open file choice, so answering it afterwards sends nothing and the request stays cancelled", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-files-"));
+  let running: Running | undefined;
+  const aliceTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.alice?.text.map(({ message }) => message) ?? [];
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: [
+      { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+        candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }] }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    const choice = waiting.workflows!.runs.find(({ status }) => status === "needs_input")!;
+    // The fixture pending-choice router passes this text on as an ordinary message, so the Coordinator takes it as the request's cancel.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_stop", "这项请求不用做了", control(waiting.agentDispatch!.jobs[0]!.id, "cancel")));
+    const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 3);
+    // The answer, then a message the Coordinator answers: once that reply is out, the answer before it has been processed.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_answer", "2", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" }));
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" }));
+    const answered = await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+    const runOf = (state: Awaited<ReturnType<Running["state"]>>) => state.workflows?.runs.find(({ runRef }) => runRef === choice.runRef);
+    console.log(JSON.stringify({ kind: "dispatch_cancelled_choice", commands: ["列出 Agent 笔记让我选发哪个", "这项请求不用做了", "2", "另一个问题"],
+      afterCancel: { jobs: cancelled.agentDispatch, run: runOf(cancelled) }, afterAnswer: { jobs: answered.agentDispatch, run: runOf(answered), outboxes: answered.agentFixtureOutboxes,
+        coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase), executorTurns: answered.fixtureModelRequests?.length } }));
+    expect(runOf(cancelled)).toMatchObject({ status: "cancelled", effects: [] });
+    expect(runOf(answered)).toMatchObject({ status: "cancelled", effects: [] });
+    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
+    // One cancel report after the start message and the choice; no file, no reply to the answer, no further turn.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"), "已停止继续处理。已经完成的操作不会自动撤销。"]);
+    expect(answered.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    expect(answered.feishuFixtureMediaOutbox).toEqual([]);
+    expect(answered.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual(["请说明另一个问题。"]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
+    expect(answered.fixtureModelRequests).toHaveLength(1);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 

@@ -33,6 +33,8 @@ type AssignmentStatus = DispatchAssignment["status"];
 const ENDED: readonly AssignmentStatus[] = ["completed", "failed", "cancelled", "interrupted", "blocked"];
 const UNFINISHED: readonly AssignmentStatus[] = ["queued", "running", "waiting"];
 const INTERRUPTED = "服务中断，本次处理已停止。";
+/** The Coordinator's reply to a control of a request that is no longer active, and to an answer to a cancelled request's choice. */
+const REQUEST_ENDED = "这项请求已经结束或无法继续，请说明新的需求。";
 
 /** How an Assignment failed, as far as the host knows it. */
 export type AssignmentFailure = Readonly<{ kind: "reported"; toolRefused: boolean }> | Readonly<{ kind: "error"; error: unknown }> | Readonly<{ kind: "shutdown" }>;
@@ -199,6 +201,11 @@ export class AgentDispatch {
     presentation(event: InboundContent, runRef: string): Omit<PendingPresentation, "acceptedAt"> | undefined;
     presented(presentation: PendingPresentation): void;
     pending?(event: InboundContent): Promise<DispatchPendingResult>;
+    /**
+     * Closes every choice the request's Executors left open, so that no later answer resumes work its requester cancelled.
+     * `assignments` are the request's own; a request stored before Assignments existed has none.
+     */
+    closeChoices?(job: DispatchJob, assignments: readonly DispatchAssignment[]): Promise<void>;
     report(code: string): void;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
@@ -232,7 +239,10 @@ export class AgentDispatch {
     for (const row of this.database.prepare("SELECT payload, accepted_at FROM dispatch_notice WHERE state = 'accepted' AND accepted_at IS NOT NULL ORDER BY sequence").all()) {
       this.markPresented(JSON.parse(String(row.payload)) as Notice, Number(row.accepted_at));
     }
-    for (const job of this.jobs()) if (job.status === "running") this.recover(job);
+    // Every request is recovered before anything is awaited, so no message is taken in while one is still as the stop left it.
+    const cancelled: DispatchJob[] = [];
+    for (const job of this.jobs()) if (job.status === "running" && this.recover(job)) cancelled.push(job);
+    for (const job of cancelled) await this.closeChoices(job);
     for (const row of this.database.prepare("SELECT id, payload FROM dispatch_notice WHERE state = 'queued' ORDER BY sequence").all()) {
       await this.deliverNotice(String(row.id), JSON.parse(String(row.payload)) as Notice);
     }
@@ -279,18 +289,19 @@ export class AgentDispatch {
    * A request that was running when the service stopped. A cancelled one stays cancelled. Each running Assignment becomes
    * interrupted and is reported in its own post; the request then returns to its worker, which runs what was queued and
    * closes it with its Team Leader's turn, which is tool-free and safe to repeat (agent-dispatch::REQ-008/AC-02).
+   * Returns whether the request was cancelled, so that its choices are closed once every request is recovered.
    */
-  private recover(job: DispatchJob): void {
+  private recover(job: DispatchJob): boolean {
     if (job.definitionsVersion === undefined) {
       // Requests stored before Assignments existed keep the handling they were stored under.
       job.status = "failed"; job.result = `服务中断，本次处理已停止。${this.options.completedWork(job, [])}已有操作不会自动重复；请核对结果后明确重试。`;
       this.recordResult(job);
-      return;
+      return false;
     }
     if (job.cancelRequested) {
       this.cancel(job);
       this.recordResult(job, this.hasAttemptAssignments(job) ? this.closingId(job) : undefined);
-      return;
+      return true;
     }
     this.transaction(() => {
       for (const assignment of this.assignments(job.id)) {
@@ -304,6 +315,7 @@ export class AgentDispatch {
       this.blockDependents(job.id);
       job.status = "queued"; this.save(job);
     });
+    return false;
   }
 
   private kick(): void {
@@ -355,6 +367,11 @@ export class AgentDispatch {
           const agent = this.options.agents().find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = pending.runRef ? this.requestOfRun(pending.runRef, event) : undefined;
+          if (original && (original.cancelRequested || original.status === "cancelled")) {
+            // The requester stopped this request: an answer to its choice changes nothing, starts nothing and gets the reply of an ended request.
+            await this.coordinate(event, bindingHash, REQUEST_ENDED);
+            this.finishInput(event.key); continue;
+          }
           const waiting = original && this.assignments(original.id).find((assignment) => assignment.status === "waiting" &&
             (assignment.runRef === pending.runRef || (assignment.runRef === undefined && original.runRef === pending.runRef)));
           const several = original !== undefined && this.assignments(original.id).length > 1;
@@ -415,11 +432,17 @@ export class AgentDispatch {
           const job = this.job(decision.requestId!);
           if (!job || job.event.senderId !== event.senderId || job.event.target !== event.target || !this.eligible(job.event, job.bindingHash) ||
               !["queued", "running", "waiting", "proposed"].includes(job.status)) {
-            await this.coordinate(event, bindingHash, "这项请求已经结束或无法继续，请说明新的需求。");
+            await this.coordinate(event, bindingHash, REQUEST_ENDED);
           } else if (decision.kind === "cancel") {
             job.cancelRequested = true; job.supplements = [];
-            if (job.status === "running" && this.workers.has(job.id)) { this.save(job); this.workers.get(job.id)!.abort.abort(); }
-            else {
+            if (job.status === "running" && this.workers.has(job.id)) {
+              this.save(job); this.workers.get(job.id)!.abort.abort();
+              // A choice that is already open is closed now; one an Executor raises while it stops is closed when the worker ends.
+              await this.closeChoices(job);
+            } else {
+              // A waiting request has no worker, so nothing else changes it while its choice is closed. The choice is closed before the
+              // cancel is recorded: a stop between the two leaves a request that takes the cancel again, not a cancelled one whose choice is open.
+              if (job.status === "waiting") await this.closeChoices(job);
               this.cancel(job);
               const report = this.recordResult(job, `${event.key}:cancelled`);
               await this.deliverNotice(report.id, report.notice);
@@ -530,7 +553,7 @@ export class AgentDispatch {
         }
       });
     }
-    if (job.cancelRequested) this.cancel(job);
+    if (job.cancelRequested) { await this.closeChoices(job); this.cancel(job); }
     // Delivery is a separate outcome: failure here must never restart completed business work.
     const report = this.recordResult(job, this.hasAttemptAssignments(job) ? this.closingId(job) : undefined);
     if (!this.closing) await this.deliverNotice(report.id, report.notice);
@@ -943,6 +966,15 @@ export class AgentDispatch {
       fixtureMessageId: this.fixtureMessageId(job) };
   }
   private fixtureMessageId(job: DispatchJob): string { return job.fixtureMessageId ?? job.executionEvent?.messageId ?? job.event.messageId; }
+
+  /**
+   * Has the host close the choices the request's Executors left open (agent-dispatch::REQ-007/AC-03). A choice that cannot be
+   * closed stops no cancel: the failure is reported, and an answer to it is still held where pending answers are taken in.
+   */
+  private async closeChoices(job: DispatchJob): Promise<void> {
+    try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
+    catch { this.failure("dispatch_choice_close_failed"); }
+  }
 
   /** The requester's cancellation of the whole request: every unfinished Assignment stops; completed effects are reported, not undone. */
   private cancel(job: DispatchJob): void {

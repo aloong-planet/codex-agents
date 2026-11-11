@@ -1085,6 +1085,9 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Under the real-model seam nothing is injected, so each turn of the three is recorded for the state to show what it decided.
   const recorded = fixtureDispatchRealModel ? recordDispatchTurns({ classifier, leader, executor }) : { classifier, leader, executor, turns: undefined };
   fixtureDispatchTurns = recorded.turns;
+  // A request's workflow runs are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
+  const runEvents = (job: import("./agent-dispatch-types.js").DispatchJob, assignments: readonly import("./agent-dispatch-types.js").DispatchAssignment[]) =>
+    assignments.length ? assignments.map((assignment) => executorEvent(job, assignment)) : [job.executionEvent ?? job.event];
   const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier: recorded.classifier, executor: recorded.executor, authorized,
     leader: recorded.leader,
     definitionsVersion: () => teams.current().version, team: teamView, revision: contextRevision,
@@ -1097,9 +1100,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     completedWork: (job, assignments) => {
       const files = localFileTools.dispatchEvidence(job.id);
       const schedules = scheduledTasks.dispatchEvidence(job.id);
-      // Workflow effects are keyed by each Assignment's Executor event; a request stored before Assignments keys them by its message.
-      const events = assignments.length ? assignments.map((assignment) => executorEvent(job, assignment)) : [job.executionEvent ?? job.event];
-      const effects = [...new Map(events.map((event) => [event.key, event])).values()]
+      const effects = [...new Map(runEvents(job, assignments).map((event) => [event.key, event])).values()]
         .flatMap((event) => workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.effects ?? []);
       const accepted = effects.filter((effect) => effect.state === "accepted").length;
       const unknown = effects.filter((effect) => effect.state === "unknown" || effect.state === "prepared").length;
@@ -1129,6 +1130,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       if (!result.handled) return { handled: false, ...(cancelled ? { cancelledRunRef: request.runId } : {}) };
       return { handled: true, ...destination, runRef: request.runId,
         result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
+    },
+    closeChoices: async (job, assignments) => {
+      for (const event of runEvents(job, assignments)) {
+        const choice = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.pendingInput;
+        // An expired choice takes no answer any more.
+        if (!choice || choice.expiresAt <= Date.now()) continue;
+        await workflowEngine.cancelPending({ cancellationId: `dispatch-cancel:${choice.signalRef}`, signalRef: choice.signalRef, expectedRevision: choice.revision,
+          accountRef: event.accountId, targetRef: event.target, ...(event.senderId ? { requesterRef: event.senderId } : {}) });
+      }
     },
     delivery: (input) => channel.send({ ...input, channel: "feishu" }), report: (code) => process.stderr.write(`${code}\n`) });
   channel.bindAgentDispatcher((event) => dispatch.admit(event), new Map([...dispatchApplications].map(([id, application]) => [id, { transport: application.transport, ready: () => application.ready }])),
