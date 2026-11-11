@@ -230,11 +230,11 @@ const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // The Skill Library: skills imported from local folders as copies, which Executor profiles select (skill-library spec). Its
 // directory is service state, outside every file grant (ADR-0029). Which versions requests can still run with is known once
 // the dispatch records can be read; until then the library removes none.
-let neededSkillVersions: (() => ReadonlySet<string>) | undefined;
+const skillSnapshots: { needed?: () => ReadonlySet<string> } = {};
 const skillLibrary = new SkillLibrary({ directory: path.join(consoleStateDirectory, "skill-library"), audit: consoleAudit,
   usedBy: (id) => teamManagement?.skillUses(id) ?? [],
   reimported: ({ id, version }) => teamManagement?.followSkills({ [id]: version }),
-  needed: () => neededSkillVersions?.() });
+  needed: () => skillSnapshots.needed?.() });
 // In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
 const fixtureOnboarding = fixtureMode ? new FixtureOnboardingPlatform() : undefined;
 if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixtureOnboarding.configure(JSON.parse(process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING));
@@ -1371,7 +1371,7 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
 // A skill version stays stored while a profile of the current definitions selects it, or a request that can still run or be
 // retried was admitted with it: such a request creates Executor runtimes from its own definitions version.
-neededSkillVersions = () => {
+skillSnapshots.needed = () => {
   const needed = new Set<string>(), seen = new Set<number>();
   const add = (definitions: TeamDefinitions | undefined) => {
     for (const team of definitions?.teams ?? []) for (const profile of team.executorProfiles) for (const ref of profile.skills ?? []) needed.add(skillKey(ref));

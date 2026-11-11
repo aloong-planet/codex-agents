@@ -337,7 +337,7 @@ describe("the library's records", () => {
     await library.reimport(skill.id, ((await library.compare(skill.id)) as { fingerprint: string }).fingerprint, BROWSER);
     library.remove(skill.id, BROWSER);
     const browser = { id: "browser-1", label: "Chrome · macOS" };
-    expect(audit().map(({ at: _at, ...entry }) => entry)).toEqual([
+    expect(audit().map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "at")))).toEqual([
       { by: "browser", browser, event: "skill_imported", skill: skill.id, name: "patch-writer", version: 1, source: folder, files: 9 },
       { by: "browser", browser, event: "skill_reimported", skill: skill.id, name: "patch-writer", version: 2, source: folder, files: 8, changed: 2 },
       { by: "browser", browser, event: "skill_deleted", skill: skill.id, name: "patch-writer", version: 2, source: folder },
@@ -386,7 +386,7 @@ describe("SKILL.md front matter", () => {
     ["a double-quoted value with a colon and an escape", "---\nname: \"trip-check\"\ndescription: \"核对：站名\\t换乘\"\n---\n", { name: "trip-check", description: "核对：站名\t换乘" }],
     ["a single-quoted value", "---\nname: 'trip-check'\ndescription: 'it''s checked'\n---\n", { name: "trip-check", description: "it's checked" }],
     ["a folded block and a continued plain value", "---\nname: trip-check\ndescription: >-\n  逐段核对\n  站名与换乘\nwhen_to_use: 出行\n  之前\n---\n", { name: "trip-check", description: "逐段核对 站名与换乘" }],
-    ["Windows line ends and a byte order mark", "﻿---\r\nname: trip-check\r\ndescription: 核对\r\n---\r\n", { name: "trip-check", description: "核对" }],
+    ["Windows line ends and a byte order mark", "\u{FEFF}---\r\nname: trip-check\r\ndescription: 核对\r\n---\r\n", { name: "trip-check", description: "核对" }],
     ["no closing line", "---\nname: trip-check\ndescription: 核对\n", {}],
     ["keys only in the body", "# trip-check\n\nname: trip-check\ndescription: 核对\n", {}],
   ])("reads %s", (_what, text, found) => {

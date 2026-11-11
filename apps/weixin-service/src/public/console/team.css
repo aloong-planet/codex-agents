@@ -61,6 +61,7 @@
 .atm-profile-head strong{font-size:12px}
 .atm-profile-head .acv2-button{min-height:24px;padding:2px 7px;font-size:10px}
 .atm-field-gap{margin-top:10px}
+.atm-skill-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:6px 14px}
 .atm-roster-preview{margin-top:10px;font-size:10px;color:var(--acv-muted);line-height:1.8}
 .atm-group-list{display:flex;flex-direction:column;gap:6px}
 .atm-group-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}

@@ -450,7 +450,8 @@ function described(text: string): Readonly<{ name: string; description: string }
  * Each value is a plain scalar, a quoted one or a block scalar (`|`, `>`), which may continue on indented lines.
  */
 export function frontMatter(text: string): Readonly<{ name?: string; description?: string }> {
-  const lines = text.replace(/^﻿/u, "").split(/\r?\n/u);
+  // A file may start with a byte order mark (U+FEFF), which is not part of its first line.
+  const lines = (text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text).split(/\r?\n/u);
   if (lines[0]?.trimEnd() !== "---") return {};
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   if (end < 0) return {};
