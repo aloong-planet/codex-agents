@@ -77,6 +77,11 @@ it("gives each Executor exactly its profile's skills as its request was admitted
     // Each Executor turn, in order: the first attempt, its retry after the re-import, and the request admitted afterwards.
     const loaded = (body: string, description: string) => [{ folder: trip, files: ["SKILL.md", "references/rules.md"], skillMd: skillMd("trip-check", description, body) }];
     expect(result.fixtureModelRequests!.map(({ skills }) => skills)).toEqual([loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v2", "逐段核对站名、换乘与开放时间")]);
+    // Each of those turns carries the skill as an input item that names its SKILL.md in that home: the App Server only lists a
+    // skill, and the item is what puts its text before the Executor's model (agent-dispatch::REQ-016/AC-04).
+    const carried = result.fixtureModelRequests!.map(({ input }) => (input as Array<{ type: string; name?: string; path?: string }>).filter(({ type }) => type === "skill"));
+    expect(carried.map((items) => items.map(({ name }) => name))).toEqual([["trip-check"], ["trip-check"], ["trip-check"]]);
+    for (const [item] of carried) expect(item!.path).toMatch(new RegExp(`/group-model-runtimes/dispatch-[0-9a-f]{64}/codex-home/skills/${trip}/SKILL\\.md$`, "u"));
     // Bill's Team Leader is told what the skill gives its preset, in the version of each request (agent-dispatch::REQ-011/AC-01).
     const first = skillLines(result, "请帮我规划周末一日行程"), second = skillLines(result, "再帮我规划周日行程");
     expect(first.length).toBeGreaterThan(0);

@@ -1135,8 +1135,11 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       if (!chatId) throw new Error("dispatch_group_unbound");
       const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
       fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
-      // The home gets exactly its profile's skills in the request's versions, at every creation (skill-library::REQ-002).
-      return isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId, skills: (directory) => skillLibrary.materialize(skills, directory) }, tools);
+      // The home gets exactly its profile's skills in the request's versions, at every creation (skill-library::REQ-002), and
+      // every turn of the runtime carries them, which is how its model comes to read them.
+      let written: ReturnType<SkillLibrary["materialize"]> = [];
+      const runtime = isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId, skills: (directory) => { written = skillLibrary.materialize(skills, directory); } }, tools);
+      return { ...runtime, skills: written };
     },
     prepareThread: (job, assignment, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? executorEvent(job, assignment).messageId, assignment.title)); },
     capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event,

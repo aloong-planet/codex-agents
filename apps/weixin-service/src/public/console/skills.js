@@ -75,7 +75,7 @@
     const scripts = preview.files.filter((file) => file.script).length;
     return `<section class="acf-section asl-preview"><h3>${esc(preview.name)}</h3><p class="asl-desc">${esc(preview.description)}</p>`
       + `<div class="acf-sub">将导入 ${preview.files.length} 个文件<small>${scripts ? `其中 ${scripts} 个是脚本文件` : ""}</small></div>${filesHtml(preview.files)}`
-      + '<div class="acf-grant"><strong>确认导入</strong> 这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。</div>'
+      + '<div class="acf-grant"><strong>确认导入</strong> 这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。执行者只读取 SKILL.md；其他文件会一并复制，但执行者目前读不到，脚本也不会运行。</div>'
       + '<div class="acf-row-actions"><button class="acv2-button acv2-primary" type="button" data-import-confirm>确认导入</button></div></section>';
   }
 

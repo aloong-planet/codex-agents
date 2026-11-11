@@ -98,9 +98,10 @@ describe("importing a folder", () => {
     expect(skill.files.map(({ path: file, size }) => [file, size])).toEqual(SAMPLE_PATHS.map((file) => [file, Buffer.from(SAMPLE_FILES[file]!).length]));
     expect(skill.files.find((file) => file.path === "vendor/blob.bin")!.sha256).toBe(digest(BINARY));
     expect(library.list()).toEqual([skill]);
-    // The copy is the folder, byte for byte: binary and large files like any other.
+    // The copy is the folder, byte for byte: binary and large files like any other. What was written comes back as a runtime's
+    // turns name it: the skill's name, and where its SKILL.md is.
     const home = temporary("skill-home-");
-    library.materialize([skill], home);
+    expect(library.materialize([skill], home)).toEqual([{ name: "patch-writer", path: path.join(home, skill.id, "SKILL.md") }]);
     expect(tree(home)).toEqual(expected(SAMPLE_FILES, skill.id));
   });
 

@@ -225,19 +225,19 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
     fs.writeFileSync(path.join(selectedSource, "references", "rules.md"), "rules\n");
     const selected = await library.import(selectedSource, (await library.read(selectedSource)).fingerprint, {});
     const otherSource = source("unselected-probe", "UNSELECTED-SKILL-BODY-9C7D");
-    await library.import(otherSource, (await library.read(otherSource)).fingerprint, {});
+    const unselected = await library.import(otherSource, (await library.read(otherSource)).fingerprint, {});
 
     const placement = { instance: `dispatch-${"e".repeat(64)}`, mediaRoot: media("profile-skills") };
     // The home's earlier run: skills of its own in both places, and the bundled skills installed as before the fix.
     const earlier = runtimeWithOwnSkills("dispatchAgent", placement);
     await runAsBeforeTheFix(earlier.runtime, earlier.runtimeRoot);
-    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, ...placement, environment, skills: (directory) => library.materialize([selected], directory) });
-    const written = path.join(fs.realpathSync(earlier.runtimeRoot), "codex-home", "skills", selected.id) + path.sep;
+    let written: ReturnType<SkillLibrary["materialize"]> = [];
+    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, ...placement, environment, skills: (directory) => { written = library.materialize([selected], directory); } });
+    expect(written).toEqual([{ name: "profile-probe", path: path.join(fs.realpathSync(earlier.runtimeRoot), "codex-home", "skills", selected.id, "SKILL.md") }]);
     const session = await AppServerSession.open(model.route(runtime));
     try {
-      const listed = await session.listSkills(runtime.cwd);
-      expect(listed.map((skill) => skill.name)).toEqual(["profile-probe"]);
-      expect(fs.realpathSync(listed[0]!.path).startsWith(written), listed[0]!.path).toBe(true);
+      // The App Server lists the skill under the very path the host hands to each turn.
+      expect((await session.listSkills(runtime.cwd)).map(({ name, path: file }) => ({ name, path: file }))).toEqual(written);
     } finally { session.close(); }
 
     model.respondWith(() => [assistantMessage("fake-model-reply")]);
@@ -245,8 +245,18 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       60_000, undefined, undefined, 60_000, isolatedConversationOptions("dispatchAgent", runtime, { structuredOutputSupported: true, agentId: "alice" }));
     try {
       const threadId = await conversation.startOrResume(undefined, runtime.cwd);
-      const from = model.requests.length;
-      await conversation.reply(threadId, `$profile-probe $unselected-probe $own-probe $own-home-probe $host-probe $${bundled.name} please`);
+      let from = model.requests.length;
+      // A turn that neither names the skill nor carries it shows the model only its catalog line: the copy alone is not read.
+      await conversation.reply(threadId, "please");
+      const plain = model.modelRequestsSince(from).at(-1)!;
+      expect(skillCatalog(plain)).toEqual(["profile-probe"]);
+      expect(modelInputText(plain)).not.toContain("PROFILE-SKILL-BODY-4F2B");
+      // The turn as the host sends an Executor's: it carries the profile's skill, and the App Server puts its SKILL.md in. A skill
+      // the profile does not select is not loaded, by its name or by an item naming the library's own copy of it.
+      from = model.requests.length;
+      await conversation.reply(threadId, [{ type: "text", text: `$unselected-probe $own-probe $own-home-probe $host-probe $${bundled.name} please` },
+        ...written.map((skill) => ({ type: "skill" as const, ...skill })),
+        { type: "skill", name: "unselected-probe", path: fs.realpathSync(path.join(state, "skill-library", unselected.id, "1", "files", "SKILL.md")) }]);
       const request = model.modelRequestsSince(from).at(-1)!;
       expect(skillCatalog(request)).toEqual(["profile-probe"]);
       const input = modelInputText(request);

@@ -31,7 +31,9 @@ export type CodexConversationOptions = {
 export type CodexTurnModel = { model: string; effort: CodexReasoningEffort; outputSchema?: Record<string, unknown> };
 export type CodexUserInput =
   | { type: "text"; text: string }
-  | { type: "localImage"; path: string };
+  | { type: "localImage"; path: string }
+  /** A skill of the runtime's own home: the App Server puts its SKILL.md into the turn when `path` is one it lists. */
+  | { type: "skill"; name: string; path: string };
 
 export interface TurnPermissionGuard {
   request(params: PermissionRequest): Promise<Record<string, unknown>>;

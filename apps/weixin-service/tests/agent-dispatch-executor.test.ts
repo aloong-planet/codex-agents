@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -161,7 +161,7 @@ it("compacts a released Executor's home once its process has exited, before a re
 
 // skill-library::REQ-002, with the real runtime creation, library and compaction; only the App Server conversation is substituted.
 // Its turn reads the skills folder as the App Server would find it, and leaves the rollout a real turn leaves.
-it("gives an Executor's home exactly its profile's skills in the request's versions at every runtime creation, a retry's after compaction included", async () => {
+it("gives an Executor's home exactly its profile's skills in the request's versions at every runtime creation, a retry's after compaction included, and carries them on each turn", async () => {
   const state = scratch(), root = join(state, "group-model-runtimes"), reports: string[] = [];
   const library = new SkillLibrary({ directory: join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }), needed: () => undefined });
   const folder = (name: string, body: string) => {
@@ -177,7 +177,7 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
   const mealSource = folder("meal-plan", "meal-v1");
   await library.import(mealSource, (await library.read(mealSource)).fingerprint, {});
 
-  const atCreation: string[][] = [], duringTurn: Array<Record<string, string>> = [];
+  const atCreation: string[][] = [], duringTurn: Array<Record<string, string>> = [], carried: unknown[][] = [];
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: closeDispatchRuntime });
   const executor = new CodexDispatchExecutor(join(scratch(), "agent-sessions.sqlite"), {
     agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
@@ -186,19 +186,21 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
     createRuntime: (_job, scope, _tools, _agentId, skills) => {
       const home = join(root, scope);
       atCreation.push(existsSync(home) ? homeListing(home) : []);
+      let written: ReturnType<SkillLibrary["materialize"]> = [];
       const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: state, instance: scope, authHome: join(state, "no-auth"), environment: { PATH: "/usr/bin:/bin" },
-        skills: (directory) => library.materialize(skills, directory) });
+        skills: (directory) => { written = library.materialize(skills, directory); } });
       const agent = conversation("thread-A");
-      agent.runTurn.mockImplementation(async () => {
+      agent.runTurn.mockImplementation(async (_threadId, turn) => {
+        carried.push((await (turn as ChannelTurnAdapter).prepare()).input.filter((item) => item.type !== "text"));
         const loaded = join(home, "codex-home", "skills");
         duringTurn.push(Object.fromEntries(homeListing(loaded).filter((file) => !file.endsWith("/")).map((file) => [file, readFileSync(join(loaded, file), "utf8")])));
         mkdirSync(dirname(join(home, rolloutPath("thread-A"))), { recursive: true });
         writeFileSync(join(home, rolloutPath("thread-A")), `${JSON.stringify({ type: "session_meta", payload: { id: "thread-A" } })}\n`);
         return { owner: "model_owned", finalText: '{"message":"已整理好商品文案。","results":[]}' };
       });
-      return { agent, cwd: runtime.cwd };
+      return { agent, cwd: runtime.cwd, skills: written };
     },
-    tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+    tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
     // The request's definitions version names version 1 of the one skill its profile selects.
     profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, skills: [{ id: trip.id, version: 1 }],
       tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
@@ -216,6 +218,9 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
 
     const snapshot = { [`${trip.id}/SKILL.md`]: "---\nname: trip-check\ndescription: trip-check 的做法\n---\ntrip-v1\n", [`${trip.id}/references/rules.md`]: "trip-check rules\n" };
     expect(duringTurn).toEqual([snapshot, snapshot]);
+    // Each turn carries the skill as an input item naming its SKILL.md in the home, which is what puts it before the model.
+    const item = { type: "skill", name: "trip-check", path: join(realpathSync(root), readdirSync(root)[0]!, "codex-home", "skills", trip.id, "SKILL.md") };
+    expect(carried).toEqual([[item], [item]]);
     // The retry's runtime was created on a home compacted to its rollout: the skills were written again, not kept.
     expect(atCreation).toEqual([[], keptListing("thread-A")]);
     expect(reports).toEqual([]);

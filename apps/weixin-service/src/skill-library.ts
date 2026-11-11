@@ -252,9 +252,11 @@ export class SkillLibrary {
   /**
    * Writes the given versions into `directory`, one folder per skill named by its ID, each file equal to the stored one.
    * A version that is not stored, or a stored file that no longer matches its manifest, throws before the caller can run
-   * with other content than the request's snapshot (skill-library::REQ-002).
+   * with other content than the request's snapshot (skill-library::REQ-002). Returns each written skill's name with the real
+   * path of its SKILL.md, the form in which a runtime's App Server lists it.
    */
-  materialize(refs: readonly SkillRef[], directory: string): void {
+  materialize(refs: readonly SkillRef[], directory: string): Array<{ name: string; path: string }> {
+    const written: Array<{ name: string; path: string }> = [];
     for (const ref of refs) {
       const skill = this.version(ref);
       if (!skill) throw new Error("skill_version_unavailable");
@@ -264,7 +266,9 @@ export class SkillLibrary {
         fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
         if (copyFileSync(path.join(from, ...file.path.split("/")), target) !== file.sha256) throw new Error("skill_version_corrupt");
       }
+      written.push({ name: skill.name, path: fs.realpathSync(path.join(directory, ref.id, SKILL_MD)) });
     }
+    return written;
   }
 
   private latest(id: string): StoredSkill | undefined {
