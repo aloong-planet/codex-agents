@@ -141,7 +141,7 @@ Each entry records the time, the authorized browser or agent, and what changed, 
 - agent-console::REQ-005/AC-01: Replies from the Coordinator and Team Leaders in private conversations render as Markdown.
 - agent-console::REQ-005/AC-02: Only `http` and `https` links in a Markdown reply are clickable. They open in a new browser tab without access to the console page. Other link targets show as text.
 - agent-console::REQ-005/AC-03: Markdown replies never load images; an image shows its alternative text. Raw HTML shows as text.
-- agent-console::REQ-005/AC-04: All other displayed content renders as plain text, with no clickable links and no loaded images. This covers group messages, file names, Briefs, Executor results and MCP output.
+- agent-console::REQ-005/AC-04: All other displayed content renders as plain text, with no clickable links and no loaded images. This covers group messages, file names, Briefs, Executor results and MCP output. The QR code of QR creation on 团队管理 ([team-management::US-002/AC-01](team-management.md)) is not such content: the service draws that image itself from the link Feishu returned, and the page loads it as an image.
 - agent-console::REQ-005/AC-05: Long or malformed content wraps or scrolls inside its message or record and never widens the page.
 - agent-console::REQ-005/AC-06: Delivered files open only through the existing controlled file access.
 

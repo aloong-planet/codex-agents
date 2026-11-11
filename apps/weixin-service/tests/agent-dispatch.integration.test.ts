@@ -14,7 +14,7 @@ import { TeamRegistry } from "../src/team-registry.js";
 import { conversation } from "./support/dispatch-runtime.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
-import { decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
+import { allowNotes, decision, dispatchConfig, groupMessage, start } from "./support/real-main.js";
 import { seedMemory } from "./support/memory.js";
 import { scriptedPairing } from "./support/feishu-pairing.js";
 import { memoryAccountId } from "../src/agent-profile.js";
@@ -27,7 +27,8 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // validation and effects. The Coordinator's and Team Leaders' real runtime construction is driven by the case that sets
 // WORKFLOW_FIXTURE_COORDINATION_RUNTIME, where the fixture App Server answers their turns with the same injected outputs.
 // Gaps:
-// - A live run is still needed for real model semantics and for the default Team Leader runtimes outside that seam.
+// - Real model semantics, and the default Team Leader runtimes outside that seam, are not driven here. The opt-in real-model suite
+//   (agent-dispatch-real-model.test.ts) drives them for single-turn requests; the rest still needs a live run.
 // - The upgrade case covers the stored states the pre-05 fixture mode can produce. A state reached only in production, such as
 //   an old request whose team was later removed from the local configuration, keeps the existing authorization fencing,
 //   which channel-startup's "fails closed for an unavailable assignee" cases drive; no case here builds it.
@@ -36,15 +37,16 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Outside fixture mode the dispatch curator commits through a memory tool host with no notification route and no reminder
 //   ownership, so a planned event in a Team Leader's or Executor's memory creates no reminder. Fixture mode replaces both
 //   curators with recorders, so only code review and a live run cover that tool host.
-// - Whether a real Team Leader divides work sensibly, and which Assignments it marks affected by a supplement, needs a live run;
-//   the fixture injects both.
+// - Whether a real Team Leader divides work sensibly is judged from the real-model suite's run records. Which Assignments it marks
+//   affected by a supplement still needs a live run. The fixture injects both.
 // - Main records an Executor's memory capture with its Assignment's frozen sender. Fixture mode's curators record only the account
 //   and the turns, so no case observes that sender. Retest condition: a fixture curator that records each turn's source sender.
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
-// - Whether a real Team Leader marks sensible dependencies, and whether its closing names the Assignments left not started and
-//   the retry order, needs a live run; the fixture injects the plan and the closing. The host's own fallback closing is unit-tested.
+// - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
+//   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
+//   closing is unit-tested.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -382,6 +384,29 @@ it("builds the Coordinator's and the Team Leader's runtimes from their resolved 
     expect(result.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
       "我安排执行者 1（能力档 1）处理：规划周末一日行程。完成后会在本群汇报。", "周末一日行程已规划好。"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// The real-model seam (agent-dispatch Testing Decisions). This case never reaches a model: the Codex executable is a command that
+// only fails and the Codex home holds a synthetic login, so it shows which path the Coordinator's turn takes, not what a model decides.
+// Gap: a Team Leader's or an Executor's turn follows a Coordinator turn that succeeded, which no default run can produce, so their
+// paths under the seam are reached only by the opt-in suite (agent-dispatch-real-model.test.ts).
+it("takes the Coordinator's turn to its real runtime with the Codex home's login under the real-model seam, and records it, ignoring an injected decision", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-")), codexHome = mkdtempSync(join(tmpdir(), "dispatch-real-model-seam-codex-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    writeFileSync(join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-synthetic"}');
+    running = await start(directory, { WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL: "1", CODEX_BIN: "/usr/bin/false", CODEX_HOME: codexHome });
+    await running.post("/api/fixture/inbound", groupMessage("om_real_model_seam", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    // Either outcome ends the wait: the Coordinator's fallback post, or the request an injected decision would create.
+    const result = await running.until((state) => state.fixtureTextOutbox?.length === 1 || (state.agentDispatch?.jobs.length ?? 0) > 0);
+    console.log(JSON.stringify({ kind: "dispatch_real_model_seam", command: "帮我整理闲鱼商品描述", jobs: result.agentDispatch, coordinator: result.fixtureTextOutbox, turns: result.fixtureDispatchTurns }));
+    expect(result.agentDispatch?.jobs).toEqual([]);
+    expect(result.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。"]);
+    // The turn tried to start the Coordinator's own App Server, which this executable cannot derive a model catalog for.
+    expect(result.fixtureDispatchTurns).toEqual([expect.objectContaining({ role: "coordinator", turn: "classify", messageId: "om_real_model_seam", error: "isolated_runtime_catalog_unavailable" })]);
+    expect(readFileSync(join(directory, "group-model-runtimes", "dispatch-coordinator", "codex-home", "auth.json"), "utf8")).toBe('{"OPENAI_API_KEY":"sk-synthetic"}');
+  } finally { await running?.close(); for (const root of [directory, `${directory}-business`, codexHome]) rmSync(root, { recursive: true, force: true }); }
 }, 30000);
 
 const RESPONSIBILITIES = { alice: "闲鱼、淘宝等网站运营，包括商品文案、上架材料和经营分析。", bill: "日常生活事务，包括吃穿住行的规划和安排。",
@@ -768,12 +793,6 @@ it("compacts the Executor homes left before the upgrade at the first start, and 
 // Several Assignments per request. Each Assignment's Executor turn takes its own injected fixture turn by title
 // (`executorTurns`), so the cases can hold, release and script each Executor apart (agent-dispatch Testing Decisions).
 type Running = Awaited<ReturnType<typeof start>>;
-async function allowNotes(running: Running) {
-  await running.until((state) => state.channels?.feishu?.ready === true);
-  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
-  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
-    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
-}
 const writeFile = (file: string) => ({ namespace: "files", tool: "write", arguments: { scopeRef: { $fixtureScopeLabel: "demo-vault" }, relativePath: file, content: `内容 ${file}`, overwrite: false } });
 const writeAndSend = (file: string) => [writeFile(file),
   { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected", fileRefs: [{ $fixtureToolResult: { call: 0, path: ["fileRef"] } }] } }];

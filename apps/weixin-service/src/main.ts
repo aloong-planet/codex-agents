@@ -87,6 +87,7 @@ import { GroupNames } from "./group-names.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement, withFixtureDependencies } from "./fixture-team-leader.js";
+import { recordDispatchTurns, type DispatchTurnRecord } from "./fixture-dispatch-recorder.js";
 import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
 import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
@@ -165,6 +166,10 @@ const fixtureMode = process.env.DEMO_MODE === "fixture";
 // Fixture-only seam: real Coordinator and Team Leader runtimes over the fixture App Server. Refused outside fixture mode.
 const fixtureCoordinationRuntime = process.env.WORKFLOW_FIXTURE_COORDINATION_RUNTIME === "1";
 if (fixtureCoordinationRuntime && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+// Fixture-only seam: the Coordinator, the Team Leaders and the Executors run on their real runtimes and the real model, and each of
+// their turns is recorded; every platform and every other model stay fixtures. Refused outside fixture mode.
+const fixtureDispatchRealModel = process.env.WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL === "1";
+if (fixtureDispatchRealModel && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 // Fixture-only seam: Executor home compaction stops after its first removal, so a case can kill the service mid-compaction.
 const fixtureCompactionHold = process.env.WORKFLOW_FIXTURE_COMPACTION_HOLD === "1";
 if (fixtureCompactionHold && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
@@ -760,14 +765,16 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
   tools: DynamicToolHost | undefined = ISOLATED_RUNTIME_KINDS[kind].hostTools ? workflowToolHost : undefined) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
   const { hostTools } = ISOLATED_RUNTIME_KINDS[kind];
+  // Under the real-model seam the three dispatch kinds start the installed App Server with the Codex home's login, as production does.
+  const realModel = fixtureDispatchRealModel && (kind === "dispatchCoordinator" || kind === "dispatchLeader" || kind === "dispatchAgent");
   // Kinds with host tools always use the fixture App Server in fixture mode; Coordinator and Team Leader kinds only under the seam.
-  const fixtureRuntime = fixtureMode && !fixtureLiveMainModel &&
+  const fixtureRuntime = fixtureMode && !fixtureLiveMainModel && !realModel &&
     (hostTools || (fixtureCoordinationRuntime && (kind === "dispatchCoordinator" || kind === "dispatchLeader")));
   const requests = hostTools ? fixtureModelRequests : fixtureCoordinationRequests;
   const runtime = createIsolatedRuntime(kind, { stateDirectory,
     ...(placement.instance !== undefined ? { instance: placement.instance } : {}),
     ...(placement.mediaRoot !== undefined ? { mediaRoot: placement.mediaRoot } : {}),
-    ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
+    ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents && !realModel ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
   // Every process the conversation starts, so a closed runtime can wait for them to exit before its home is compacted.
   const exits: Array<Promise<void>> = [];
   const agent = new CodexConversation(
@@ -939,6 +946,7 @@ const codexService = conversationRouter ? new ConversationService(
   weixinConfiguration?.owner,
 );
 let fixtureLeaderRequests: FixtureTeamLeader["requests"] | undefined;
+let fixtureDispatchTurns: (() => DispatchTurnRecord[]) | undefined;
 const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const configuration = feishuConfiguration, channel = feishuChannel;
   const teams = teamManagement!;
@@ -1006,7 +1014,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const contextRevision = () => { const state = codexServiceStore.load(); return JSON.stringify([state.accessContextEpoch ?? 0, state.permissions.revision]); };
   // Under the coordination seam the fixture App Server answers Coordinator and Team Leader turns with the injected outputs.
   const answer = (threadId: string, text: string) => fixtureThreadQueues.set(threadId, { takeFixtureModelToolCall: () => undefined, takeFixtureModelCompletion: () => Promise.resolve(text) });
-  const classifier = fixtureMode && !fixtureLiveMainModel && !fixtureCoordinationRuntime
+  const classifier = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime
     ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input),
       assign: async (input: import("./agent-dispatch-types.js").CrossTeamInput) => parseCrossTeamDecision(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId), input) }
     : (() => {
@@ -1019,7 +1027,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         fixtureCoordinationRuntime ? (input, threadId) => answer(threadId, JSON.stringify(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId))) : undefined);
     })();
   // Team Leader turns are tool-free; each turn holds its pool slot only for itself (agent-dispatch::QR-001/AC-02).
-  const fixtureLeader = fixtureMode && !fixtureLiveMainModel && !fixtureCoordinationRuntime ? new FixtureTeamLeader(fixtureFeishu!) : undefined;
+  const fixtureLeader = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime ? new FixtureTeamLeader(fixtureFeishu!) : undefined;
   const leader: TeamLeader = fixtureLeader ?? (() => {
     if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
     const create = (scope: string) => isolatedConversation("dispatchLeader", { instance: scope });
@@ -1074,7 +1082,11 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   });
   // Before any dispatch work can start an Executor runtime (agent-dispatch::QR-002/AC-02).
   executor.compactHomes();
-  const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier, executor, authorized, leader,
+  // Under the real-model seam nothing is injected, so each turn of the three is recorded for the state to show what it decided.
+  const recorded = fixtureDispatchRealModel ? recordDispatchTurns({ classifier, leader, executor }) : { classifier, leader, executor, turns: undefined };
+  fixtureDispatchTurns = recorded.turns;
+  const dispatch = new AgentDispatch(path.join(path.dirname(privateStatePath), "agent-dispatch.sqlite"), { agents, classifier: recorded.classifier, executor: recorded.executor, authorized,
+    leader: recorded.leader,
     definitionsVersion: () => teams.current().version, team: teamView, revision: contextRevision,
     // The current definitions decide which teams take work in a group, whatever version a request was planned under.
     roster: (event) => {
@@ -1246,6 +1258,7 @@ if (pennyConfigured) {
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
   fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
+  ...(fixtureDispatchTurns ? { fixtureDispatchTurns: fixtureDispatchTurns() } : {}),
   ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>
     [agentId, transport instanceof FixtureFeishuTransport ? { text: transport.getTextOutbox(), media: transport.getMediaOutbox() } : undefined])),
@@ -1370,14 +1383,17 @@ const startup = (async () => {
       if (!stopping && name === "feishu" && agentDispatch) {
         await Promise.all([...dispatchApplications.values()].map(startDispatchApplication));
         await agentDispatch.start();
-        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped.
-        teamManagement?.deliverAnnouncementsWith(async ({ id, chatId, text }) => {
+        // Pending announcements go out through Sam's group channel, and onboarding resumes where it stopped. A team's test
+        // message takes the same channel as the team's own application, so it has the effect record of the team's other posts.
+        const postInGroup = async (chatId: string, text: string, operationId: string, senderAccountId?: string) => {
           const address = feishuConfiguration!.owner.conversationAddresses().find(({ accountId, target }) => feishuConfiguration!.owner.deliveryTarget(accountId, target) === chatId);
-          if (!address) return "rejected";
+          if (!address) return "rejected" as const;
           const sent = await feishuChannel!.send({ channel: "feishu", accountId: address.accountId, target: address.target, message: text,
-            operationId: `team-announcement:${id}`, beforeSubmit: () => true });
-          return sent.ok ? "accepted" : sent.reason === "unknown" ? "unknown" : "rejected";
-        });
+            operationId, beforeSubmit: () => true, ...(senderAccountId ? { senderAccountId } : {}) });
+          return sent.ok ? "accepted" as const : sent.reason === "unknown" ? "unknown" as const : "rejected" as const;
+        };
+        teamManagement?.deliverAnnouncementsWith(({ id, chatId, text }) => postInGroup(chatId, text, `team-announcement:${id}`));
+        teamManagement?.deliverTestMessagesWith(({ appId, chatId, text, operationId }) => postInGroup(chatId, text, operationId, appId));
         void teamManagement?.resume().catch(() => process.stderr.write("team_onboarding_resume_failed\n"));
       }
       if (!stopping) {
@@ -1407,6 +1423,8 @@ function shutdown(): Promise<void> {
   try { await settleCleanup([
     () => pennyStartup,
     () => penny?.close(),
+    // A QR code that waits for its scan keeps polling; ending the wait lets the process exit.
+    () => teamManagement?.close(),
     () => agentDispatch?.close(),
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),

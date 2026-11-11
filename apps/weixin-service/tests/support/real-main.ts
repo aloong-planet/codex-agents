@@ -6,7 +6,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
 import type { PublicCodexServiceState } from "../../src/conversation-service.js";
+import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { authorizeLocalService } from "../../e2e/console-session.js";
+import { signalProcessGroup } from "./process-group.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
 export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number; dependsOn: string[] };
@@ -16,6 +18,7 @@ export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: strin
     directory?: Array<{ name: string; responsibility: string }>; memory?: string;
     assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
   fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;
+  fixtureDispatchTurns?: DispatchTurnRecord[];
   fixtureMemoryCurations?: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }>;
   fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
@@ -50,15 +53,20 @@ export async function stop(child: ChildProcess) {
     await new Promise<void>((resolve) => child.once("exit", () => resolve()));
   }
 }
-/** Starts main on `directory`; `packageRoot` runs another checkout of this package, such as an older commit's tree. */
-export async function start(directory: string, extraEnv: Record<string, string> = {}, options: { packageRoot?: string } = {}) {
+/**
+ * Starts main on `directory`; `packageRoot` runs another checkout of this package, such as an older commit's tree. With
+ * `ownProcessGroup` main leads its own process group, which is killed once main has stopped, so that no App Server it started
+ * outlives the case.
+ */
+export async function start(directory: string, extraEnv: Record<string, string> = {}, options: { packageRoot?: string; ownProcessGroup?: boolean } = {}) {
   const port = await freePort(), url = `http://127.0.0.1:${port}`;
   let output = "";
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
-    cwd: options.packageRoot ?? fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"],
+    cwd: options.packageRoot ?? fileURLToPath(new URL("../../", import.meta.url)), stdio: ["ignore", "pipe", "pipe"], ...(options.ownProcessGroup ? { detached: true } : {}),
     env: { ...process.env, DEMO_MODE: "fixture", PORT: String(port), CHANNEL_CONFIG_PATH: join(directory, "channel.json"),
       WORKFLOW_FIXTURE_STATE_DIRECTORY: directory, WORKFLOW_SIMULATOR_MODEL: "fixture", WORKFLOW_SIMULATOR_PENDING_ROUTER: "fixture", WEIXIN_OTEL_ENABLED: "0", ...extraEnv },
   });
+  const end = async () => { await stop(child); if (options.ownProcessGroup && child.pid !== undefined) signalProcessGroup(child.pid, "SIGKILL"); };
   child.stdout?.on("data", (chunk) => { output += String(chunk); });
   child.stderr?.on("data", (chunk) => { output += String(chunk); });
   // The local service requires an authorized browser; the test logs in through the control channel like the owner.
@@ -75,8 +83,8 @@ export async function start(directory: string, extraEnv: Record<string, string> 
     throw new Error(`fixture condition timed out: ${JSON.stringify(await state())}\n${output}`);
   }
   try { await until((value) => value.channel === "feishu" ? value.ready === true : value.codex?.enabledTargets.length > 0); }
-  catch (error) { await stop(child); throw error; }
-  return { url, state, until, output: () => output, close: async () => { await stop(child); expect(child.exitCode, output).toBe(0); },
+  catch (error) { await end(); throw error; }
+  return { url, state, until, output: () => output, close: async () => { await end(); expect(child.exitCode, output).toBe(0); },
     crash: async () => {
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
       child.kill("SIGKILL"); await exited;
@@ -112,6 +120,14 @@ export function dispatchConfig(directory: string, dual = false) {
         { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" },
         { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] },
     } }));
+}
+
+/** Grants the notes module's directory for reading and writing, as the owner would on the permissions page; needs the dual-channel configuration. */
+export async function allowNotes(running: Awaited<ReturnType<typeof start>>) {
+  await running.until((state) => state.channels?.feishu?.ready === true);
+  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
 }
 
 /** A Feishu group text event from the owner in `oc_alpha`, with the fixture's canned Coordinator decision and optional extra fixture inputs. */
