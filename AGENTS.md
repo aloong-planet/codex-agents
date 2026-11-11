@@ -29,6 +29,8 @@ Isolated model runtimes are created only from `ISOLATED_RUNTIME_KINDS` and start
 
 A released Executor's home and a superseded Team Leader's home keep only their thread rollouts, so anything else a runtime needs must be written again whenever the runtime is created, as described in [ADR-0031](docs/adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 
+Every route that reaches files through a saved grant refuses any access where a scope saved below that grant is closed, and writes where one is read-only, whichever module saved it, as described in [ADR-0032](docs/adr/0032-narrow-a-file-grant-by-every-scope-saved-below-it.md).
+
 Every page and API of the local service must stay behind owner authorization and the local-Host rule in [agent-console::CON-001](docs/specs/agent-console.md); the public event ingress never routes to it.
 
 Deployments and file-tool acceptance must use the Node version pinned in CI; changing that version requires real permission-worker write and recovery validation, as described in [agent dispatch runtime decisions](docs/specs/agent-dispatch.md#implementation-decisions).
