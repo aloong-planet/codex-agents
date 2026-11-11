@@ -818,6 +818,66 @@ it("has an open choice closed as soon as the requester cancels, and one an Execu
   expect(messages(deliveries)).toEqual([startThree, "请选择（run-1）。", STOPPED_THREE]);
 });
 
+// A choice that is asked again (agent-dispatch failure mode "Requester answers a choice so that it is asked again while another
+// Assignment of the request still runs, then cancels the request"): the host hands the answer over with the choice still waiting.
+const ASKED_AGAIN = "选择序号不在候选范围内，请按提示重新选择。";
+/** The host's handling of `again:<n>`, which leaves the choice of run-<n> waiting, and of `choose:<n>`, which completes it. */
+const askingAgain = async (inbound: InboundContent): Promise<DispatchPendingResult> => {
+  const [, kind, run] = /^(again|choose):(\d+)$/u.exec(inbound.text) ?? [];
+  return run ? { handled: true, senderAccountId: "cli_alice", runRef: `run-${run}`,
+    result: kind === "again" ? { status: "waiting", message: ASKED_AGAIN } : { status: "completed", message: "已发送所选文件。" } } : { handled: false };
+};
+
+it("leaves a request running when one Assignment's choice is asked again while another runs, so its cancel stops that one and is reported once", async () => {
+  // The first Assignment raises the choice of run-1. The second ends when its signal is aborted, or else when the case lets it go.
+  const letGo = deferred();
+  let stopped = false;
+  const executor: DispatchExecutor = { run: async (_job, assignment, signal) => {
+    if (assignment.title === "整理文案") return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    return new Promise<DispatchExecutionResult>((resolve) => {
+      signal.addEventListener("abort", () => { stopped = true; resolve({ status: "cancelled", message: "已取消" }); });
+      void letGo.promise.then(() => resolve({ status: "completed", message: "价格已核对。" }));
+    });
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, deliveries, { pending: askingAgain });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "again:1"));
+    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", ASKED_AGAIN]), { timeout: 2000, interval: 10 });
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "waiting" }, { status: "running" }] });
+    dispatch.admit(event("three", "cancel:one"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+    expect(stopped).toBe(true);
+  } finally { letGo.resolve(); }
+  // Nothing follows the one cancel report once the stopped Executor has ended.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "cancelled"]);
+  expect(posts(deliveries)).toEqual([`cli_alice: ${startTwo}`, "cli_alice: 请选择要发送的文件。", `cli_alice: ${ASKED_AGAIN}`, `cli_alice: ${STOPPED_TWO}`]);
+});
+
+it("leaves a request waiting when its choice is asked again after everything else has ended, and closes it once the choice is resolved", async () => {
+  const executor: DispatchExecutor = { run: async (_job, assignment) => assignment.title === "整理文案"
+    ? { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" } : { status: "completed", message: "价格已核对。", runRef: "run-2" }, close: () => {} };
+  const reports: Reports[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(two, reports), executor, deliveries, { pending: askingAgain });
+  await dispatch.start();
+  dispatch.admit(event("one", "alice"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+  dispatch.admit(event("two", "again:1"));
+  await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", ASKED_AGAIN]), { timeout: 2000, interval: 10 });
+  expect(dispatch.getState().jobs[0]).toMatchObject({ status: "waiting", assignments: [{ status: "waiting" }, { status: "completed" }] });
+  expect(reports).toEqual([]);
+  dispatch.admit(event("three", "choose:1"));
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", ASKED_AGAIN, "已收尾。"]);
+  expect(reports.map((closing) => closing.map(({ status }) => status))).toEqual([["completed", "completed"]]);
+});
+
 it("has a waiting Assignment's choice closed when a supplement supersedes it, so a later answer goes to the Coordinator and leaves the request alone", async () => {
   // The host's choice of run-1 takes an answer only while it is open. Once it is closed the answer is a message for the
   // Coordinator; the substitute Coordinator cannot classify it, so the engine posts the reply for a message it cannot place.

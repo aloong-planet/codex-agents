@@ -440,7 +440,10 @@ export class AgentDispatch {
           const presentation = pending.result.status === "waiting" && pending.runRef ? this.options.presentation(event, pending.runRef) : undefined;
           const shown = { ...notice, ...(presentation ? { presentation } : {}) };
           if (original) {
-            original.status = pending.result.status; original.result = pending.result.message;
+            // A choice that is asked again leaves its Assignment waiting, and the request in the status its Assignments give it: running
+            // while another of them runs, so that a cancel still stops that one's Executor and the request's worker reports it once.
+            if (!waiting || pending.result.status !== "waiting") original.status = pending.result.status;
+            original.result = pending.result.message;
             if (waiting && pending.result.status === "cancelled") { waiting.status = "cancelled"; waiting.result = pending.result.message; this.saveAssignment(waiting); }
             this.recordResult(original, `${event.key}:pending`, shown);
           } else this.queueNotice(`${event.key}:pending`, shown);
