@@ -21,6 +21,9 @@ import { homeListing, keptListing, rolloutPath, seedExecutorHome } from "./suppo
 // 5 minutes, so that wiring is exercised only by a live run or a fixture case that fills the pool.
 // Gap: home compaction's `compaction_failed` (session store unreadable) and `dispatch_executor_homes_unreadable` (runtimes
 // root unreadable) diagnostics have no case; both only report and remove nothing.
+// Gap: when the Skill Library cannot record what a runtime made of a skill, the Executor reports `dispatch_skill_listing_unrecorded`
+// and goes on; and when the App Server cannot be asked for its skill listing, the Assignment fails as for any runtime error. Neither
+// has a case: each needs a library or an App Server that fails on that one call, which no seam here offers.
 
 function job(id: string): DispatchJob {
   return { id, bindingHash: "binding-alpha", agentId: "alice", senderAccountId: "cli_alice", summary: "整理商品文案", status: "running", attempt: 0,
@@ -246,30 +249,45 @@ it.each([
   expect(unloadedSkills([tripRef, mealRef], listing)).toEqual(expected);
 });
 
-// skill-library::REQ-002: when the runtime starts, a selected skill its App Server does not list fails the Assignment before
-// its first turn, naming that skill; the library hears how each written skill fared.
-it("fails an Assignment before its first turn when its runtime did not load a skill its profile selects, and reports each skill's outcome", async () => {
+// skill-library::REQ-002 and US-004: when the runtime starts, a selected skill its App Server does not list fails the Assignment
+// before its first turn, naming that skill, and the library marks that version; a later runtime that lists the same version
+// clears the mark. The library is the real one, with both skills imported; only the App Server conversation is substituted.
+it("fails an Assignment before its first turn when its runtime did not load a skill its profile selects, and the library marks that version until a runtime loads it", async () => {
+  const state = scratch();
+  const library = new SkillLibrary({ directory: join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }), needed: () => undefined });
+  const imported = async (name: string) => {
+    const source = join(scratch(), name);
+    mkdirSync(source);
+    writeFileSync(join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} 的做法\n---\nbody\n`);
+    return library.import(source, (await library.read(source)).fingerprint, {});
+  };
+  const trip = await imported("trip-check"), meal = await imported("meal-plan");
+  const written = [{ ...tripRef, ref: { id: trip.id, version: 1 } }, { ...mealRef, ref: { id: meal.id, version: 1 } }];
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 60_000, close: ({ agent }) => agent.close() });
-  const agent = conversation("thread-C");
-  agent.listSkills.mockResolvedValue({ skills: [{ name: "trip-check", path: tripRef.path }], errors: [{ path: mealRef.path, message: "invalid YAML: duplicate field `name`" }] });
-  const outcomes: unknown[] = [];
+  const agents = [conversation("thread-C"), conversation("thread-D")];
+  agents[0]!.listSkills.mockResolvedValue({ skills: [{ name: "trip-check", path: tripRef.path }], errors: [{ path: mealRef.path, message: "invalid YAML: duplicate field `name`" }] });
+  agents[1]!.listSkills.mockResolvedValue({ skills: [{ name: "trip-check", path: tripRef.path }, { name: "meal-plan", path: mealRef.path }], errors: [] });
+  let created = 0;
   const executor = new CodexDispatchExecutor(join(scratch(), "agent-sessions.sqlite"), {
     agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
       { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
-    runtimes, createRuntime: (_job, scope) => ({ agent, cwd: `/isolated/${scope}`, skills: [tripRef, mealRef] }),
-    tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
-    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, skills: [tripRef.ref, mealRef.ref],
+    runtimes, createRuntime: (_job, scope) => ({ agent: agents[created++]!, cwd: `/isolated/${scope}`, skills: written }),
+    tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, skills: written.map(({ ref }) => ref),
       tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
     contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
-    memory: () => "", capture: async () => {}, existingResult: () => undefined,
-    skillsListed: (listed) => outcomes.push(listed),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined, library,
   });
+  const marks = async () => (await library.view()).map(({ name, refused }) => [name, refused]);
   try {
     const failed = executor.run(job("request-one"), assignment("assignment-a"), new AbortController().signal);
     await expect(failed).rejects.toThrow(/^dispatch_skills_not_loaded$/u);
     await expect(failed).rejects.toMatchObject({ names: ["meal-plan"] });
-    expect(agent.runTurn).not.toHaveBeenCalled();
-    expect(outcomes).toEqual([[{ ref: tripRef.ref, loaded: true }, { ref: mealRef.ref, loaded: false, reason: "invalid YAML: duplicate field `name`" }]]);
+    expect(agents[0]!.runTurn).not.toHaveBeenCalled();
+    expect(await marks()).toEqual([["meal-plan", { reason: "invalid YAML: duplicate field `name`" }], ["trip-check", undefined]]);
+    // The retry's runtime, on the same versions, lists both: it runs, and the mark goes.
+    await expect(executor.run(job("request-one"), assignment("assignment-a", 1), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(await marks()).toEqual([["meal-plan", undefined], ["trip-check", undefined]]);
   } finally { await executor.close(); }
 });
 

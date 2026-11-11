@@ -1188,8 +1188,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       // Written in the order of `skills`, so each carries the version it was written from.
       return { ...runtime, skills: written.map((skill, index) => ({ ...skill, ref: skills[index]! })) };
     },
-    // What each runtime's App Server made of its skills, which Skill 管理 shows for a skill's current version (skill-library::REQ-002).
-    skillsListed: (outcomes) => { for (const { ref, ...outcome } of outcomes) skillLibrary.recordLoading(ref, outcome); },
+    // Told what each runtime's App Server made of its skills, which Skill 管理 shows for a skill's current version (skill-library::US-004).
+    library: skillLibrary,
     prepareThread: (job, assignment, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? executorEvent(job, assignment).messageId, assignment.title)); },
     capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event,
       senderAccountId: assignmentSender(job, assignment) ?? job.senderAccountId,

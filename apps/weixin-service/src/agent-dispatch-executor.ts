@@ -14,7 +14,7 @@ import { COORDINATOR_ID } from "./team-registry.js";
 import { isProfileToolRefusal, type ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
-import type { SkillRef } from "./skill-library.js";
+import type { SkillLibrary, SkillRef } from "./skill-library.js";
 
 export type DispatchRuntime = {
   agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close" | "listSkills">;
@@ -132,10 +132,10 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     homes?: { root: string; compact(home: string, recordedThread: string | undefined): CompactionOutcome };
     report?(code: string): void;
     /**
-     * How each skill written into a runtime fared when the runtime started: listed by its App Server, or not, with the message it
-     * gave for that SKILL.md. The Skill Library keeps this per version (skill-library::REQ-002).
+     * Told how each skill written into a runtime fared when the runtime started: listed by its App Server, or not, with the message
+     * it gave for that SKILL.md. The Skill Library keeps this per version (skill-library::REQ-002, US-004).
      */
-    skillsListed?(outcomes: ReadonlyArray<Readonly<{ ref: SkillRef; loaded: true } | { ref: SkillRef; loaded: false; reason?: string }>>): void;
+    library?: Pick<SkillLibrary, "recordLoading">;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
@@ -214,12 +214,11 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     // Assignment fails before its first turn rather than run without it (skill-library::REQ-002).
     if (runtime.skills?.length) {
       const unloaded = unloadedSkills(runtime.skills, await runtime.agent.listSkills(runtime.cwd));
-      try {
-        this.options.skillsListed?.(runtime.skills.map(({ ref }) => {
-          const missing = unloaded.find((skill) => skill.ref === ref);
-          return missing ? { ref, loaded: false, ...(missing.reason === undefined ? {} : { reason: missing.reason }) } : { ref, loaded: true };
-        }));
-      } catch { this.report("dispatch_skill_listing_unrecorded"); }
+      for (const { ref } of runtime.skills) {
+        const missing = unloaded.find((skill) => skill.ref === ref);
+        try { this.options.library?.recordLoading(ref, missing ? { loaded: false, ...(missing.reason === undefined ? {} : { reason: missing.reason }) } : { loaded: true }); }
+        catch { this.report("dispatch_skill_listing_unrecorded"); }
+      }
       if (unloaded.length) throw new SkillsNotLoaded(unloaded.map(({ name }) => name));
     }
     this.options.prepareThread?.(job, assignment, threadId);

@@ -12,6 +12,10 @@ import { test } from "./fixtures.js";
 // running service by tests/skill-library.integration.test.ts; these journeys check that the page, the API and the library are
 // wired together, and that the page words each state as the owner confirmed it.
 // The profile's skill checkboxes belong to the team page and are driven in team-management.spec.ts.
+// Gap: the details' no-reason sentence for a skill Codex did not load (skill-library::US-004/AC-02, 「…也没有给出原因。」) is not
+// driven. The fixture App Server leaves a skill out only with a message, because a real App Server leaving one out without any
+// message has not been seen; the API's `refused: {}` for that case is covered in tests/skill-library.test.ts. To be added once such
+// a shape is measured on the installed App Server: model it in the fixture App Server and drive the page here.
 const SAM_APP = "cli_0123456789abcdef";
 const LONG = { timeout: 15_000 };
 // Feishu dispatch with the three seeded teams, so that a profile can select a skill.
@@ -235,10 +239,9 @@ test("shows a skill's source, files and the profiles that use it, keeps a skill 
   expect(fs.readFileSync(path.join(spareSource, "SKILL.md"), "utf8")).toBe(skillMd("meal-plan", "按预算安排菜单"));
 });
 
-// skill-library::REQ-002: a request whose Executor runtime did not load a selected skill leaves that skill marked on the page, with
+// skill-library::US-004: a request whose Executor runtime did not load a selected skill leaves that skill marked on the page, with
 // Codex's reason. The fixture App Server refuses a SKILL.md that repeats a front matter key, with the installed App Server's
-// message; the key here carries markup, which the page shows as text (agent-console::REQ-005/AC-04). The no-reason variant is
-// not driven here: when the installed App Server leaves a skill out without a message is unmeasured, so the fixture never does.
+// message; the key here carries markup, which the page shows as text (agent-console::REQ-005/AC-04).
 test("marks a skill Codex did not load when an Executor started, and says why in its details", async ({ page, fixtureServer }, testInfo) => {
   const KEY = '<i data-markup="reason">tone</i>';
   const trip = await importSkill(fixtureServer, folder("trip-check", "逐段核对站名与换乘"));
