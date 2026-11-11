@@ -111,6 +111,9 @@ export const weixinPanelHtml = String.raw`<!doctype html>
       let permissionCandidates = [];
       let permissionRevision = -1;
       let permissionDirty = false;
+      // The account and target the user chose and has not confirmed yet. State updates, such as the silent
+      // poll, render it instead of the confirmed session, so 「确认会话与目标」 confirms what the user sees.
+      let pendingSelection = null;
       const el = (id) => document.getElementById(id);
       const request = (method, params) => new Promise((resolve, reject) => {
         const id = nextId++;
@@ -211,10 +214,24 @@ export const weixinPanelHtml = String.raw`<!doctype html>
         el("pair").style.display = state.phase === "pair_code_required" ? "grid" : "none";
         const accounts = Array.isArray(state.accounts) ? state.accounts : [];
         const targets = Array.isArray(state.targets) ? state.targets : [];
-        renderOptions(el("account"), accounts, "accountId", state.selectedAccountId);
+        const renderSelection = (selection) => {
+          renderOptions(el("account"), accounts, "accountId", selection.accountId);
+          const shownAccountId = el("account").value;
+          renderOptions(el("target"), targets.filter((item) => !shownAccountId || item.accountId === shownAccountId), "target", selection.target);
+        };
+        // Once the confirmed session is the user's choice, as after a confirm of it, the panel follows the service again.
+        if (pendingSelection?.accountId === state.selectedAccountId && pendingSelection?.target === state.selectedTarget) pendingSelection = null;
+        const accountBefore = el("account").value;
+        const targetBefore = el("target").value;
+        renderSelection(pendingSelection || { accountId: state.selectedAccountId, target: state.selectedTarget });
+        if (pendingSelection && (el("account").value !== pendingSelection.accountId || el("target").value !== pendingSelection.target)) {
+          // The chosen option is gone: drop the choice and show the session the update gives.
+          pendingSelection = null;
+          renderSelection({ accountId: state.selectedAccountId, target: state.selectedTarget });
+        }
+        // A confirmation ticked for one target never carries over to a target the panel switched to by itself.
+        if (el("account").value !== accountBefore || el("target").value !== targetBefore) invalidateSelection();
         const accountId = el("account").value;
-        const matchingTargets = targets.filter((item) => !accountId || item.accountId === accountId);
-        renderOptions(el("target"), matchingTargets, "target", state.selectedTarget);
         el("session").style.display = accounts.length ? "grid" : "none";
         const sendReady = ["ready", "sent", "send_error"].includes(state.phase)
           && el("account").value === state.selectedAccountId
@@ -262,12 +279,19 @@ export const weixinPanelHtml = String.raw`<!doctype html>
         const targetRaw = el("target").value ? "目标：" + el("target").value : "";
         el("rawIds").textContent = [accountRaw, targetRaw].filter(Boolean).join(" · ") || "尚未发现账户或目标。";
       };
+      const keepChoice = () => {
+        pendingSelection = { accountId: el("account").value, target: el("target").value };
+      };
       el("account").addEventListener("change", () => {
         const targets = Array.isArray(currentState?.targets) ? currentState.targets : [];
         renderOptions(el("target"), targets.filter((item) => item.accountId === el("account").value), "target", null);
+        keepChoice();
         invalidateSelection();
       });
-      el("target").addEventListener("change", invalidateSelection);
+      el("target").addEventListener("change", () => {
+        keepChoice();
+        invalidateSelection();
+      });
       el("sendConfirmed").addEventListener("change", () => {
         el("sendButton").disabled = !el("sendConfirmed").checked;
       });
