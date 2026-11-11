@@ -438,6 +438,184 @@ describe("onboarding and acceptance", () => {
   });
 });
 
+// QR creation of a team's application (team-management::US-002/AC-01, AC-03; Implementation Decisions: Onboarding).
+describe("QR creation of a team's application", () => {
+  const CREATED = { appId: "cli_9f8e7d6c5b4a3210", appSecret: "created-secret-SENTINEL" };
+  const BILL_APP = "cli_2222222222222222";
+  function seeded() {
+    const path = databasePath();
+    const registry = new TeamRegistry(path);
+    return { path, registry, seeded: registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS }) };
+  }
+  const bill = (registry: TeamRegistry) => registry.current()!.definitions.teams.find(({ id }) => id === "bill")!;
+  const ACCEPTING = [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }];
+
+  it("starts one creation when a team is saved as QR creation, and leaves the team's application as it is", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const edit = editOf(first.definitions, "bill");
+      // The page sends no App ID in QR creation; the application is the service's to set.
+      const saved = registry.saveTeam({ ...edit, method: "qr", leader: { ...edit.leader, appId: "" } }, { basedOn: 1, at: 100 });
+      expect([saved.creation, bill(registry).leader.appId, bill(registry).bindings, registry.creation("bill")])
+        .toEqual(["started", BILL_APP, ACCEPTING, { status: "waiting", at: 100 }]);
+      // Only the save that chooses QR creation starts one; afterwards a new code is asked for explicitly.
+      const again = registry.saveTeam({ ...edit, method: "qr", responsibility: "新职责" }, { basedOn: saved.version.version, at: 200 });
+      expect([again.creation, registry.creation("bill")]).toEqual([undefined, { status: "waiting", at: 100 }]);
+      expect(registry.creation("alice")).toBeUndefined();
+    } finally { registry.close(); }
+  });
+
+  it("replaces the team's application with the created one, keeps its secret, and starts onboarding again in its groups", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      // Bill drains in oc_beta and accepts in oc_alpha, with a recorded check of its old application.
+      const drained = registry.saveTeam({ ...editOf(first.definitions, "bill"), method: "qr", groups: ["oc_alpha"] }, { basedOn: 1, at: 100 }).version;
+      registry.recordOnboarding(BILL_APP, { step: "credentials" }, { status: "done", at: 101 });
+      const attached = registry.attachCreatedApplication("bill", CREATED, { at: 300 });
+      expect(attached).toEqual({ version: registry.current(), replaced: BILL_APP });
+      expect({ source: registry.current()!.source, basedOn: registry.current()!.basedOn, appId: bill(registry).leader.appId, bindings: bill(registry).bindings }).toEqual({
+        source: "onboarding", basedOn: drained.version, appId: CREATED.appId,
+        bindings: [{ chatId: "oc_alpha", state: "onboarding" }, { chatId: "oc_beta", state: "draining" }] });
+      expect(registry.creation("bill")).toEqual({ status: "done", appId: CREATED.appId, at: 300 });
+      // The secret is stored beside the versions and serves the roster; the replaced application's secret and outcomes are gone.
+      expect(registry.roster(SAM).agents.find(({ id }) => id === "bill")).toMatchObject({ appId: CREATED.appId, appSecret: CREATED.appSecret });
+      expect([registry.hasSecret(BILL_APP), registry.onboarding(BILL_APP), registry.onboarding(CREATED.appId)]).toEqual([false, { joins: {} }, { joins: {} }]);
+      const versions = Array.from({ length: registry.current()!.version }, (_, index) => registry.version(index + 1));
+      for (const stored of versions) expect(JSON.stringify(stored)).not.toContain(CREATED.appSecret);
+    } finally { registry.close(); }
+  });
+
+  it("accepts a save made before the scan in QR creation, and refuses it as stale as an existing application", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const edit = editOf(first.definitions, "bill");
+      const before = registry.saveTeam({ ...edit, method: "qr" }, { basedOn: 1, at: 100 }).version.version;
+      registry.attachCreatedApplication("bill", CREATED, { at: 300 });
+      // An onboarding step never refuses a save: the page still shows the old application, and the team keeps the created one.
+      registry.saveTeam({ ...edit, method: "qr", responsibility: "扫码期间改的职责" }, { basedOn: before, at: 400 });
+      expect([bill(registry).leader.appId, bill(registry).responsibility]).toEqual([CREATED.appId, "扫码期间改的职责"]);
+      // As an existing application the page's App ID would replace the created one, so that save is stale.
+      expect(() => registry.saveTeam({ ...edit, method: "existing", responsibility: "再改" }, { basedOn: before, at: 500 })).toThrow(/^team_registry_version_stale$/);
+      expect([bill(registry).leader.appId, registry.creation("bill")?.status]).toEqual([CREATED.appId, "done"]);
+    } finally { registry.close(); }
+  });
+
+  // Two pages hold the team (team-management failure modes: "Two browser tabs edit the same team"). The 接入方式 is one of the
+  // team's editable fields: a page that still shows the old one must reload before it can end, or start, a QR creation.
+  it.each([
+    ["chose QR creation", "existing", "qr", "existing", { status: "waiting", at: 200 }],
+    ["chose an existing application", "qr", "existing", "qr", undefined],
+  ] as const)("refuses a save from a page that loaded the team before another page %s", (_case, first, second, stale, creation) => {
+    const { registry, seeded: seededVersion } = seeded();
+    try {
+      const edit = editOf(seededVersion.definitions, "bill");
+      const loaded = registry.saveTeam({ ...edit, method: first }, { basedOn: 1, at: 100 }).version.version;
+      registry.saveTeam({ ...edit, method: second }, { basedOn: loaded, at: 200 });
+      const before = registry.current();
+      expect(() => registry.saveTeam({ ...edit, method: stale, responsibility: "另一页的修改" }, { basedOn: loaded, at: 300 })).toThrow(/^team_registry_version_stale$/);
+      expect([registry.current(), registry.creation("bill")]).toEqual([before, creation]);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["a malformed App ID", { appId: "cli_not-an-app", appSecret: "created-secret-SENTINEL" }, {}],
+    ["another team's application", { appId: "cli_3333333333333333", appSecret: "created-secret-SENTINEL" }, {}],
+    ["the Coordinator's application", { appId: SAM.appId, appSecret: "created-secret-SENTINEL" }, {}],
+    ["an application reserved outside the registry", CREATED, { [CREATED.appId]: "该飞书应用已用于 Penny，不能用于团队" }],
+  ] as const)("does not attach %s", (_case, credentials, reserved) => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const saved = registry.saveTeam({ ...editOf(first.definitions, "bill"), method: "qr" }, { basedOn: 1, at: 100 }).version;
+      expect(registry.attachCreatedApplication("bill", credentials, { at: 300, reserved })).toBeUndefined();
+      expect([registry.current(), registry.creation("bill"), registry.secret(credentials.appId) === credentials.appSecret])
+        .toEqual([saved, { status: "action", reason: "unusable", at: 300 }, false]);
+    } finally { registry.close(); }
+  });
+
+  it("ends the creation when the team is saved as an existing application", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      const edit = editOf(first.definitions, "bill");
+      const qr = registry.saveTeam({ ...edit, method: "qr" }, { basedOn: 1, at: 100 });
+      const existing = registry.saveTeam({ ...edit, method: "existing" }, { basedOn: qr.version.version, at: 200 });
+      expect([existing.creation, registry.creation("bill"), bill(registry).leader.appId]).toEqual(["ended", undefined, BILL_APP]);
+      // Nothing waits for a scan any more, so a created application has no team to go to.
+      expect(registry.attachCreatedApplication("bill", CREATED, { at: 300 })).toBeUndefined();
+      expect(registry.saveTeam({ ...edit, method: "existing", responsibility: "新职责" }, { basedOn: registry.current()!.version, at: 400 }).creation).toBeUndefined();
+    } finally { registry.close(); }
+  });
+
+  it("records a failed creation and a new request only while the team is in QR creation and has no created application", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      expect(registry.recordCreation("bill", { status: "action", reason: "expired" }, 50)).toBe(false);
+      registry.saveTeam({ ...editOf(first.definitions, "bill"), method: "qr" }, { basedOn: 1, at: 100 });
+      expect([registry.recordCreation("bill", { status: "action", reason: "expired" }, 150), registry.creation("bill")]).toEqual([true, { status: "action", reason: "expired", at: 150 }]);
+      expect([registry.recordCreation("bill", { status: "waiting" }, 160), registry.creation("bill")]).toEqual([true, { status: "waiting", at: 160 }]);
+      registry.attachCreatedApplication("bill", CREATED, { at: 300 });
+      expect([registry.recordCreation("bill", { status: "waiting" }, 400), registry.creation("bill")]).toEqual([false, { status: "done", appId: CREATED.appId, at: 300 }]);
+    } finally { registry.close(); }
+  });
+
+  // team-management failure modes: "Service restarts during … onboarding — no step reruns without its recorded outcome". A code's
+  // wait and a send in flight end with the process, so a restart records what the owner has to look at.
+  it("turns a creation that waited for its scan, and a test message that was being sent, into outcomes after a restart", () => {
+    const { path, registry: first, seeded: version } = seeded();
+    first.saveTeam({ ...editOf(version.definitions, "bill"), method: "qr" }, { basedOn: 1, at: 100 });
+    first.saveTeam({ ...editOf(version.definitions, "alice"), method: "qr" }, { basedOn: 1, at: 100 });
+    first.attachCreatedApplication("alice", CREATED, { at: 300 });
+    first.recordTestMessage(BILL_APP, "oc_alpha", { status: "sending", at: 310 });
+    first.recordTestMessage(BILL_APP, "oc_beta", { status: "accepted", at: 311 });
+    first.close();
+    const registry = new TeamRegistry(path);
+    try {
+      expect(registry.testMessages(BILL_APP)).toEqual({ oc_alpha: { status: "unknown", at: 310 }, oc_beta: { status: "accepted", at: 311 } });
+      // The start reports each team whose code waited before the creation is recorded as interrupted. When the report
+      // cannot be made, the creation stays as it was, so that the next start reports it.
+      expect(() => registry.interruptCreations(() => { throw new Error("audit unavailable"); })).toThrow("audit unavailable");
+      expect(registry.creation("bill")).toEqual({ status: "waiting", at: 100 });
+      const reported: string[] = [];
+      registry.interruptCreations((teamId) => reported.push(`${teamId}:${registry.creation(teamId)?.status}`));
+      expect([reported, registry.creation("bill"), registry.creation("alice")])
+        .toEqual([["bill:waiting"], { status: "action", reason: "interrupted", at: 100 }, { status: "done", appId: CREATED.appId, at: 300 }]);
+    } finally { registry.close(); }
+    // A later start has nothing left to report.
+    const later = new TeamRegistry(path);
+    try {
+      const reported: string[] = [];
+      later.interruptCreations((teamId) => reported.push(teamId));
+      expect([reported, later.creation("bill")?.status]).toEqual([[], "action"]);
+    } finally { later.close(); }
+  });
+
+  it("keeps the outcomes of configuration, release and test messages per application, and forgets them with it", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      registry.recordOnboarding(BILL_APP, { step: "configure" }, { status: "done", at: 1 });
+      registry.recordOnboarding(BILL_APP, { step: "publish" }, { status: "review", reason: "submitted", at: 2 });
+      registry.recordTestMessage(BILL_APP, "oc_alpha", { status: "failed", at: 3 });
+      expect([registry.onboarding(BILL_APP), registry.testMessages(BILL_APP)]).toEqual([
+        { configure: { status: "done", at: 1 }, publish: { status: "review", reason: "submitted", at: 2 }, joins: {} }, { oc_alpha: { status: "failed", at: 3 } }]);
+      const edit = editOf(first.definitions, "bill");
+      registry.saveTeam({ ...edit, leader: { ...edit.leader, appId: "cli_6666666666666666" } }, { basedOn: 1, secret: "bill-new" });
+      expect([registry.onboarding(BILL_APP), registry.testMessages(BILL_APP)]).toEqual([{ joins: {} }, {}]);
+    } finally { registry.close(); }
+  });
+
+  // Until the console's first save each start imports the local roster again, which would put Bill back on the application in the file.
+  it("counts a save that only chooses QR creation as a console save, so the next start keeps the created application", () => {
+    const { path, registry: first, seeded: version } = seeded();
+    first.saveTeam({ ...editOf(version.definitions, "bill"), method: "qr" }, { basedOn: 1, at: 100 });
+    first.attachCreatedApplication("bill", CREATED, { at: 300 });
+    first.close();
+    const registry = new TeamRegistry(path);
+    try {
+      registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      expect([bill(registry).leader.appId, registry.hasSecret(CREATED.appId)]).toEqual([CREATED.appId, true]);
+    } finally { registry.close(); }
+  });
+});
+
 describe("teams accepting work in a group", () => {
   const team = (id: string, teamName: string, bindings: TeamDefinitions["teams"][number]["bindings"]): TeamDefinitions["teams"][number] => ({
     id, teamName, responsibility: `${teamName}的职责`, leader: { name: id, appId: `cli_${id}`, profile: { instructions: "", hostTools: [] } },

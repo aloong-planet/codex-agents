@@ -61,12 +61,16 @@ The console page `/console/mcp` (MCP 管理) registers local MCP programs and St
 
 ## Team management
 
-With Feishu dispatch configured, the console page `/console/teams` (团队管理) edits the Agent Teams. It covers each team's existing Feishu application (App ID, and an App Secret that can only be written), its responsibility, the Team Leader's instructions, its Executor profiles with their executor noun and host tools, and its dispatch groups. Saves apply without a restart.
-- **Onboarding.** The service checks a saved application's credentials and bot, and Sam adds the bot to each bound group. The page shows each step's outcome per group, with 「重新检查」.
+With Feishu dispatch configured, the console page `/console/teams` (团队管理) edits the Agent Teams. It covers each team's Feishu application, its responsibility, the Team Leader's instructions, its Executor profiles with their executor noun and host tools, and its dispatch groups. Saves apply without a restart.
+- **Application.** A team's application is created by scanning a QR code in Feishu, shown once the team is saved with 扫码一键创建, or is an existing one whose App ID and write-only App Secret are entered on the page.
+- **Onboarding.** For a created application the service enables the bot capability, adds its permissions and submits its release, then waits for the admin's review. For every application it checks the credentials and bot, and Sam adds the bot to each bound group. The page shows each step's outcome, per group where it applies, with 「重新检查」.
+- **Test message.** Once a team accepts work in a group, the page can post a test message there as the team's own bot, after a confirmation.
 - **Announcements.** Sam announces in the group when a team starts or stops taking work there; a failed announcement is not resent.
-- **State files.** Teams, versions and onboarding outcomes are kept in `team-registry.sqlite`, with App Secrets beside the versions and never inside one; announcements are kept in `team-announcements.sqlite`. Both are `0600` in the state directory.
-- **Audit.** Every save is appended to `console-audit.jsonl` with the browser that made it, never with a secret.
+- **State files.** Teams, versions, each team's QR creation, onboarding outcomes and test-message results are kept in `team-registry.sqlite`, with App Secrets beside the versions and never inside one; announcements are kept in `team-announcements.sqlite`. Both are `0600` in the state directory.
+- **Audit.** Every save, QR code request, created application and test message is appended to `console-audit.jsonl`, never with a secret.
 - **Dispatch groups.** Without dispatch the page shows the dispatch-group form, and with dispatch 「派单群设置」 opens it. A save writes only `feishu.dispatch.groupChatIds` into the channel configuration file and applies at the next start. Without Feishu paired, the page names `pnpm feishu:pair`. See [dispatch setup](../../docs/ops/feishu-agent-dispatch.md).
+
+The [ops guide](../../docs/ops/feishu-agent-dispatch.md#team-leader-applications) lists the permissions a created application asks for and what to do when a step needs action.
 
 ## Penny private bookkeeping
 
