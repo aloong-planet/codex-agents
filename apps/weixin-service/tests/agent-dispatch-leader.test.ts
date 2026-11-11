@@ -288,13 +288,14 @@ function runtimeOn(root: string, scope: string, rollout = threadOf(scope)) {
   return { agent, cwd: join(home, "workspace") };
 }
 /** A Team Leader whose runtimes live only for their turn; `scopes` lists the homes its turns asked for, in order. */
-function homesLeader(inUse: () => readonly LeaderSessionKey[], options: { rollout?: string; compact?: typeof compactRuntimeHome } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "dispatch-leader-homes-")), state = mkdtempSync(join(tmpdir(), "dispatch-leader-")); directories.push(root, state);
+function homesLeader(inUse: () => readonly LeaderSessionKey[], options: { rollout?: string; compact?: typeof compactRuntimeHome; root?: string; database?: string } = {}) {
+  const made = mkdtempSync(join(tmpdir(), "dispatch-leader-homes-")); directories.push(made);
+  const root = options.root ?? join(made, "homes"), database = options.database ?? join(made, "agent-sessions.sqlite");
   const reports: string[] = [], scopes: string[] = [];
-  const leader = new CodexTeamLeader(join(state, "agent-sessions.sqlite"), { model: () => ({ model: "fixture-model", effort: "low" }),
+  const leader = new CodexTeamLeader(database, { model: () => ({ model: "fixture-model", effort: "low" }),
     runtime: (scope, work) => { if (!scopes.includes(scope)) scopes.push(scope); const runtime = runtimeOn(root, scope, options.rollout); return work(runtime.agent, runtime.cwd); },
     homes: { root, compact: options.compact ?? compactRuntimeHome, inUse }, report: (code) => reports.push(code) });
-  return { leader, root, reports, scopes };
+  return { leader, root, database, reports, scopes };
 }
 
 /**
@@ -358,6 +359,29 @@ describe("Team Leader home compaction", () => {
     expect(homeListing(home)).toEqual(before);
     expect(run.reports).toEqual([`dispatch_leader_home_kept:rollout_missing:${run.scopes[0]}`]);
     run.leader.dispose();
+  });
+
+  it("finishes at the next start a compaction that was cut off after its first removal, with the rollout intact", async () => {
+    let inUse = [session("r1", 1)];
+    // A compaction that ends after its first removal, as a stop of the service inside it leaves the home.
+    const cut = homesLeader(() => inUse, { compact: (home, thread) => compactRuntimeHome(home, thread, { afterRemoval: () => { throw new Error("service_stopped"); } }) });
+    await cut.leader.plan(input("r1", 1));
+    const home = join(cut.root, cut.scopes[0]!), thread = threadOf(cut.scopes[0]!), rollout = join(home, rolloutPath(thread));
+    const whole = homeListing(home), hash = sha256(rollout);
+    inUse = [];
+    cut.leader.compactSupersededHomes();
+    const left = homeListing(home);
+    expect(left.length).toBeLessThan(whole.length);
+    expect(left).toEqual(expect.arrayContaining([WHOLE, rolloutPath(thread)]));
+    expect(cut.reports).toEqual([`dispatch_leader_home_kept:removal_failed:${cut.scopes[0]}`]);
+    cut.leader.dispose();
+    // The next start: a new Team Leader on the same session store sweeps the home again.
+    const restarted = homesLeader(() => [], { root: cut.root, database: cut.database });
+    restarted.leader.compactSupersededHomes();
+    expect(homeListing(home)).toEqual(keptListing(thread));
+    expect(sha256(rollout)).toBe(hash);
+    expect(restarted.reports).toEqual([]);
+    restarted.leader.dispose();
   });
 
   it("reports a home whose compaction throws, and goes on with the turn that swept", async () => {
