@@ -12,10 +12,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CodexConversation } from "../src/codex-conversation.js";
+import { ConsoleAudit } from "../src/console-audit.js";
 import { createIsolatedModelRuntime, installDirectModelCatalog, type IsolatedModelRuntime, spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
 import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, type IsolatedRuntimeKind } from "../src/isolated-runtime-kinds.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
+import { SkillLibrary } from "../src/skill-library.js";
 import { resolveCodexExecutable } from "../src/stdio-app-server-transport.js";
 import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 import { AppServerSession, assistantMessage, type BundledSkillSample, FakeResponsesEndpoint, isolatedConversationPlacements, type IsolatedPlacement,
@@ -209,6 +211,47 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       expect(skillCatalog(request)?.sort()).toEqual(["own-home-probe", "own-probe"]);
       expectOnlyOwnSkills(modelInputText(request));
       expect(request.authorization).toBe(`Bearer ${syntheticKey}`);
+    } finally { await conversation.close(); }
+  }, 60_000);
+
+  // skill-library::REQ-002 on the real App Server: an Executor's runtime created as main.ts creates it, with the skills of its
+  // profile, lists and loads exactly those. Not another skill of the library, and nothing an earlier run left in its home.
+  it("an Executor runtime created with its profile's skills offers exactly those", async () => {
+    const state = path.join(work, "library-state");
+    const library = new SkillLibrary({ directory: path.join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }) });
+    const source = (name: string, body: string) => { plantSkill(path.join(work, "library-sources"), name, body); return path.join(work, "library-sources", name); };
+    const selectedSource = source("profile-probe", "PROFILE-SKILL-BODY-4F2B");
+    fs.mkdirSync(path.join(selectedSource, "references"));
+    fs.writeFileSync(path.join(selectedSource, "references", "rules.md"), "rules\n");
+    const selected = await library.import(selectedSource, (await library.read(selectedSource)).fingerprint, {});
+    const otherSource = source("unselected-probe", "UNSELECTED-SKILL-BODY-9C7D");
+    await library.import(otherSource, (await library.read(otherSource)).fingerprint, {});
+
+    const placement = { instance: `dispatch-${"e".repeat(64)}`, mediaRoot: media("profile-skills") };
+    // The home's earlier run: skills of its own in both places, and the bundled skills installed as before the fix.
+    const earlier = runtimeWithOwnSkills("dispatchAgent", placement);
+    await runAsBeforeTheFix(earlier.runtime, earlier.runtimeRoot);
+    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, ...placement, environment, skills: (directory) => library.materialize([selected], directory) });
+    const written = path.join(fs.realpathSync(earlier.runtimeRoot), "codex-home", "skills", selected.id) + path.sep;
+    const session = await AppServerSession.open(model.route(runtime));
+    try {
+      const listed = await session.listSkills(runtime.cwd);
+      expect(listed.map((skill) => skill.name)).toEqual(["profile-probe"]);
+      expect(fs.realpathSync(listed[0]!.path).startsWith(written), listed[0]!.path).toBe(true);
+    } finally { session.close(); }
+
+    model.respondWith(() => [assistantMessage("fake-model-reply")]);
+    const conversation = new CodexConversation(() => spawnIsolatedAppServer(resolveCodexExecutable(process.env), model.route(runtime)),
+      60_000, undefined, undefined, 60_000, isolatedConversationOptions("dispatchAgent", runtime, { structuredOutputSupported: true, agentId: "alice" }));
+    try {
+      const threadId = await conversation.startOrResume(undefined, runtime.cwd);
+      const from = model.requests.length;
+      await conversation.reply(threadId, `$profile-probe $unselected-probe $own-probe $own-home-probe $host-probe $${bundled.name} please`);
+      const request = model.modelRequestsSince(from).at(-1)!;
+      expect(skillCatalog(request)).toEqual(["profile-probe"]);
+      const input = modelInputText(request);
+      expect(input).toContain("PROFILE-SKILL-BODY-4F2B");
+      for (const absent of ["UNSELECTED-SKILL-BODY-9C7D", marker.own, marker.ownHome, marker.host, bundled.bodyLine]) expect(input, absent).not.toContain(absent);
     } finally { await conversation.close(); }
   }, 60_000);
 

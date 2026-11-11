@@ -81,12 +81,17 @@ it("empties an Executor runtime's skills at every creation before the host write
   expect(given).toEqual([skills]);
   expect(fs.readdirSync(skills)).toEqual(["skill-a"]);
 
-  // A leftover folder and a link to a folder outside: both go, and what the link pointed to stays.
+  // A leftover folder and a link to a folder outside: both go, and what the link pointed to stays. So does a skill left in
+  // the two other places the App Server reads a runtime's own skills from, which the host never writes.
   const outside = path.join(state, "outside");
   fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, "keep.md"), "keep");
   fs.mkdirSync(path.join(skills, "stale")); fs.symlinkSync(outside, path.join(skills, "linked"));
+  const root = path.dirname(path.dirname(skills));
+  const elsewhere = [path.join(root, "home", ".agents", "skills"), path.join(root, "workspace", ".agents", "skills")];
+  for (const directory of elsewhere) { fs.mkdirSync(directory, { recursive: true }); plant("left")(directory); }
   create(plant("skill-b"));
   expect(fs.readdirSync(skills)).toEqual(["skill-b"]);
+  expect(elsewhere.map((directory) => fs.existsSync(directory))).toEqual([false, false]);
   // A profile that selects no skill leaves the directory empty, also when the caller names none.
   create();
   expect(fs.readdirSync(skills)).toEqual([]);

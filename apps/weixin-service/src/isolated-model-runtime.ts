@@ -19,9 +19,11 @@ const MODEL_CATALOG_FILE = "direct-model-catalog.json";
  * offers its model only what the host grants (ADR-0030): a direct-mode model catalog in its own home removes `exec`,
  * `wait` and `apply_patch`, and user input and sub-agents are switched off.
  *
- * `skills` writes the runtime's own skills into the directory it is given, the Codex home's `skills`. That directory is
- * removed and created empty first, so after every creation the home holds exactly what the host wrote at this one, whatever
- * an earlier run or an interrupted compaction left (ADR-0031). A writer that throws leaves no runtime to start. */
+ * `skills` writes the runtime's own skills into the directory it is given, the Codex home's `skills`. Every place the App
+ * Server reads the runtime's own skills from is removed first: that directory, and `.agents/skills` in the runtime's HOME and
+ * in its workspace, which the host never writes. After every creation the runtime therefore has exactly the skills the host
+ * wrote at this one, whatever an earlier run or an interrupted compaction left (ADR-0031). A writer that throws leaves no
+ * runtime to start. */
 export function createIsolatedModelRuntime(options: {
   root: string;
   scope: string;
@@ -42,8 +44,8 @@ export function createIsolatedModelRuntime(options: {
   }
   if (options.skills) {
     const skills = path.join(codexHome, "skills");
-    // Removes a link by that name itself, never what it points to.
-    fs.rmSync(skills, { recursive: true, force: true });
+    // Removes a link by one of these names itself, never what it points to.
+    for (const own of [skills, path.join(home, ".agents", "skills"), path.join(cwd, ".agents", "skills")]) fs.rmSync(own, { recursive: true, force: true });
     fs.mkdirSync(skills, { mode: 0o700 });
     options.skills(skills);
   }
