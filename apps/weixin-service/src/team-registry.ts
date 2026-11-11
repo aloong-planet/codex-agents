@@ -268,7 +268,8 @@ export class TeamRegistry {
    * stored beside the versions, and every group the team is not draining from starts onboarding again, as for any replaced
    * application. Returns the new version and the application it replaced. An application no team may use (a malformed ID, one
    * already in use, a reserved one) is not attached: the creation then needs action as `unusable`. Returns undefined then, and
-   * when the team is not waiting for a creation.
+   * when the team is not waiting for a creation. A team that is being deleted is changed no more, so it gets no application
+   * either: it drains with the one it has (team-management::US-004/AC-02).
    */
   attachCreatedApplication(teamId: string, created: Readonly<{ appId: string; appSecret: string }>, options: Readonly<{ at: number; reserved?: Readonly<Record<string, string>> }>):
     Readonly<{ version: DefinitionsVersion; replaced?: string }> | undefined {
@@ -277,7 +278,7 @@ export class TeamRegistry {
     this.transaction(() => {
       const latest = this.current(), state = this.creation(teamId);
       const team = latest?.definitions.teams.find(({ id }) => id === teamId);
-      if (!latest || !team || !state || state.status === "done") return;
+      if (!latest || !team || team.deleting || !state || state.status === "done") return;
       const { definitions } = latest;
       if (applicationReasons(created.appId, teamId, definitions, options.reserved ?? {}).length) {
         this.recordCreation(teamId, { status: "action", reason: "unusable" }, options.at);

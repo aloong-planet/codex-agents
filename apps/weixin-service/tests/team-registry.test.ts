@@ -575,6 +575,19 @@ describe("QR creation of a team's application", () => {
     } finally { registry.close(); }
   });
 
+  // A team being deleted is changed no more: its saves are refused, and so is the application of a scan confirmed since.
+  it("gives a team that is being deleted no application from a scan, and keeps the application it drains with", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      registry.saveTeam({ ...editOf(first.definitions, "bill"), method: "qr" }, { basedOn: 1, at: 100 });
+      const deleting = registry.deleteTeam("bill").version;
+      expect(bill(registry)).toMatchObject({ deleting: true, bindings: [{ chatId: "oc_alpha", state: "draining" }, { chatId: "oc_beta", state: "draining" }] });
+      expect(registry.attachCreatedApplication("bill", CREATED, { at: 300 })).toBeUndefined();
+      expect([registry.current()!.version, bill(registry).leader.appId, registry.hasSecret(BILL_APP), registry.hasSecret(CREATED.appId), registry.creation("bill")])
+        .toEqual([deleting.version, BILL_APP, true, false, { status: "waiting", at: 100 }]);
+    } finally { registry.close(); }
+  });
+
   it("accepts a save made before the scan in QR creation, and refuses it as stale as an existing application", () => {
     const { registry, seeded: first } = seeded();
     try {
