@@ -1701,6 +1701,22 @@ describe("local_file_grant_name_addressing", () => {
     } finally { await binding.release(); await tools.close(); }
   });
 
+  // The name is recognized as it is written. A first folder that differs from it in case, or in how its letters are composed,
+  // is a folder of its own.
+  it.each([
+    ["case", "demo-vault", "Demo-Vault/x.md"],
+    ["Unicode normalization", "résumé", "résumé/x.md"],
+  ])("takes a first folder that differs from the name only in %s as a folder", async (_kind, label, relativePath) => {
+    const { directory, tools } = grant("grant-name-folding-", label);
+    const trusted = turn("grant-name-folding", "account-a"), binding = tools.bindTurn(trusted);
+    try {
+      await expect(tools.execute(create(relativePath, binding.promptLines[0]!.split(":", 1)[0]!, "literal"), trusted)).resolves.toMatchObject({
+        relativePath, displayPath: `${label}/${relativePath}`, created: true });
+      expect(fs.readdirSync(directory)).toEqual([relativePath.split("/")[0]]);
+      expect(fs.readFileSync(path.join(directory, ...relativePath.split("/")), "utf8")).toBe("literal");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
   // A label may hold a slash. Whether the root holds an entry of that name cannot be told when a file stands where the label's
   // first folder would be, and the path then stays literal.
   it.each([
@@ -1782,6 +1798,28 @@ describe("local_file_grant_name_addressing", () => {
       const read = await tools.execute({ toolId: "files.read", toolVersion: 2, arguments: { fileRef: found.entries[0]!.fileRef } }, trusted) as { sha256: string };
       await expect(tools.execute({ toolId: "files.edit", toolVersion: 1,
         arguments: { fileRef: found.entries[0]!.fileRef, expectedSha256: read.sha256, oldText: "1", newText: "2" } }, trusted)).resolves.toMatchObject({ ...shown, changed: true });
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  // A glob is matched against the path below the root and is never read as addressed by the grant's name: one that begins with
+  // the name matches only inside a folder of that name.
+  it.each([
+    ["files.find", (globs: object) => ({ toolId: "files.find", toolVersion: 2, arguments: { kind: "file", ...globs } }), "entries"],
+    ["files.grep", (globs: object) => ({ toolId: "files.grep", toolVersion: 2, arguments: { pattern: "off", ...globs } }), "matches"],
+  ] as const)("matches a glob that begins with the grant's name literally in %s", async (_tool, call, key) => {
+    const { directory, tools } = grant("grant-name-glob-");
+    fs.mkdirSync(path.join(directory, "discount-project"));
+    fs.writeFileSync(path.join(directory, "discount-project", "discount.ts"), "export const off = 1;\n");
+    const trusted = turn("grant-name-glob", "account-a"), binding = tools.bindTurn(trusted);
+    const matched = async (globs: object) =>
+      (await tools.execute(call(globs), trusted) as Record<string, Array<{ relativePath: string }>>)[key]!.map((item) => item.relativePath);
+    try {
+      expect(await matched({ include: ["demo-vault/**"] })).toEqual([]);
+      expect(await matched({ include: ["discount-project/**"] })).toEqual(["discount-project/discount.ts"]);
+      fs.mkdirSync(path.join(directory, "demo-vault"));
+      fs.writeFileSync(path.join(directory, "demo-vault", "inner.ts"), "export const off = 2;\n");
+      expect(await matched({ include: ["demo-vault/**"] })).toEqual(["demo-vault/inner.ts"]);
+      expect(await matched({ exclude: ["demo-vault/**"] })).toEqual(["discount-project/discount.ts"]);
     } finally { await binding.release(); await tools.close(); }
   });
 
