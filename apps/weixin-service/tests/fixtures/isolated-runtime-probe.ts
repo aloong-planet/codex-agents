@@ -205,6 +205,7 @@ export function isolatedConversationPlacements(mediaRoot: (name: string) => stri
     dispatchCoordinator: () => ({}),
     dispatchLeader: () => ({ instance: `dispatch-leader-${"b".repeat(64)}` }),
     dispatchAgent: () => ({ instance: `dispatch-${"a".repeat(64)}`, mediaRoot: mediaRoot("specialist"), agentId: "alice" }),
+    privateChat: () => ({ instance: "sam" }),
     pendingRouter: () => ({}),
     groupMemoryCurator: () => ({}),
     penny: () => ({ mediaRoot: mediaRoot("penny") }),

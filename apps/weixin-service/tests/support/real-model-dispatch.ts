@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { EXECUTOR_RUNTIME_HOME } from "../../src/agent-dispatch-executor.js";
 import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { ISOLATED_RUNTIME_KINDS } from "../../src/isolated-runtime-kinds.js";
+import { type PrivateChat, settledChat } from "./private-chat.js";
 import { allowNotes, dispatchConfig, start, type State } from "./real-main.js";
 
 /**
@@ -24,7 +25,8 @@ const GROUP = "oc_alpha", OWNER = "ou_owner", COORDINATOR = "sam", COORDINATOR_A
 const TEAMS = { alice: { name: "Alice", appId: "cli_aaaaaaaaaaaaaaaa" }, bill: { name: "Bill", appId: "cli_bbbbbbbbbbbbbbbb" }, jack: { name: "Jack", appId: "cli_cccccccccccccccc" } } as const;
 export type TeamId = keyof typeof TEAMS;
 
-export type ScenarioMessage = { messageId: string; senderId: string; text: string; mention?: TeamId };
+/** A message the owner sent: in the group, or, with `to`, in the console's private conversation with that agent about `requestId`. */
+export type ScenarioMessage = { messageId: string; senderId: string; text: string; mention?: TeamId; to?: string; requestId?: string | null };
 export type GroupPost = { identity: string; chatId: string; message: string; acceptedAt: number };
 export type DeliveredFile = { identity: string; chatId: string; kind: string; fileName: string; bytesBase64: string };
 export type RunRecord = {
@@ -177,6 +179,11 @@ export type ScenarioRun = {
   /** Sends a group message from the owner; `mention` genuinely mentions that Team Leader's application. */
   send(messageId: string, text: string, options?: { mention?: TeamId }): Promise<void>;
   state(): Promise<State>;
+  /**
+   * Sends the owner's message to `agentId`'s private conversation in the console, about `requestId` if given, and returns the
+   * conversation once its reply has come or failed; `timeoutMs` bounds the wait.
+   */
+  converse(agentId: string, text: string, requestId: string | null, timeoutMs: number): Promise<PrivateChat>;
   /** Waits for `predicate`; `what` names the awaited state in the failure when `timeoutMs` runs out. */
   until(what: string, predicate: (state: State) => boolean, timeoutMs: number): Promise<State>;
   /** The temporary directory granted to the Executors' file tools, where `files` were written. */
@@ -228,6 +235,11 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
           ...(mentioned ? { messageDetails: { message_id: messageId, chat_id: GROUP, msg_type: "text", body: { content },
             mentions: [{ key: "@_user_0", id: mentioned.appId, id_type: "app_id", name: mentioned.name }] } } : {}),
         });
+      },
+      async converse(agentId, text, requestId, timeoutMs) {
+        messages.push({ messageId: `console:${agentId}:${messages.length + 1}`, senderId: OWNER, text, to: agentId, requestId });
+        await service.post(`/api/private-chats/${agentId}/messages`, { text, requestId });
+        return await settledChat((route) => service.get<PrivateChat>(route), agentId, timeoutMs, 500);
       },
       async until(what, predicate, timeoutMs) {
         try { return await service.until(predicate, timeoutMs); }

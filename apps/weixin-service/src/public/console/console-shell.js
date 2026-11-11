@@ -14,6 +14,8 @@
     spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    // Lucide MessageCircle: the round speech bubble of the chat button beside the Coordinator and each Team Leader (agent-console::US-006/AC-01).
+    chat: '<path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"/>',
   };
   const PAGES = [
     { id: "overview", label: "团队总览", icon: "network", href: "/console" },

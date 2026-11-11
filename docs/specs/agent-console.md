@@ -1,9 +1,11 @@
 # Agent console
 
-> Status: specified; login, local-only access, the console shell with its 「本机」 section and the team overview with its records and storage tab are implemented, with the console pages 团队管理 ([team management](team-management.md)), MCP 管理 ([MCP catalog](mcp-catalog.md)) and Skill 管理 ([skill library](skill-library.md)); the private conversations are not.
-> Pending: the sidebar has no 私人任务 section yet, and the overview has no private scope, so it shows group requests only (agent-console::US-002/AC-01, AC-02, US-003/AC-01, US-004/AC-04). No chat button or record chat action exists yet (US-006).
+> Status: specified; login, local-only access, the console shell with its 「本机」 section, the team overview with its records and storage tab, and the private conversations with the Coordinator and the Team Leaders (US-006) are implemented, with the console pages 团队管理 ([team management](team-management.md)), MCP 管理 ([MCP catalog](mcp-catalog.md)) and Skill 管理 ([skill library](skill-library.md)); private requests are not.
+> Pending: the sidebar has no 私人任务 section yet, and the overview has no private scope, so it shows group requests only (agent-console::US-002/AC-01, AC-02, US-003/AC-01, US-004/AC-04).
+> Pending: a private conversation only discusses. It creates no private request (US-007), controls no request (REQ-002/AC-01, AC-02, AC-04) and supplements or confirms no group request (US-008). Until then its empty selection reads 「新的私聊」 and every record chat action reads 「与 <负责人> 私聊讨论」.
+> Pending: a team bound to no dispatch group is in no tree, so its Team Leader has no chat button until the overview has its private scope (US-003/AC-01, REQ-006); the service already holds its conversation (US-006/AC-04).
 > Related: [agent dispatch](agent-dispatch.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [channel boundaries](channel-switching.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0025](../adr/0025-isolate-private-financial-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: no storage exists for Team Leader chats or private requests.
+> Pending: no storage exists for private requests.
 
 ## Problem Statement
 
@@ -51,7 +53,7 @@ As the owner, I want each request's full record, so that I can see what was aske
 - agent-console::US-004/AC-01: Selecting a node or a name opens the drawer on its related records; a records button opens it without a selected node. The tab defaults to related records, beside relationships and storage. Switching tabs keeps the current search and expanded record.
 - agent-console::US-004/AC-02: Search, the business-state filter and the delivery-state filter share one row, with content-sized selectors.
 - agent-console::US-004/AC-03: Each record's summary has two rows: the title and the disclosure action; then the lead leader with the Assignment count, the business state, report delivery and the time. Long titles truncate in the summary and appear in full when expanded.
-- agent-console::US-004/AC-04: An expanded record shows, in order: the result; the path from the Coordinator to the lead leader, each cross-team Assignment and the reporting identities; the Assignment list with Executor, responsible leader, Agent Profile, cross-team marker, the Brief the Executor received, status and result; a collapsible group-report timeline of who posted what and whether the platform accepted it; the original message and its source; a chat action for each involved leader; and storage links. A partially failed request, an interrupted Assignment and a part no team took are each shown as such. Private requests have no group-report timeline.
+- agent-console::US-004/AC-04: An expanded record shows, in order: the result; the path from the Coordinator to the lead leader, each cross-team Assignment and the reporting identities; the Assignment list with Executor, responsible leader, Agent Profile, cross-team marker, the Brief the Executor received, status and result; a collapsible group-report timeline of who posted what and whether the platform accepted it; the original message and its source; for the owner's own requests, a chat action for each involved leader; and storage links. A partially failed request, an interrupted Assignment and a part no team took are each shown as such. Private requests have no group-report timeline.
 - agent-console::US-004/AC-05: Business outcome and report delivery appear separately. Platform acceptance is shown as acceptance, not as proof that the message was read.
 
 ### agent-console::US-005 See where information is kept
@@ -195,7 +197,10 @@ The interface is Chinese and light only; the project's capability declaration di
 | Request partially fails | Record shows the failed Assignments and the partially failed state under agent-console::US-004/AC-04 and [agent-dispatch::REQ-008/AC-01](agent-dispatch.md) |
 | Result accepted by the platform but delivery uncertain | Shown separately from business outcome under agent-console::US-004/AC-05 |
 | Owner writes a draft to Bill, switches to Jack, then back | Bill's draft is intact under agent-console::US-006/AC-02 |
-| Owner tries to chat with an Executor or Penny through the API | Refused under agent-console::US-006/AC-01 |
+| Owner tries to chat with an Executor or Penny through the API | Refused with 「只能与 Sam 和各团队负责人私聊」 under agent-console::US-006/AC-01 |
+| Owner sends another message while the agent's reply is on its way | The conversation shows 「<名字>正在回复…」 and takes no other message until the reply comes (Implementation Decisions: private conversations) |
+| A reply turn fails, or returns no valid reply | No reply is stored; the message shows 「<名字>这次没有回复：<原因>。可以重新发送。」 (Implementation Decisions: private conversations) |
+| The service stops while a reply is on its way | At the next start the message shows 「服务中断，没有回复。可以重新发送。」; the reply turn is never run again (Implementation Decisions: private conversations) |
 | Owner asks Jack's leader for travel planning in private | Explained; the owner can ask the Coordinator under agent-console::US-007/AC-02 |
 | Owner asks a team that is being deleted for new private work | Refused with discussion still open under agent-console::US-007/AC-04 |
 | Owner asks a team that has not finished onboarding, or is bound to no group, for private work | Accepted under agent-console::REQ-006 |
@@ -254,15 +259,30 @@ The unfinished requests come from the running service's dispatch records. The ru
 
 **Links into the overview.** `/console?request=<request ID>` opens the overview on that request's group with its record open and expanded; the dispatch-group refusal list links each unfinished request this way.
 
-**Private conversations.** Each private conversation with the Coordinator or a Team Leader is its own conversation scope for memory and requests (ADR-0027). Its transcript, drafts and private requests are stored apart from group state and ordinary personal memory. A message sent from the console enters the same admission path as other requests, with the owner as requester and the private conversation as destination.
+**Private conversations.** Each private conversation with the Coordinator or a Team Leader is its own conversation scope for memory and requests (ADR-0027).
+- The transcripts are kept in their own store in the state directory, `private-conversations.sqlite`, apart from group state and every memory; private requests will be kept apart likewise. A conversation's unsent draft and selected request stay in the page: they survive closing the drawer, switching to records and switching to another agent, not a reload.
+- The service holds a conversation for the Coordinator and for the Team Leader of every team in the current definitions, being deleted or not, onboarded or not. Any other ID is refused with 404 「只能与 Sam 和各团队负责人私聊」.
+- A request selector lists the owner's requests of the groups the running service dispatches in, newest first; the service names them, and a message may only be about one of them. A record's chat action selects its request at once, and the selection holds once the conversation has been read, if its selector lists the request.
+- A message is stored before its reply turn starts and only discusses: it creates no request and enters no dispatch admission. A private request, created from its card, will enter the same admission path as other requests, with the owner as requester and the private conversation as destination.
+- A message holds 1 to 4,000 characters. The service refuses, with nothing stored:
+  - an empty message: 「消息不能为空」;
+  - a longer one: 「消息过长，请控制在 4000 字以内」;
+  - one about a request the selector does not list: 「这项事务不在可关联的事务里，请重新选择。」;
+  - another message while a reply is on its way: 「上一条消息还在回复中，请稍候。」.
+
+  The page shows a conversation's latest 200 messages; a conversation it cannot read says 「暂时读不到这段私聊，请稍后再试。」 until a read succeeds.
+- A conversation answers one message at a time. A failed reply names its cause: 模型暂时不可用, 回复格式无效 or 运行出错. A message whose reply was on its way when the service stopped is interrupted at the next start, and its turn is never run again.
+- The reply is a tool-free turn on a fresh thread of the agent's own private-chat runtime, kept in `private-chat-runtimes/` apart from every group runtime and held in the dispatch pool. It outputs one Markdown message of at most 64,000 characters, and is told to use only headings `#` to `###`, unnested lists starting with `-` or `1.`, bold, italic, inline code, code blocks, tables and `[text](https://…)` links. The console renders all of these, and also list items starting with `*` or with any number and a period; an indented item joins its list, so lists never nest. Any other syntax, such as `####`, `+` items, quotes, rules or strikethrough, shows as written, and a reply without Markdown, such as one sentence, shows as one paragraph. It recalls and captures no memory, so nothing of a conversation enters a group's or the owner's memory (agent-console::CON-002). Its input is the owner's newest message, whole; the conversation before it (its last 20 messages, at most 12,000 characters); and what its agent may see of the owner's requests, the 20 newest and the selected one. Every other text in it is cut to its first 2,000 characters:
+  - the Coordinator: each request's group, summary, state, lead and cross-team teams, and its latest 10 group posts of the Coordinator and the Team Leaders; never an Assignment, a Brief or an Executor's result (agent-console::REQ-002/AC-03);
+  - a Team Leader: each request involving its team, with its message, the Coordinator's summary, its state and lead, the team's own Assignments with their Executors, statuses and results, the team's latest 10 posts and, when it leads, the reports other teams sent back through the Coordinator; never another team's Assignments or posts.
 
 ## Testing Decisions
 
 - **Authorization.** Tested at the HTTP boundary of the real local service: Host refusal, unauthorized access to every route, link expiry and single use, persistence across restart, revocation closing connections, and the fixture-mode exception. The control channel and the Codex plugin's authorization are tested over a real Unix socket, and the plugin's renewal at its HTTP client boundary.
 - **Projections.** Tested at their public interface from durable dispatch records, including partial failure, cross-team Assignments, delivery states and Penny's exclusion.
-- **Private conversations.** The real-main path drives console messages through admission and verifies destinations, requester checks, private isolation and confirmation once-only behavior.
+- **Private conversations.** The conversation's rules (who can be chatted with, each selector, each reply turn's input, one reply at a time, failure and interruption) are tested at their public interface over durable dispatch records. The real-main path drives console messages and verifies the refusals, the conversations of a team not onboarded and of one being deleted, that the running service's records reach each turn's input, and that nothing of a conversation reaches a request, a group post, a record or any memory, by searching every file of the state directory but the conversations' own store. Private requests will add admission, destinations, requester checks and confirmation once-only behavior. The real-model suite asks Sam and a lead Team Leader about a finished request ([agent dispatch](agent-dispatch.md) Testing Decisions: real-model suite).
 - **Dispatch groups.** The file write is tested at its public interface on real files: other keys unchanged, owner-only mode, each refusal leaving the file byte for byte unchanged, and the lock released. The real-main fixture route saves through the console API, restarts the service on the same state directory, and observes a group request reaching the Coordinator.
-- **Pages.** Playwright end-to-end tests drive the console as the owner: login, tree and records, drawer behavior, chat drafts, private request creation and a private supplement to a group request.
+- **Pages.** Playwright end-to-end tests drive the console as the owner: login, tree and records, drawer behavior, chat entries, drafts, Markdown replies with their reply states, private request creation and a private supplement to a group request.
 
 ## Out of Scope
 
