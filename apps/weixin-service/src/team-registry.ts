@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { FeishuDispatchConfiguration, LocalDispatchConfiguration } from "./feishu-agent-config.js";
@@ -538,6 +538,17 @@ export class TeamRegistry {
     return deepFreeze({ version: Number(row.version), basedOn: row.based_on === null ? null : Number(row.based_on),
       source: row.source as DefinitionsVersion["source"], definitions: JSON.parse(String(row.definitions)) as TeamDefinitions });
   }
+}
+
+/**
+ * The latest definitions a registry file holds, for a service that runs without dispatch: no team management has the registry
+ * open then, yet the teams stay stored for when dispatch is enabled again, and their profiles still select skills. Undefined
+ * when there is no registry file, or it holds no version.
+ */
+export function storedDefinitions(databasePath: string): TeamDefinitions | undefined {
+  if (!existsSync(databasePath)) return undefined;
+  const registry = new TeamRegistry(databasePath);
+  try { return registry.current()?.definitions; } finally { registry.close(); }
 }
 
 /**

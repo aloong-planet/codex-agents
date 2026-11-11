@@ -29,11 +29,11 @@ export type SkillView = Readonly<{ id: string; name: string; description: string
 
 /**
  * Why the library refuses: `folder`, the path is missing, not a folder, not absolute or unreadable; `skill_md`, no SKILL.md
- * at its root; `front_matter`, SKILL.md lacks a name or a description; `links`, entries that are not files or folders;
- * `duplicate`, another skill has the name; `changed`, the folder is not what was confirmed; `in_use`, profiles select the
- * skill; `unknown`, no such skill.
+ * at its root; `front_matter`, SKILL.md lacks a name or a description; `bom`, SKILL.md starts with a byte order mark;
+ * `name_length`, its name is too long; `links`, entries that are not files or folders; `duplicate`, another skill has the
+ * name; `changed`, the folder is not what was confirmed; `in_use`, profiles select the skill; `unknown`, no such skill.
  */
-export type SkillRefusalKind = Readonly<{ kind: "folder" | "skill_md" | "front_matter" | "changed" | "unknown" } | { kind: "links"; links: readonly string[] }
+export type SkillRefusalKind = Readonly<{ kind: "folder" | "skill_md" | "front_matter" | "bom" | "name_length" | "changed" | "unknown" } | { kind: "links"; links: readonly string[] }
   | { kind: "duplicate"; name: string } | { kind: "in_use"; uses: number }>;
 export class SkillRefusal extends Error {
   /** `cause` is the file-system error behind a `folder` refusal, which tells a missing source from an unreadable one. */
@@ -64,6 +64,8 @@ const SKILL_ID = /^skill-[0-9a-f]{8}$/u;
 /** The library's own temporary directories: a copy being staged, and a skill being removed. */
 const LEFTOVER = /^\.(?:staging|removed)-[0-9a-f-]{36}$/u;
 const SKILL_MD = "SKILL.md";
+/** The longest name, in characters, under which the App Server lists a skill. */
+const NAME_LIMIT = 64;
 const MANIFEST = "manifest.json";
 const DELETED = "deleted";
 const SCRIPT_EXTENSIONS = new Set([".sh", ".bash", ".zsh", ".fish", ".command", ".py", ".rb", ".pl", ".php", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".bat", ".cmd"]);
@@ -144,12 +146,16 @@ export class SkillLibrary {
   async read(folder: string): Promise<SkillPreview> {
     const source = this.sourcePath(folder);
     const root = await realFolder(source);
+    const declared = await rootSkill(root);
     const scan = await walk(root);
     if (scan.links.length) throw new SkillRefusal({ kind: "links", links: scan.links.map(({ shown }) => shown) });
-    if (!scan.files.some((file) => file.path === SKILL_MD)) throw new SkillRefusal({ kind: "skill_md" });
-    const { name, description } = described(await fs.promises.readFile(path.join(root, SKILL_MD), "utf8").catch(() => { throw new SkillRefusal({ kind: "folder" }); }));
-    this.refuseDuplicate(name);
-    return { folder: source, name, description, files: scan.files.map(({ path: file, script }) => ({ path: file, script })), fingerprint: fingerprint(scan.files) };
+    const listed = scan.files.find((file) => file.path === SKILL_MD);
+    if (!declared || !listed) throw new SkillRefusal({ kind: "skill_md" });
+    // The name and description shown are those of the very SKILL.md the fingerprint names.
+    if (listed.sha256 !== declared.sha256) throw new SkillRefusal({ kind: "changed" });
+    this.refuseDuplicate(declared.name);
+    return { folder: source, name: declared.name, description: declared.description, files: scan.files.map(({ path: file, script }) => ({ path: file, script })),
+      fingerprint: fingerprint(scan.files) };
   }
 
   /**
@@ -294,6 +300,7 @@ export class SkillLibrary {
    */
   private async stage(source: string, confirmed: string): Promise<Readonly<{ directory: string; name: string; description: string; files: SkillFile[] }>> {
     const root = await realFolder(source);
+    await rootSkill(root);
     const directory = path.join(this.directory, `.staging-${randomUUID()}`);
     try {
       const scan = await walk(root, path.join(directory, "files"));
@@ -444,9 +451,38 @@ function fingerprint(files: readonly SkillFile[], others: readonly string[] = []
 
 /** The name and description a SKILL.md declares; refused when either is missing. */
 function described(text: string): Readonly<{ name: string; description: string }> {
+  // The App Server lists no skill whose SKILL.md starts with a byte order mark or whose name is longer than NAME_LIMIT: a
+  // runtime would get the skill and its model would never read it, so the folder is refused here instead.
+  if (text.charCodeAt(0) === 0xFEFF) throw new SkillRefusal({ kind: "bom" });
   const { name, description } = frontMatter(text);
   if (!name || !description) throw new SkillRefusal({ kind: "front_matter" });
+  if ([...name].length > NAME_LIMIT) throw new SkillRefusal({ kind: "name_length" });
   return { name, description };
+}
+
+/**
+ * What the SKILL.md at a folder's root declares, read before anything below the folder: a folder that is not a skill, or whose
+ * SKILL.md cannot be used, is refused without reading the rest, however large it is. The hash is of the bytes read. A SKILL.md
+ * that is a link or not a file gives undefined and is left to the walk, which reports it.
+ */
+async function rootSkill(root: string): Promise<Readonly<{ name: string; description: string; sha256: string }> | undefined> {
+  let handle: fs.promises.FileHandle;
+  try { handle = await fs.promises.open(path.join(root, SKILL_MD), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW); }
+  catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") throw new SkillRefusal({ kind: "skill_md" });
+    // A symbolic link is not followed: opening it fails this way.
+    if (code === "ELOOP" || code === "EMLINK") return undefined;
+    throw new SkillRefusal({ kind: "folder" }, cause);
+  }
+  try {
+    if (!(await handle.stat()).isFile()) return undefined;
+    const content = await handle.readFile();
+    return { ...described(content.toString("utf8")), sha256: createHash("sha256").update(content).digest("hex") };
+  } catch (cause) {
+    if (cause instanceof SkillRefusal) throw cause;
+    throw new SkillRefusal({ kind: "folder" }, cause);
+  } finally { await handle.close(); }
 }
 
 /**
@@ -454,8 +490,7 @@ function described(text: string): Readonly<{ name: string; description: string }
  * Each value is a plain scalar, a quoted one or a block scalar (`|`, `>`), which may continue on indented lines.
  */
 export function frontMatter(text: string): Readonly<{ name?: string; description?: string }> {
-  // A file may start with a byte order mark (U+FEFF), which is not part of its first line.
-  const lines = (text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text).split(/\r?\n/u);
+  const lines = text.split(/\r?\n/u);
   if (lines[0]?.trimEnd() !== "---") return {};
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   if (end < 0) return {};

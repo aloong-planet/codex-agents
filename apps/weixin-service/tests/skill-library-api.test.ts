@@ -127,11 +127,17 @@ describe("Skill Library API", () => {
     const FOLDER = "找不到或读不了这个文件夹，无法导入。请确认填的是 skill 的根目录。";
     expect(await request("/api/skills/read", { folder: path.join(work, "absent") })).toEqual({ status: 400, body: { error: FOLDER, refusal: { kind: "folder" } } });
     expect(await request("/api/skills/read", { folder: path.join(source, "SKILL.md") })).toEqual({ status: 400, body: { error: FOLDER, refusal: { kind: "folder" } } });
-    expect(await request("/api/skills/read", { folder: "sources/trip-check" })).toEqual({ status: 400, body: { error: FOLDER, refusal: { kind: "folder" } } });
+    // The folder itself, named from the directory the service runs in: only an absolute path or one under ~ is read.
+    expect(await request("/api/skills/read", { folder: path.relative(process.cwd(), source) })).toEqual({ status: 400, body: { error: FOLDER, refusal: { kind: "folder" } } });
     expect((await request("/api/skills/read", { folder: path.dirname(source) })).body)
       .toEqual({ error: "这个文件夹里没有 SKILL.md，无法导入。请确认选的是 skill 的根目录。", refusal: { kind: "skill_md" } });
     expect((await request("/api/skills/read", { folder: folder(work, "nameless", { "SKILL.md": "---\ndescription: 做法\n---\n" }) })).body)
       .toEqual({ error: "SKILL.md 里缺少 name 或 description，无法导入。请确认选的是 skill 的根目录。", refusal: { kind: "front_matter" } });
+    // What the App Server would not list is refused with what to change.
+    expect(await request("/api/skills/read", { folder: folder(work, "marked", { "SKILL.md": `\u{FEFF}${skillMd("marked", "x")}` }) })).toEqual({ status: 400,
+      body: { error: "SKILL.md 开头有字节顺序标记（BOM），Codex 读不了它，无法导入。请另存为不带 BOM 的 UTF-8 后重新读取。", refusal: { kind: "bom" } } });
+    expect(await request("/api/skills/read", { folder: folder(work, "long", { "SKILL.md": skillMd("n".repeat(65), "x") }) })).toEqual({ status: 400,
+      body: { error: "SKILL.md 里的 name 超过 64 个字符，Codex 读不了它，无法导入。请改短后重新读取。", refusal: { kind: "name_length" } } });
     const linked = folder(work, "linked");
     fs.symlinkSync("../../shared-notes", path.join(linked, "references", "shared"));
     fs.symlinkSync("/usr/local/bin/run.sh", path.join(linked, "scripts", "run.sh"));

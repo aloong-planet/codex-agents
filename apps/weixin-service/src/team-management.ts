@@ -11,7 +11,7 @@ import type { AnnouncementSend, TeamAnnouncements } from "./team-announcements.j
 import type { SkillUse } from "./skill-library.js";
 import { type ApplicationCredentials, type CreationEnd, type OnboardingPlatform, TeamOnboarding } from "./team-onboarding.js";
 import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type DefinitionsVersion, type OnboardingMethod, type OnboardingOutcome, type TeamDefinition,
-  TeamDefinitionError, type TeamEdit, type TeamRegistry, type TestMessageOutcome } from "./team-registry.js";
+  type TeamDefinitions, TeamDefinitionError, type TeamEdit, type TeamRegistry, type TestMessageOutcome } from "./team-registry.js";
 
 /** A console input that is not a team definition at all; the page never sends one. */
 export class TeamInputError extends Error {}
@@ -212,10 +212,7 @@ export class TeamManagement {
   }
 
   /** The profiles of the current definitions that select a skill, as the skill's details list them (skill-library::US-003/AC-01). */
-  skillUses(skillId: string): SkillUse[] {
-    return this.current().definitions.teams.flatMap((team) => team.executorProfiles.filter(({ skills }) => skills?.some(({ id }) => id === skillId))
-      .map((profile) => ({ teamId: team.id, leader: team.leader.name, teamName: team.teamName, profile: profile.name })));
-  }
+  skillUses(skillId: string): SkillUse[] { return skillUsesIn(this.current().definitions, skillId); }
 
   /**
    * Moves the profiles that select the given skills to the versions given for them, so requests admitted from now on load
@@ -490,6 +487,12 @@ export type TeamsView = Readonly<{
  */
 export type RemovalView = { active: number; awaitingRequester: number; closing: number; tasks: Array<{ id: string; name: string; when: string }>;
   waiting: Array<{ requestId: string; label: string; summary: string; requester: "owner" | "member"; waitingFor: string[] }> };
+
+/** The profiles in `definitions` that select a skill. Also asked of the stored definitions while no team management runs. */
+export function skillUsesIn(definitions: TeamDefinitions, skillId: string): SkillUse[] {
+  return definitions.teams.flatMap((team) => team.executorProfiles.filter(({ skills }) => skills?.some(({ id }) => id === skillId))
+    .map((profile) => ({ teamId: team.id, leader: team.leader.name, teamName: team.teamName, profile: profile.name })));
+}
 
 const outcome = ({ status, reason }: OnboardingOutcome) => reason ? `${status}:${reason}` : status;
 function object(value: unknown): Record<string, unknown> {

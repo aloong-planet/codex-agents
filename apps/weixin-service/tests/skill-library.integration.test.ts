@@ -27,6 +27,17 @@ async function importSkill(running: Running, source: string): Promise<string> {
   const { preview } = await running.post<{ preview: { fingerprint: string } }>("/api/skills/read", { folder: source });
   return (await running.post<{ id: string }>("/api/skills/import", { folder: source, confirmed: preview.fingerprint })).id;
 }
+/** Bill's one profile checks the given skills, saved as the team page saves it. */
+async function billSelects(running: Running, skills: string[]) {
+  const view = await running.get<TeamView>("/api/teams");
+  const bill = view.teams.find(({ id }) => id === "bill")!;
+  await running.post("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader,
+    groups: bill.bindings.map(({ chatId }) => chatId),
+    executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, skills })) } });
+}
+const BILL_USE = { teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" };
+const retry = (messageId: string, requestId: string, subject: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
+  { modelReply: completedReply(subject) });
 const failedReply = (subject: string) => JSON.stringify({ message: "缺少日期，行程未完成。", results: [{ subject, status: "failed" }] });
 const completedReply = (subject: string) => JSON.stringify({ message: "行程已规划好。", results: [{ subject, status: "completed" }] });
 const skillLines = (state: State, brief: string) => (state.fixtureLeaderRequests ?? []).filter(({ teamId, input }) => teamId === "bill" && input.brief.message === brief)
@@ -42,12 +53,8 @@ it("gives each Executor exactly its profile's skills as its request was admitted
     const trip = await importSkill(running, tripSource);
     // A second skill of the library that no profile selects: it must reach no Executor.
     const meal = await importSkill(running, folder(sources, "meal-plan", "按预算安排菜单"));
-    const view = await running.get<TeamView>("/api/teams");
-    const bill = view.teams.find(({ id }) => id === "bill")!;
-    await running.post("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader,
-      groups: bill.bindings.map(({ chatId }) => chatId),
-      executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, skills: [trip] })) } });
-    expect((await running.get<SkillsView>("/api/skills")).skills.map(({ id, usedBy }) => [id, usedBy])).toEqual([[meal, []], [trip, [{ teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" }]]]);
+    await billSelects(running, [trip]);
+    expect((await running.get<SkillsView>("/api/skills")).skills.map(({ id, usedBy }) => [id, usedBy])).toEqual([[meal, []], [trip, [BILL_USE]]]);
 
     await running.post("/api/fixture/inbound", groupMessage("om_skill_first", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelReply: failedReply("规划周末一日行程") }));
     const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
@@ -64,8 +71,7 @@ it("gives each Executor exactly its profile's skills as its request was admitted
     // The failed request can still be retried, so the version it was admitted with stays stored beside the new one.
     expect(readdirSync(join(directory, "skill-library", trip)).sort()).toEqual(["1", "2"]);
 
-    await running.post("/api/fixture/inbound", groupMessage("om_skill_retry", "重试", { kind: "retry", agentId: null, requestId: failed.agentDispatch!.jobs[0]!.id, summary: "", message: "" },
-      { modelReply: completedReply("规划周末一日行程") }));
+    await running.post("/api/fixture/inbound", retry("om_skill_retry", failed.agentDispatch!.jobs[0]!.id, "规划周末一日行程"));
     await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
     await running.post("/api/fixture/inbound", groupMessage("om_skill_second", "再帮我规划周日行程", decision("bill", "规划周日行程"), { modelReply: completedReply("规划周日行程") }));
     const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
@@ -96,3 +102,64 @@ it("gives each Executor exactly its profile's skills as its request was admitted
       { event: "skill_reimported", skill: trip, version: 2, by: "browser" }]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
 }, 60000);
+
+// Unchecking every dispatch group turns dispatch off at the next start and leaves the teams stored for when it is enabled again
+// (agent-console::US-009). No team management and no dispatch run meanwhile: the library reads which profiles select a skill
+// from the stored definitions, and removes no version, because the requests that may need one cannot be read.
+it("keeps what stored teams and requests need of the library while the service runs without dispatch, and removes what nothing needs once dispatch is back", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "skill-library-off-")), sources = realpathSync(mkdtempSync(join(tmpdir(), "skill-library-sources-")));
+  let running: Running | undefined;
+  const versions = (skill: string) => readdirSync(join(directory, "skill-library", skill)).sort();
+  const dispatchGroups = async (service: Running, groups: string[]) => {
+    const form = await service.get<{ basedOn: string }>("/api/teams/dispatch-groups");
+    await service.post("/api/teams/dispatch-groups", { groups, basedOn: form.basedOn });
+  };
+  const reimport = async (service: Running, skill: string) => {
+    const { state } = (await service.get<SkillsView>("/api/skills")).skills.find(({ id }) => id === skill)!;
+    await service.post(`/api/skills/${skill}/reimport`, { confirmed: state.fingerprint });
+  };
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const source = folder(sources, "trip-check", "逐段核对站名与换乘");
+    const trip = await importSkill(running, source);
+    await billSelects(running, [trip]);
+    await running.post("/api/fixture/inbound", groupMessage("om_off_first", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelReply: failedReply("规划周末一日行程") }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    writeFileSync(join(source, "SKILL.md"), skillMd("trip-check", "逐段核对站名与换乘", "body-v2"));
+    await reimport(running, trip);
+    expect(versions(trip)).toEqual(["1", "2"]);
+    // The owner unchecks every dispatch group and restarts: dispatch is off.
+    await dispatchGroups(running, []);
+    await running.close(); running = undefined;
+
+    running = await start(directory);
+    expect(await running.get("/api/teams")).toEqual({ configured: false });
+    // The failed request's version is still there, and Bill's stored profile still counts as a use.
+    expect(versions(trip)).toEqual(["1", "2"]);
+    expect((await running.get<SkillsView>("/api/skills")).skills.map(({ id, usedBy }) => [id, usedBy])).toEqual([[trip, [BILL_USE]]]);
+    expect(await running.send(`/api/skills/${trip}/delete`, {})).toEqual({ status: 409, body: { error: "被 1 个能力档使用。先在团队管理解绑，才能删除。", refusal: { kind: "in_use", uses: 1 } } });
+    // A re-import while dispatch is off adds its version and removes none.
+    writeFileSync(join(source, "SKILL.md"), skillMd("trip-check", "逐段核对站名与换乘", "body-v3"));
+    await reimport(running, trip);
+    expect(versions(trip)).toEqual(["1", "2", "3"]);
+    // The owner checks the group again and restarts: dispatch is back, with the stored teams.
+    await dispatchGroups(running, ["oc_alpha"]);
+    await running.close(); running = undefined;
+
+    running = await start(directory);
+    // The start knows again what is needed: version 1 for the failed request, version 3 for Bill's profile, which followed the
+    // re-import made while dispatch was off. Nothing names version 2 any more.
+    await vi.waitFor(() => expect(versions(trip)).toEqual(["1", "3"]), { timeout: processWaitLimitMs, interval: 50 });
+    await running.post("/api/fixture/inbound", retry("om_off_retry", failed.agentDispatch!.jobs[0]!.id, "规划周末一日行程"));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    await running.post("/api/fixture/inbound", groupMessage("om_off_second", "再帮我规划周日行程", decision("bill", "规划周日行程"), { modelReply: completedReply("规划周日行程") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+    console.log(JSON.stringify({ kind: "skill_library_dispatch_off", commands: ["import trip-check", "Bill 能力档 1 selects trip-check", "请帮我规划周末一日行程", "re-import", "uncheck every dispatch group, restart",
+      "delete trip-check (refused)", "re-import", "check oc_alpha, restart", "重试", "再帮我规划周日行程"], jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes,
+      executorSkills: result.fixtureModelRequests?.map(({ skills }) => skills?.map(({ skillMd: text }) => text.trim().split("\n").at(-1))) }));
+    // The retried request's Executor got the version it was admitted with, and the new request's the one imported while dispatch was off.
+    expect(result.fixtureModelRequests!.map(({ skills }) => skills!.map(({ folder: id, skillMd: text }) => [id, text]))).toEqual([
+      [[trip, skillMd("trip-check", "逐段核对站名与换乘", "body-v1")]], [[trip, skillMd("trip-check", "逐段核对站名与换乘", "body-v3")]]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
+}, 120000);

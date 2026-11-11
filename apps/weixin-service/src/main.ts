@@ -78,8 +78,8 @@ import { CodexDispatchClassifier, parseCrossTeamDecision, parseDispatchDecision 
 import { assignmentSender, closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
-import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
-import { TeamManagement, type TeamManagementOptions } from "./team-management.js";
+import { acceptingTeams, COORDINATOR_ID, storedDefinitions, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
+import { skillUsesIn, TeamManagement, type TeamManagementOptions } from "./team-management.js";
 import { TeamAnnouncements } from "./team-announcements.js";
 import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
 import { DispatchGroupSettings, unfinishedRequestsByGroup } from "./dispatch-group-settings.js";
@@ -229,10 +229,14 @@ const consoleStateDirectory = path.dirname(privateStatePath);
 const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // The Skill Library: skills imported from local folders as copies, which Executor profiles select (skill-library spec). Its
 // directory is service state, outside every file grant (ADR-0029). Which versions requests can still run with is known once
-// the dispatch records can be read; until then the library removes none.
-const skillSnapshots: { needed?: () => ReadonlySet<string> } = {};
+// the dispatch records can be read; until then, and whenever the service runs without dispatch, the library removes none.
+// `dormantTeams` are the stored team definitions of a service without dispatch: its profiles still select skills.
+const skillSnapshots: { needed?: () => ReadonlySet<string> | undefined; dormantTeams?: TeamDefinitions } = {};
 const skillLibrary = new SkillLibrary({ directory: path.join(consoleStateDirectory, "skill-library"), audit: consoleAudit,
-  usedBy: (id) => teamManagement?.skillUses(id) ?? [],
+  usedBy: (id) => {
+    const definitions = teamManagement?.current().definitions ?? skillSnapshots.dormantTeams;
+    return definitions ? skillUsesIn(definitions, id) : [];
+  },
   reimported: ({ id, version }) => teamManagement?.followSkills({ [id]: version }),
   needed: () => skillSnapshots.needed?.() });
 // In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
@@ -284,6 +288,12 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
     return Object.freeze({ ...rest, dispatch: management.roster() });
   } catch (error) { registry.close(); throw error; }
 })();
+// Without dispatch nothing can save a team, so the stored definitions are read once: a skill one of their profiles selects stays
+// in use, and cannot be deleted, until dispatch is enabled again and the profile unchecks it (agent-console::US-009).
+if (!teamManagement) {
+  const stored = storedDefinitions(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
+  if (stored) skillSnapshots.dormantTeams = stored;
+}
 const directChannel = fixtureMode || !weixinConfiguration
   ? undefined
   : new DirectIlinkChannel({
@@ -1373,17 +1383,19 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
 // A skill version stays stored while a profile of the current definitions selects it, or a request that can still run or be
-// retried was admitted with it: such a request creates Executor runtimes from its own definitions version.
+// retried was admitted with it: such a request creates Executor runtimes from its own definitions version. A service without
+// dispatch reads neither the definitions' history nor the stored requests, so it cannot tell, and removes nothing.
 skillSnapshots.needed = () => {
+  if (!teamManagement || !agentDispatch) return undefined;
   const needed = new Set<string>(), seen = new Set<number>();
   const add = (definitions: TeamDefinitions | undefined) => {
     for (const team of definitions?.teams ?? []) for (const profile of team.executorProfiles) for (const ref of profile.skills ?? []) needed.add(skillKey(ref));
   };
-  add(teamManagement?.current().definitions);
-  for (const { job } of agentDispatch?.records() ?? []) {
+  add(teamManagement.current().definitions);
+  for (const { job } of agentDispatch.records()) {
     if (job.definitionsVersion === undefined || job.status === "completed" || job.status === "cancelled" || seen.has(job.definitionsVersion)) continue;
     seen.add(job.definitionsVersion);
-    add(teamManagement?.version(job.definitionsVersion)?.definitions);
+    add(teamManagement.version(job.definitionsVersion)?.definitions);
   }
   return needed;
 };

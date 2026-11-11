@@ -56,7 +56,11 @@ When an Executor is created, the host copies the skills its profile selects, in 
 | Owner enters a path to a file, a missing folder, or a folder without SKILL.md at its root | Error asking for the skill's root folder under skill-library::US-001/AC-03. A path that is missing, not a folder or unreadable shows 「找不到或读不了这个文件夹，无法导入。请确认填的是 skill 的根目录。」 |
 | Owner enters a path that is neither absolute nor starts with `~/` | Refused as a path that cannot be found, with the same words |
 | The typed path is itself a symbolic link to a folder, or passes through one | The folder it leads to is read, because the owner's skill folders are reached this way. Only links inside the folder are refused under skill-library::US-001/AC-05 |
+| Owner enters a large folder that is not a skill | Refused for its missing SKILL.md before anything below the folder is read |
 | SKILL.md lacks a name or description | Not importable; same error form under skill-library::US-001/AC-03: 「SKILL.md 里缺少 name 或 description，无法导入。请确认选的是 skill 的根目录。」 |
+| SKILL.md starts with a byte order mark | Not importable, at an import and at a re-import, because the App Server would not list the skill: 「SKILL.md 开头有字节顺序标记（BOM），Codex 读不了它，无法导入。请另存为不带 BOM 的 UTF-8 后重新读取。」 |
+| SKILL.md's name is longer than 64 characters | Not importable, at an import and at a re-import, because the App Server would not list the skill: 「SKILL.md 里的 name 超过 64 个字符，Codex 读不了它，无法导入。请改短后重新读取。」 |
+| SKILL.md has a shape the App Server refuses for a reason not measured (Implementation Decisions: what a folder holds) | The skill is imported, written to the Executor's home and carried on its turns, but the App Server puts nothing of it before the model, and the turn does not fail or report it |
 | Folder contains a symbolic link, including one pointing outside the folder | Refused with the links listed under skill-library::US-001/AC-05 |
 | Folder contains an entry that is neither a file nor a folder, such as a socket | Refused and listed with the links, as 「<路径>（不是普通文件）」 |
 | Folder is very large or contains binary files | Imported as listed under skill-library::US-001/AC-05 |
@@ -71,6 +75,7 @@ When an Executor is created, the host copies the skills its profile selects, in 
 | Source folder moved or deleted | Source state shows it; the copy stays usable under skill-library::US-002/AC-03 |
 | Owner deletes a skill still selected by a profile | Delete disabled under skill-library::US-003/AC-02; the service refuses it as well: 「被 <n> 个能力档使用。先在团队管理解绑，才能删除。」 |
 | Owner re-imports or deletes a skill that a request admitted earlier still names, such as a failed request that can be retried | The version the request was admitted with stays stored until the request can no longer run, and a retry's Executor gets it under skill-library::REQ-002 |
+| Owner unchecks every dispatch group, so the service runs without dispatch ([agent-console::US-009](agent-console.md)), and opens Skill 管理 | The stored teams' profiles still count as uses, so a skill one of them selects cannot be deleted; no version is removed while dispatch is off, and a re-import adds its version. Once dispatch is on again, profiles follow the newest version and what nothing needs is removed |
 | Owner acts on a skill another page has deleted | 「这个 skill 已不存在，请刷新页面。」 |
 | An import, re-import or deletion cannot be written to the audit | Nothing is stored or deleted ([agent-console::REQ-004](agent-console.md)) |
 | Service stops during an import, a re-import or a deletion | The library holds the skill as it was before or as it is after, never part of it; what the interrupted step left is cleared at the next start |
@@ -82,6 +87,8 @@ When an Executor is created, the host copies the skills its profile selects, in 
 ## Implementation Decisions
 
 **What a folder holds.** A skill is a folder with a file named `SKILL.md` at its root. Its name and description are the `name` and `description` of that file's front matter: the block between a first line `---` and the next line `---`. Each value is a plain scalar, a single- or double-quoted one, or a block scalar (`|`, `>`), and may continue on indented lines; other keys are not read. Every regular file at any depth is part of the skill, hidden files included, each named by its path from the root with `/` separators and listed in code-unit order; empty folders are not kept. A file counts as a script, which the page marks, when it lies under a folder named `scripts`, has one of the extensions `.sh .bash .zsh .fish .command .py .rb .pl .php .js .mjs .cjs .ts .ps1 .bat .cmd`, has an executable permission bit, or starts with `#!`.
+
+The root SKILL.md is read before anything below the folder. The library refuses what the Codex App Server would not list, as measured on the installed App Server on 2026-11-11: a SKILL.md that starts with a byte order mark, and a name of more than 64 characters. The same measurement found it to list a SKILL.md with CRLF line ends, a description of 5,000 characters, a name with spaces or Chinese characters, and a colon in a plain description. Its rules were not read beyond these shapes.
 
 **Library store.** The library is the directory `skill-library` in the service's state directory, which no file grant reaches ([ADR-0029](../adr/0029-keep-service-state-outside-every-file-grant.md)).
 - Each skill has a directory named by its ID, `skill-` and eight hexadecimal characters. The ID never changes, whatever the skill is renamed to.
@@ -95,7 +102,9 @@ When an Executor is created, the host copies the skills its profile selects, in 
 
 **Snapshots.** A profile's selection is stored in the team definitions as skill IDs with versions, so a request's definitions version fixes the content its Executors load ([agent-dispatch::REQ-017/AC-01](agent-dispatch.md)). A team save stores each checked skill in the library's current version. A re-import appends a definitions version in which every profile that selects the skill names the new version; a start does the same for any profile left on an earlier one.
 
-**Version removal.** A superseded version, and every version of a deleted skill, is removed once no profile of the current definitions names it and no request that is neither completed nor cancelled was admitted under a definitions version that names it. The service checks this after a re-import, after a deletion, whenever dispatch work ends and at start.
+**Version removal.** A superseded version, and every version of a deleted skill, is removed once no profile of the current definitions names it and no request that is neither completed nor cancelled was admitted under a definitions version that names it. The service checks this after a re-import, after a deletion, whenever dispatch work ends and at start. A service that runs without dispatch reads neither the earlier definitions versions nor the stored requests, so it removes no version.
+
+**Uses.** The profiles that select a skill are those of the current team definitions. A service that runs without dispatch has no team management, while the teams stay stored for when dispatch is enabled again; it reads the stored definitions once at start, since nothing can save a team meanwhile, and counts their profiles as uses.
 
 **Runtime home.** Every creation of an Executor's runtime removes the three places its App Server reads the runtime's own skills from: `skills` in its Codex home, and `.agents/skills` in its HOME and in its workspace. It then writes each skill of the profile into `skills/<skill ID>/` of the Codex home and checks every written file against the manifest. The App Server only lists such a skill to the model by name and description, and an Executor has no tool that opens files of its runtime home. Each Executor turn therefore carries every written skill as a skill input item naming its SKILL.md, and the App Server puts that file's text into the turn.
 

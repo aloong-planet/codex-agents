@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { acceptingTeams, TeamDefinitionError, TeamRegistry, type TeamDefinitions, type TeamEdit } from "../src/team-registry.js";
+import { acceptingTeams, storedDefinitions, TeamDefinitionError, TeamRegistry, type TeamDefinitions, type TeamEdit } from "../src/team-registry.js";
 
 // Registry seam only. The local configuration follows the documented shape in docs/ops/feishu-agent-dispatch.md;
 // the owner's real channel.json is production data and is not read. Real-main wiring is in team-management.integration.test.ts.
@@ -813,5 +813,20 @@ describe("skills of an Executor profile", () => {
       expect(() => registry.saveTeam({ ...checking(saved.definitions, "bill", [A]), responsibility: "另一页的修改" }, { basedOn: saved.version, skills: { [A]: 2, [B]: 1 } }))
         .toThrow(/^team_registry_version_stale$/);
     } finally { registry.close(); }
+  });
+
+  // A service without dispatch opens no registry, yet the stored profiles still select skills (agent-console::US-009).
+  it("gives the definitions a closed registry file holds, and nothing where there is no registry, without creating one", () => {
+    const file = databasePath();
+    expect(storedDefinitions(file)).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
+    const registry = new TeamRegistry(file);
+    let saved: TeamDefinitions;
+    try {
+      const first = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      saved = registry.saveTeam(checking(first.definitions, "bill", [A]), { basedOn: 1, skills: { [A]: 2 } }).version.definitions;
+    } finally { registry.close(); }
+    expect(storedDefinitions(file)).toEqual(saved);
+    expect(storedDefinitions(file)!.teams.find(({ id }) => id === "bill")!.executorProfiles[0]!.skills).toEqual([{ id: A, version: 2 }]);
   });
 });

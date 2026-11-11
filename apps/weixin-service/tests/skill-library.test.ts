@@ -1,6 +1,11 @@
 // The Skill Library at its public interface, on real temporary folders (docs/specs/skill-library.md, Testing Decisions
 // "Library"). The sample folder has the shape of the owner's real skill folders: scripts at the root with and without the
 // executable bit, a quoted description, front matter keys the library does not read, nested data, a vendored bundle.
+// Gaps, each needing a file to change at a moment no case can choose: a SKILL.md rewritten between the first look at it and the
+// walk of the same read (refused as changed), and a SKILL.md that opens but then fails to be read. In real main, the answer
+// "no uses" of a service that has neither team management nor a stored registry is covered only by its two halves, here and
+// in team-registry.test.ts.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -24,25 +29,29 @@ const BINARY = Buffer.from(Array.from({ length: 1024 }, (_value, index) => index
 const LARGE = Buffer.alloc(2 * 1024 * 1024 + 7, "x");
 const skillMd = (name: string, body: string, description = `"生成可审阅的补丁与测试用例：不运行。 - 交付代码时使用"`) =>
   `---\nname: ${name}\ndescription: ${description}\nwhen_to_use: 交付代码时\ndisable-model-invocation: true\n---\n\n# ${name}\n\n${body}\n`;
+// Each of the four script files is a script by one rule alone: its extension (check-patch.mjs), its executable bit (bin/tool),
+// its first line (tools/run), and the `scripts` folder it lies in (scripts/data.txt).
 const SAMPLE_FILES: Record<string, Buffer | string> = {
   "SKILL.md": skillMd("patch-writer", "body-v1"),
   "check-patch.mjs": "export const check = () => true;\n",
-  "watch.sh": "echo watching\n",
+  "bin/tool": "tool\n",
   "tools/run": "#!/bin/sh\nexit 0\n",
+  "scripts/data.txt": "data\n",
   "references/testing.md": "# Testing\n",
   "assets/routing/routing.json": "{\"rules\":[]}\n",
   "template/.gitignore": "node_modules\n",
   "vendor/blob.bin": BINARY,
   "vendor/bundle.txt": LARGE,
 };
-const SAMPLE_PATHS = ["SKILL.md", "assets/routing/routing.json", "check-patch.mjs", "references/testing.md", "template/.gitignore", "tools/run", "vendor/blob.bin", "vendor/bundle.txt", "watch.sh"];
+const SAMPLE_PATHS = ["SKILL.md", "assets/routing/routing.json", "bin/tool", "check-patch.mjs", "references/testing.md", "scripts/data.txt", "template/.gitignore", "tools/run",
+  "vendor/blob.bin", "vendor/bundle.txt"];
 
 function write(folder: string, files: Record<string, Buffer | string>): string {
   for (const [file, content] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(folder, file)), { recursive: true });
     fs.writeFileSync(path.join(folder, file), content);
   }
-  if (files["watch.sh"] !== undefined) fs.chmodSync(path.join(folder, "watch.sh"), 0o755);
+  if (files["bin/tool"] !== undefined) fs.chmodSync(path.join(folder, "bin", "tool"), 0o755);
   return folder;
 }
 /** A skill folder like the owner's, under a fresh temporary directory. */
@@ -89,8 +98,9 @@ describe("importing a folder", () => {
     const preview = await library.read(folder);
     expect(preview).toMatchObject({ folder, name: "patch-writer", description: "生成可审阅的补丁与测试用例：不运行。 - 交付代码时使用" });
     expect(preview.files.map((file) => file.path)).toEqual(SAMPLE_PATHS);
-    // A script by its extension, by its executable bit, and by its first line; data and the vendored bundle are not.
-    expect(preview.files.filter((file) => file.script).map((file) => file.path)).toEqual(["check-patch.mjs", "tools/run", "watch.sh"]);
+    // A script by its executable bit, by its extension, by its `scripts` folder, or by its first line; data and the vendored
+    // bundle are not.
+    expect(preview.files.filter((file) => file.script).map((file) => file.path)).toEqual(["bin/tool", "check-patch.mjs", "scripts/data.txt", "tools/run"]);
     expect(library.list()).toEqual([]);
 
     const skill = await library.import(folder, preview.fingerprint, BROWSER);
@@ -119,17 +129,41 @@ describe("importing a folder", () => {
   it.each([
     ["a missing folder", (root: string) => path.join(root, "absent"), "folder"],
     ["a file", (root: string) => path.join(root, "patch-writer", "SKILL.md"), "folder"],
-    ["a path that is not absolute", () => "agent-skills/patch-writer", "folder"],
+    // The sample folder itself, named from the directory the service runs in: it exists there, and is refused all the same.
+    ["a path that is not absolute", (root: string) => path.relative(process.cwd(), path.join(root, "patch-writer")), "folder"],
     ["a folder with SKILL.md only below its root", (root: string) => write(path.join(root, "nested"), { "patch-writer/SKILL.md": skillMd("patch-writer", "x") }), "skill_md"],
+    ["a folder whose SKILL.md is itself a folder", (root: string) => write(path.join(root, "foldered"), { "SKILL.md/README.md": "x" }), "skill_md"],
+    ["a folder whose SKILL.md cannot be read", (root: string) => { const folder = write(path.join(root, "closed"), { "SKILL.md": skillMd("patch-writer", "x") }); fs.chmodSync(path.join(folder, "SKILL.md"), 0o000); return folder; }, "folder"],
     ["a SKILL.md without front matter", (root: string) => write(path.join(root, "plain"), { "SKILL.md": "# patch-writer\n" }), "front_matter"],
     ["a SKILL.md without a name", (root: string) => write(path.join(root, "nameless"), { "SKILL.md": "---\ndescription: 写补丁\n---\n" }), "front_matter"],
     ["a SKILL.md with an empty description", (root: string) => write(path.join(root, "undescribed"), { "SKILL.md": "---\nname: patch-writer\ndescription:\n---\n" }), "front_matter"],
+    // The two shapes the App Server was measured not to list: the skill would reach a runtime and never be read.
+    ["a SKILL.md that starts with a byte order mark", (root: string) => write(path.join(root, "marked"), { "SKILL.md": `\u{FEFF}${skillMd("patch-writer", "x")}` }), "bom"],
+    ["a SKILL.md whose name has 65 characters", (root: string) => write(path.join(root, "long"), { "SKILL.md": skillMd("n".repeat(65), "x") }), "name_length"],
   ])("refuses %s, asking for the skill's root folder", async (_what, folderOf, kind) => {
     const { library } = open();
     const folder = folderOf(path.dirname(sample()));
     expect(await refusal(library.read(folder))).toEqual({ kind });
     expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual({ kind });
     expect(library.list()).toEqual([]);
+  });
+
+  it("imports a skill whose name has exactly 64 characters, the longest the App Server lists", async () => {
+    const { library } = open();
+    const name = "n".repeat(64);
+    const folder = write(path.join(temporary("skill-source-"), "long"), { "SKILL.md": skillMd(name, "x") });
+    expect((await imported(library, folder)).name).toBe(name);
+  });
+
+  it("refuses a folder with no SKILL.md at its root before reading what is below it", async () => {
+    const { library } = open();
+    const folder = write(path.join(temporary("skill-source-"), "not-a-skill"), { "data/closed.bin": "x" });
+    // Unreadable: a read of it would refuse the folder as unreadable instead.
+    fs.chmodSync(path.join(folder, "data"), 0o000);
+    try {
+      expect(await refusal(library.read(folder))).toEqual({ kind: "skill_md" });
+      expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual({ kind: "skill_md" });
+    } finally { fs.chmodSync(path.join(folder, "data"), 0o700); }
   });
 
   it("refuses a folder that names a skill the library already has, at the read and at the import", async () => {
@@ -161,11 +195,34 @@ describe("importing a folder", () => {
     expect(tree(settings.directory)).toEqual({});
   });
 
+  it("lists a SKILL.md that is itself a link among the refused links, and reads nothing through it", async () => {
+    const { library, settings } = open();
+    const elsewhere = path.join(temporary("skill-elsewhere-"), "SKILL.md");
+    fs.writeFileSync(elsewhere, skillMd("patch-writer", "from elsewhere"));
+    const folder = write(path.join(temporary("skill-source-"), "linked-root"), { "references/testing.md": "# Testing\n" });
+    fs.symlinkSync(elsewhere, path.join(folder, "SKILL.md"));
+    const why = { kind: "links", links: [`SKILL.md → ${elsewhere}`] };
+    expect(await refusal(library.read(folder))).toEqual(why);
+    expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual(why);
+    expect(tree(settings.directory)).toEqual({});
+  });
+
+  it("refuses a folder with an entry that is neither a file nor a folder, and lists it, without opening it", async () => {
+    const { library, settings } = open();
+    const folder = sample();
+    // A named pipe: opening it for reading would wait for a writer that never comes.
+    execFileSync("mkfifo", [path.join(folder, "references", "queue")]);
+    const why = { kind: "links", links: ["references/queue（不是普通文件）"] };
+    expect(await refusal(library.read(folder))).toEqual(why);
+    expect(await refusal(library.import(folder, "anything", BROWSER))).toEqual(why);
+    expect(tree(settings.directory)).toEqual({});
+  });
+
   it.each([
     ["a file's content changed", (folder: string) => fs.writeFileSync(path.join(folder, "references", "testing.md"), "# Changed\n"), { kind: "changed" }],
     ["a file was added", (folder: string) => fs.writeFileSync(path.join(folder, "references", "added.md"), "new"), { kind: "changed" }],
     ["a file was removed", (folder: string) => fs.rmSync(path.join(folder, "check-patch.mjs")), { kind: "changed" }],
-    ["a file became a link", (folder: string) => { fs.rmSync(path.join(folder, "watch.sh")); fs.symlinkSync("/etc/hosts", path.join(folder, "watch.sh")); }, { kind: "links", links: ["watch.sh → /etc/hosts"] }],
+    ["a file became a link", (folder: string) => { fs.rmSync(path.join(folder, "bin", "tool")); fs.symlinkSync("/etc/hosts", path.join(folder, "bin", "tool")); }, { kind: "links", links: ["bin/tool → /etc/hosts"] }],
   ])("imports nothing when %s between the read and the confirmation", async (_what, change, why) => {
     const { library, settings } = open();
     const folder = sample();
@@ -339,8 +396,8 @@ describe("the library's records", () => {
     library.remove(skill.id, BROWSER);
     const browser = { id: "browser-1", label: "Chrome · macOS" };
     expect(audit().map((entry) => Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "at")))).toEqual([
-      { by: "browser", browser, event: "skill_imported", skill: skill.id, name: "patch-writer", version: 1, source: folder, files: 9 },
-      { by: "browser", browser, event: "skill_reimported", skill: skill.id, name: "patch-writer", version: 2, source: folder, files: 8, changed: 2 },
+      { by: "browser", browser, event: "skill_imported", skill: skill.id, name: "patch-writer", version: 1, source: folder, files: 10 },
+      { by: "browser", browser, event: "skill_reimported", skill: skill.id, name: "patch-writer", version: 2, source: folder, files: 9, changed: 2 },
       { by: "browser", browser, event: "skill_deleted", skill: skill.id, name: "patch-writer", version: 2, source: folder },
     ]);
     expect(fs.readFileSync(path.join(state, AUDIT_FILE), "utf8")).not.toContain("body-v");
@@ -353,6 +410,48 @@ describe("the library's records", () => {
     fs.mkdirSync(path.join(state, AUDIT_FILE));
     await expect(library.import(folder, preview.fingerprint, BROWSER)).rejects.toThrow();
     expect(library.list()).toEqual([]);
+    expect(tree(settings.directory)).toEqual({});
+  });
+
+  it("re-imports and deletes nothing when the change cannot be audited", async () => {
+    const reimported: unknown[] = [];
+    const { library, settings, state } = open({ reimported: (ref) => reimported.push(ref) });
+    const folder = sample();
+    const skill = await imported(library, folder);
+    fs.writeFileSync(path.join(folder, "SKILL.md"), skillMd("patch-writer", "body-v2"));
+    const changed = await library.compare(skill.id) as { fingerprint: string };
+    // The audit file gives way to a directory of its name: no entry can be appended from here on.
+    fs.renameSync(path.join(state, AUDIT_FILE), path.join(state, "audit-before"));
+    fs.mkdirSync(path.join(state, AUDIT_FILE));
+
+    await expect(library.reimport(skill.id, changed.fingerprint, BROWSER)).rejects.toThrow();
+    expect(library.list()).toEqual([skill]);
+    expect(fs.readdirSync(path.join(settings.directory, skill.id))).toEqual(["1"]);
+    // No profile was moved to a version that is not there.
+    expect(reimported).toEqual([]);
+
+    expect(() => library.remove(skill.id, BROWSER)).toThrow();
+    expect(library.list()).toEqual([skill]);
+    expect(new SkillLibrary(settings).list()).toEqual([skill]);
+  });
+
+  it("keeps a deleted skill deleted when it is opened anew, with the version a request still needs", async () => {
+    const live = new Set<string>();
+    const { library, settings } = open({ needed: () => live });
+    const folder = sample();
+    const skill = await imported(library, folder);
+    live.add(skillKey(skill));
+    library.remove(skill.id, BROWSER);
+
+    const reopened = new SkillLibrary(settings);
+    expect(reopened.list()).toEqual([]);
+    expect(reopened.current(skill.id)).toBeUndefined();
+    expect(reopened.version(skill)).toEqual(skill);
+    // Its name is free for a new import, as it was before the restart.
+    expect((await reopened.read(folder)).name).toBe("patch-writer");
+    // Once nothing needs it, the reopened library removes what is left of it.
+    live.clear();
+    reopened.prune();
     expect(tree(settings.directory)).toEqual({});
   });
 
@@ -387,7 +486,9 @@ describe("SKILL.md front matter", () => {
     ["a double-quoted value with a colon and an escape", "---\nname: \"trip-check\"\ndescription: \"核对：站名\\t换乘\"\n---\n", { name: "trip-check", description: "核对：站名\t换乘" }],
     ["a single-quoted value", "---\nname: 'trip-check'\ndescription: 'it''s checked'\n---\n", { name: "trip-check", description: "it's checked" }],
     ["a folded block and a continued plain value", "---\nname: trip-check\ndescription: >-\n  逐段核对\n  站名与换乘\nwhen_to_use: 出行\n  之前\n---\n", { name: "trip-check", description: "逐段核对 站名与换乘" }],
-    ["Windows line ends and a byte order mark", "\u{FEFF}---\r\nname: trip-check\r\ndescription: 核对\r\n---\r\n", { name: "trip-check", description: "核对" }],
+    ["Windows line ends", "---\r\nname: trip-check\r\ndescription: 核对\r\n---\r\n", { name: "trip-check", description: "核对" }],
+    // A byte order mark is not skipped: the App Server finds no front matter behind one, and the library refuses such a file.
+    ["nothing behind a byte order mark", "\u{FEFF}---\nname: trip-check\ndescription: 核对\n---\n", {}],
     ["no closing line", "---\nname: trip-check\ndescription: 核对\n", {}],
     ["keys only in the body", "# trip-check\n\nname: trip-check\ndescription: 核对\n", {}],
   ])("reads %s", (_what, text, found) => {

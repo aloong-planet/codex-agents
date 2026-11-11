@@ -128,6 +128,8 @@ function skillRefusal(refusal: SkillRefusalKind, reimport: boolean): [number, st
     case "folder": return [400, "找不到或读不了这个文件夹，无法导入。请确认填的是 skill 的根目录。"];
     case "skill_md": return [400, "这个文件夹里没有 SKILL.md，无法导入。请确认选的是 skill 的根目录。"];
     case "front_matter": return [400, "SKILL.md 里缺少 name 或 description，无法导入。请确认选的是 skill 的根目录。"];
+    case "bom": return [400, "SKILL.md 开头有字节顺序标记（BOM），Codex 读不了它，无法导入。请另存为不带 BOM 的 UTF-8 后重新读取。"];
+    case "name_length": return [400, "SKILL.md 里的 name 超过 64 个字符，Codex 读不了它，无法导入。请改短后重新读取。"];
     case "links": return [400, `这个文件夹里有 ${refusal.links.length} 个符号链接，无法导入：${refusal.links.join("；")}。符号链接可能指向文件夹以外的文件。请换成实际文件后重新读取。`];
     case "duplicate": return [409, reimport ? `来源里的 SKILL.md 现在叫「${refusal.name}」，与已有的 skill 同名，没有重新导入。`
       : `已有同名 skill「${refusal.name}」。要更新它，请在它的详情里重新导入；或换一个文件夹。`];

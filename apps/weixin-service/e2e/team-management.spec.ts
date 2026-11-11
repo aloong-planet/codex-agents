@@ -5,6 +5,7 @@ import path from "node:path";
 import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
+import { importSkill, post, read } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // 团队管理 (docs/specs/team-management.md) in a real browser, against the fixture service with Feishu dispatch and the fake
@@ -30,12 +31,6 @@ const dispatchChannel = { channel: "feishu", owner, taskScope: { accountId: "fix
 const GROUP_NAMES = { chats: { oc_alpha: { name: "银河护卫队" }, oc_beta: { name: "产品讨论组" } } };
 
 type Server = { url: string; cookie: string; directory: string };
-async function post(server: Server, pathname: string, body: unknown) {
-  const response = await fetch(`${server.url}${pathname}`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" }, body: JSON.stringify(body) });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${pathname} ${response.status}: ${text}`);
-  return JSON.parse(text) as Record<string, unknown>;
-}
 /** Sets the fake onboarding platform's answers, as Feishu would give them. A group's answers replace its whole entry, name included. */
 const onboarding = (server: Server, control: unknown) => post(server, "/api/fixture/inbound", { onboardingControl: control });
 const editor = (page: Page) => page.locator("[data-editor]");
@@ -49,7 +44,6 @@ type TeamsView = { version: number; teams: Array<{ id: string; teamName: string;
   profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string; removal?: Removal }> }> };
 type ServiceState = { agentDispatch?: { jobs: Array<{ id: string; status: string; assignments: Array<{ teamId: string; status: string }> }> }; fixtureModelRequests?: unknown[]; channels?: { feishu?: { ready?: boolean } };
   workflowModulePermissions?: { modules: Array<{ moduleId: string; revision: number; scopes: Array<{ scopeId: string }> }> } };
-const read = async <T>(server: Server, pathname: string) => await (await fetch(`${server.url}${pathname}`, { headers: { cookie: server.cookie } })).json() as T;
 const serviceState = (server: Server) => read<ServiceState>(server, "/api/state");
 const jobStatuses = async (server: Server) => (await serviceState(server)).agentDispatch?.jobs.map(({ status }) => status);
 /** The fixture Coordinator's decision to dispatch a request to `agentId`. */
@@ -260,17 +254,21 @@ test.describe("with Feishu dispatch", () => {
       await page.locator(".atm-heading-actions").getByRole("link", { name: "Skill 管理" }).click();
       await expect(page).toHaveURL(/\/console\/skills$/);
 
-      // Two skills imported on the Skill 管理 page's API, as its page does.
+      // Three skills imported as the Skill 管理 page imports them. The third's name and description, which its folder supplies,
+      // look like markup: the page shows them as the text they are (agent-console::REQ-005/AC-04).
+      const MARKUP_NAME = '<b data-markup="name">粗体</b>', MARKUP_DESCRIPTION = '<img src=x onerror="window.__skillMarkup=1"> 描述';
       const imported: Record<string, string> = {};
-      for (const [name, description] of [["trip-check", "逐段核对站名与换乘"], ["meal-plan", "按预算安排菜单"]] as const) {
-        mkdirSync(path.join(sources, name));
-        writeFileSync(path.join(sources, name, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
-        const { preview } = await post(fixtureServer, "/api/skills/read", { folder: path.join(sources, name) }) as { preview: { fingerprint: string } };
-        imported[name] = (await post(fixtureServer, "/api/skills/import", { folder: path.join(sources, name), confirmed: preview.fingerprint })).id as string;
+      for (const [folder, name, description] of [["trip-check", "trip-check", "逐段核对站名与换乘"], ["meal-plan", "meal-plan", "按预算安排菜单"],
+        ["markup", `'${MARKUP_NAME}'`, `'${MARKUP_DESCRIPTION}'`]] as const) {
+        mkdirSync(path.join(sources, folder));
+        writeFileSync(path.join(sources, folder, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+        imported[folder] = await importSkill(fixtureServer, path.join(sources, folder));
       }
       await page.goto("/console/teams");
       await listItem(page, "Bill · 生活团队").click();
-      await expect(profile.locator(".atm-skill-list .acf-check")).toHaveText(["meal-plan按预算安排菜单", "trip-check逐段核对站名与换乘"]);
+      await expect(profile.locator(".atm-skill-list .acf-check")).toHaveText([`${MARKUP_NAME}${MARKUP_DESCRIPTION}`, "meal-plan按预算安排菜单", "trip-check逐段核对站名与换乘"]);
+      await expect(profile.locator(".atm-skill-list").locator("b, img")).toHaveCount(0);
+      expect(await page.evaluate(() => (window as unknown as { __skillMarkup?: number }).__skillMarkup)).toBeUndefined();
       await expect(profile.locator(".atm-skill-list").getByRole("checkbox", { checked: true })).toHaveCount(0);
       await profile.getByRole("checkbox", { name: /^trip-check/ }).check();
       await expect(page.locator("#atm-savebar")).toHaveText(/有未保存的修改/);

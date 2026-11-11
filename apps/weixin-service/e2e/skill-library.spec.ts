@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { expect, type Page } from "@playwright/test";
 
+import { type ConsoleServer, importSkill, post, read } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // Skill 管理 (docs/specs/skill-library.md) in a real browser, against the fixture service with Feishu dispatch and real
@@ -23,7 +24,6 @@ const dispatchChannel = { channel: "feishu", owner: { memoryAccountId: "fixture-
       { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } };
 test.use({ fixtureStart: { channelConfiguration: dispatchChannel, env: { WORKFLOW_FIXTURE_FEISHU_ONBOARDING: JSON.stringify({ chats: { oc_alpha: { name: "银河护卫队" } } }) } } });
 
-type Server = { url: string; cookie: string };
 const SPARK = "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z";
 const skillMd = (name: string, description: string, body = "body-v1") => `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n\n${body}\n`;
 const sources: string[] = [];
@@ -43,22 +43,10 @@ function folder(name: string, description: string, files: Record<string, string>
   }
   return source;
 }
-async function post<T = Record<string, unknown>>(server: Server, pathname: string, body: unknown): Promise<T> {
-  const response = await fetch(`${server.url}${pathname}`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" }, body: JSON.stringify(body) });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${pathname} ${response.status}: ${text}`);
-  return JSON.parse(text) as T;
-}
-const read = async <T>(server: Server, pathname: string) => await (await fetch(`${server.url}${pathname}`, { headers: { cookie: server.cookie } })).json() as T;
-/** Imports a folder through the API, as setup for journeys that are not about importing. */
-async function importViaApi(server: Server, source: string): Promise<string> {
-  const { preview } = await post<{ preview: { fingerprint: string } }>(server, "/api/skills/read", { folder: source });
-  return (await post<{ id: string }>(server, "/api/skills/import", { folder: source, confirmed: preview.fingerprint })).id;
-}
 type TeamView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
   profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> }> };
 /** Bill's one profile checks the given skills, saved as the team page saves it. */
-async function billSelects(server: Server, skills: string[]) {
+async function billSelects(server: ConsoleServer, skills: string[]) {
   const view = await read<TeamView>(server, "/api/teams");
   const bill = view.teams.find(({ id }) => id === "bill")!;
   await post(server, "/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader,
@@ -121,7 +109,7 @@ test("imports a folder typed in the import drawer only from its confirmation car
 
 test("says why a folder cannot be imported, and imports nothing that changed after it was read", async ({ page, fixtureServer }, testInfo) => {
   const error = drawer(page).locator(".asl-error");
-  await importViaApi(fixtureServer, folder("trip-check", "逐段核对"));
+  await importSkill(fixtureServer, folder("trip-check", "逐段核对"));
   await page.goto("/console/skills");
 
   const bare = folder("no-skill", "x");
@@ -164,7 +152,7 @@ test("says why a folder cannot be imported, and imports nothing that changed aft
 
 test("counts the files that changed in the source, re-imports them from a card that says what requests get, and says when the source is gone", async ({ page, fixtureServer }, testInfo) => {
   const source = folder("trip-check", "逐段核对站名与换乘");
-  const id = await importViaApi(fixtureServer, source);
+  const id = await importSkill(fixtureServer, source);
   await billSelects(fixtureServer, [id]);
   fs.writeFileSync(path.join(source, "SKILL.md"), skillMd("trip-check", "逐段核对站名、换乘与开放时间", "body-v2"));
   fs.writeFileSync(path.join(source, "references", "added.md"), "new\n");
@@ -208,9 +196,9 @@ test("counts the files that changed in the source, re-imports them from a card t
 
 test("shows a skill's source, files and the profiles that use it, keeps a skill in use from being deleted, and deletes an unused one after an inline confirmation", async ({ page, fixtureServer }, testInfo) => {
   const usedSource = folder("trip-check", "逐段核对站名与换乘");
-  const used = await importViaApi(fixtureServer, usedSource);
+  const used = await importSkill(fixtureServer, usedSource);
   const spareSource = folder("meal-plan", "按预算安排菜单");
-  await importViaApi(fixtureServer, spareSource);
+  await importSkill(fixtureServer, spareSource);
   await billSelects(fixtureServer, [used]);
   await page.goto("/console/skills");
   await expect(page.locator("#asl-rows .acv5-name")).toHaveText([/^meal-plan/, /^trip-check/]);
@@ -245,4 +233,42 @@ test("shows a skill's source, files and the profiles that use it, keeps a skill 
   await expect(drawer(page)).toBeHidden();
   await expect(page.locator("#asl-rows .acv5-name")).toHaveText([/^trip-check/]);
   expect(fs.readFileSync(path.join(spareSource, "SKILL.md"), "utf8")).toBe(skillMd("meal-plan", "按预算安排菜单"));
+});
+
+// agent-console::REQ-005/AC-04: a skill's name and description, its file names and a link's target are supplied by the folder.
+// The page shows them as the text they are, in the import drawer, the table and the details. The team page's checkboxes are
+// driven the same way in team-management.spec.ts.
+test("shows what a folder supplies as plain text, whatever it looks like", async ({ page }, testInfo) => {
+  const NAME = '<b data-markup="name">粗体</b>', DESCRIPTION = '<img src=x onerror="window.__skillMarkup=1"> 描述';
+  const FILE = 'references/<i data-markup="file">note</i>.md', TARGET = '<img src=x onerror="window.__skillMarkup=2">';
+  const source = folder("markup", "x", { "SKILL.md": `---\nname: '${NAME}'\ndescription: '${DESCRIPTION}'\n---\n`, [FILE]: "note\n" });
+  const linked = folder("linked", "x");
+  fs.symlinkSync(TARGET, path.join(linked, "references", "link"));
+  const injected = page.locator("[data-markup], #asl-rows img, #asl-drawer img, #asl-drawer i");
+  const ran = () => page.evaluate(() => (window as unknown as { __skillMarkup?: number }).__skillMarkup);
+  await page.goto("/console/skills");
+
+  // A refused link's target, in the import drawer's error.
+  await openImport(page, linked);
+  await expect(drawer(page).locator(".asl-error")).toContainText(`references/link → ${TARGET}`);
+  await expect(injected).toHaveCount(0);
+
+  // The preview: name, description and file names.
+  await drawer(page).getByLabel("文件夹路径").fill(source);
+  await drawer(page).getByRole("button", { name: "读取文件夹" }).click();
+  const preview = drawer(page).locator(".asl-preview");
+  await expect(preview.locator("h3")).toHaveText(NAME);
+  await expect(preview.locator(".asl-desc")).toHaveText(DESCRIPTION);
+  await expect(preview.locator(".acv5-list li")).toHaveText(["SKILL.md", FILE, "references/rules.md", "scripts/check.py脚本"]);
+  await expect(injected).toHaveCount(0);
+
+  // The table and the details drawer after the import.
+  await preview.getByRole("button", { name: "确认导入" }).click();
+  await expect(drawer(page).locator("#asl-title")).toHaveText(NAME);
+  await expect(page.locator("#asl-rows tr td").first()).toHaveText(`${NAME}${DESCRIPTION}`);
+  await expect(drawer(page).locator(".asl-desc")).toHaveText(DESCRIPTION);
+  await expect(drawer(page).locator(".acv5-list li").nth(1)).toHaveText(FILE);
+  await expect(injected).toHaveCount(0);
+  expect(await ran()).toBeUndefined();
+  await testInfo.attach("markup-as-text", { body: await page.screenshot(), contentType: "image/png" });
 });
