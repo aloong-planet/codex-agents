@@ -237,10 +237,13 @@ describe("MCP Apps panel in a simulated Codex host", () => {
 
     // The chosen account has no target until its first inbound message arrives.
     await panel.locator("#account").selectOption("work-bot");
+    await panel.getByLabel(inboundConfirmation).check();
     await pushState({});
     await pushState({
       targets: [...fixtureTargets, { accountId: "work-bot", target: "work-user@im.wechat", label: "工作联系人" }],
     });
+    // A tick given before the account had a target does not carry over to the target that arrived.
+    await eventually(() => panel.getByLabel(inboundConfirmation).isChecked()).toBe(false);
     await panel.getByLabel(inboundConfirmation).check();
     await panel.getByRole("button", { name: "确认会话与目标" }).click();
     await eventually(confirmedSessions).toEqual([
