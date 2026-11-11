@@ -54,7 +54,7 @@ When an Executor is created, the host copies the skills its profile selects, in 
 | User sequence | Required outcome / defining coverage unit |
 | --- | --- |
 | Owner enters a path to a file, a missing folder, or a folder without SKILL.md at its root | Error asking for the skill's root folder under skill-library::US-001/AC-03. A path that is missing, not a folder or unreadable shows 「找不到或读不了这个文件夹，无法导入。请确认填的是 skill 的根目录。」 |
-| Owner enters a path that is neither absolute nor starts with `~/` | Refused as a path that cannot be found, with the same words |
+| Owner enters a path that is not absolute and is neither `~` nor starts with `~/` | Refused as a path that cannot be found, with the same words |
 | The typed path is itself a symbolic link to a folder, or passes through one | The folder it leads to is read, because the owner's skill folders are reached this way. Only links inside the folder are refused under skill-library::US-001/AC-05 |
 | Owner enters a large folder that is not a skill | Refused for its missing SKILL.md before anything below the folder is read |
 | SKILL.md lacks a name or description | Not importable; same error form under skill-library::US-001/AC-03: 「SKILL.md 里缺少 name 或 description，无法导入。请确认选的是 skill 的根目录。」 |
@@ -117,7 +117,7 @@ The root SKILL.md is read before anything below the folder, and only when it is 
 ## Testing Decisions
 
 - **Library.** Tested at its public interface with real temporary folders: import, the missing-SKILL.md and duplicate-name errors, symbolic-link refusal, binary files, change detection, an unavailable source, versioning and deletion rules.
-- **Runtime boundary.** Inspecting the files in the created runtime home tests that the profile's skills are there in the snapshot's version. That no other skill is visible is tested on the real App Server, because what it lists also depends on the runtime's HOME and on Codex's bundled skills: the runtime's skill listing and the model request it builds, captured by a loopback fake model endpoint (`apps/weixin-service/tests/fixtures/isolated-runtime-probe.ts`), contain only the profile's skills, and naming any other skill injects nothing.
+- **Runtime boundary.** Inspecting the files in the created runtime home tests that the profile's skills are there in the snapshot's version, and real main records each Executor turn's input items, so a case asserts that every turn carries each of those skills. That no other skill is visible is tested on the real App Server, because what it lists also depends on the runtime's HOME and on Codex's bundled skills: the runtime's skill listing and the model request it builds, captured by a loopback fake model endpoint (`apps/weixin-service/tests/fixtures/isolated-runtime-probe.ts`), contain only the profile's skills, and naming any other skill injects nothing. The same case shows that a turn that neither names nor carries the profile's skill holds none of its SKILL.md, and that the turn as the host sends it holds it. Another opt-in case there lists the SKILL.md shapes of Implementation Decisions (what a folder holds) on the installed App Server, so a Codex upgrade shows whether the library's two refusals still match what it lists.
 - **Console.** HTTP-boundary tests of the library API with an authorized browser, and Playwright end-to-end tests of import, re-import and delete.
 
 ## Out of Scope
