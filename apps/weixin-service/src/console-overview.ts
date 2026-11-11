@@ -175,6 +175,7 @@ function project(job: DispatchJob, chatId: string, assignments: readonly Dispatc
   // The request's report is the post its dispatch record names, read as a resend after a refusal reads it, with any resends of it.
   const reportId = job.reportId ?? `${job.id}:result:${job.attempt}`;
   const last = posts.filter(({ id }) => id === reportId || id.startsWith(`${reportId}:retry:`)).at(-1);
+  // The same cross-team rule as coordinatorView in private-conversations.ts; change both together.
   const crossTeams = [...new Set([...assignments.map(({ teamId }) => teamId), ...(job.parts ?? []).flatMap(({ teamId }) => teamId ? [teamId] : [])])]
     .filter((teamId) => teamId !== job.agentId);
   return {
@@ -207,6 +208,7 @@ function counts(requests: readonly OverviewRequest[], teamId: string): TeamCount
   const result: TeamCounts = { running: 0, waiting: 0, history: 0 };
   for (const request of requests) {
     const own = request.assignments.filter((assignment) => assignment.teamId === teamId);
+    // The same rule of a request involving a team as chatRecords in private-conversations.ts; change both together.
     const involved = request.lead === teamId || own.length > 0 || request.parts.some((part) => part.teamId === teamId);
     if (!involved) continue;
     const statuses = own.length ? own.map(({ status }) => status) : [request.status];

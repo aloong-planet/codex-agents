@@ -26,6 +26,8 @@ it("keeps each isolated runtime kind at its existing root and with its existing 
   expect(rootOf(createIsolatedRuntime("dispatchAgent", { stateDirectory: state, instance: agentScope, mediaRoot: media, environment })))
     .toBe(path.join(groups, "group-model-runtimes", agentScope));
   expect(rootOf(createIsolatedRuntime("pendingRouter", { stateDirectory: state, environment }))).toBe(path.join(groups, "group-model-runtimes", "pending-router"));
+  // Private conversations are no group's: their runtimes live apart from every group runtime, one per agent.
+  expect(rootOf(createIsolatedRuntime("privateChat", { stateDirectory: state, instance: "alice", environment }))).toBe(path.join(state, "private-chat-runtimes", "private-chat-alice"));
   expect(rootOf(createIsolatedRuntime("groupMemoryCurator", { stateDirectory: state, environment }))).toBe(path.join(groups, "group-model-runtimes", "memory-curator"));
   expect(rootOf(createIsolatedRuntime("research", { stateDirectory: state, instance: "feishu.group.probe", environment })))
     .toBe(path.join(groups, "group-model-runtimes", "research-feishu.group.probe"));
@@ -40,6 +42,8 @@ it("keeps each isolated runtime kind at its existing root and with its existing 
     .toEqual({ serviceName: "feishu_dispatch_leader", webSearch: "disabled", structuredOutputSupported: false, permissionProfile: "group" });
   expect(isolatedConversationOptions("dispatchAgent", runtime, { structuredOutputSupported: true, agentId: "alice" }))
     .toEqual({ serviceName: "feishu_agent_alice", webSearch: "live", automaticRecovery: true, structuredOutputSupported: true, permissionProfile: "group" });
+  expect(isolatedConversationOptions("privateChat", runtime, { structuredOutputSupported: true }))
+    .toEqual({ serviceName: "console_private_chat", webSearch: "disabled", structuredOutputSupported: true, permissionProfile: "group" });
   const { runtimeProfile: pending, ...pendingOptions } = isolatedConversationOptions("pendingRouter", runtime, { structuredOutputSupported: true });
   expect(pendingOptions).toEqual({ serviceName: "feishu_group_pending", webSearch: "disabled", permissionProfile: "group" });
   expect(pending?.model).toBe("gpt-5.6-luna");
@@ -64,6 +68,7 @@ it("lets only the kinds that read inbound media name a media root", () => {
   }
   expect(() => createIsolatedRuntime("dispatchLeader", { stateDirectory: state, instance: "dispatch-leader-media", mediaRoot: media, environment }))
     .toThrow("isolated_runtime_media_unexpected");
+  expect(() => createIsolatedRuntime("privateChat", { stateDirectory: state, instance: "sam", mediaRoot: media, environment })).toThrow("isolated_runtime_media_unexpected");
   expect(() => createIsolatedRuntime("research", { stateDirectory: state, instance: "feishu.group.media", mediaRoot: media, environment })).toThrow("isolated_runtime_media_unexpected");
 });
 
@@ -82,5 +87,5 @@ it("main.ts creates isolated runtimes only from the runtime-kind table", () => {
   ]);
   const kinds = new Set([...main.matchAll(/\b(?:isolatedConversation|createIsolatedRuntime)\(\s*"(\w+)"/gu)].map((match) => match[1]));
   expect([...kinds].sort()).toEqual(Object.keys(ISOLATED_RUNTIME_KINDS).sort());
-  expect(Object.keys(ISOLATED_RUNTIME_KINDS).sort()).toEqual(["dispatchAgent", "dispatchCoordinator", "dispatchLeader", "feishuGroup", "groupMemoryCurator", "pendingRouter", "penny", "research"]);
+  expect(Object.keys(ISOLATED_RUNTIME_KINDS).sort()).toEqual(["dispatchAgent", "dispatchCoordinator", "dispatchLeader", "feishuGroup", "groupMemoryCurator", "pendingRouter", "penny", "privateChat", "research"]);
 });

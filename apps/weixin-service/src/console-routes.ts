@@ -8,6 +8,7 @@ import type { ConsoleOverview } from "./console-overview.js";
 import { DispatchGroupRefusal, type DispatchGroupSettings } from "./dispatch-group-settings.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
+import { CHAT_REFUSAL, PrivateChatError, type PrivateConversations } from "./private-conversations.js";
 import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyError } from "./team-management.js";
 
 /**
@@ -31,6 +32,9 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyE
  * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
  * - `/api/overview`: its read projection; `/api/overview/memory?group=<chat ID>` a dispatch group's memory, read-only. No route
  *   changes or deletes memory (agent-console::US-005/AC-04).
+ * - `/api/private-chats/<agent ID>`: the owner's private conversation with Sam or a Team Leader (agent-console::US-006), and
+ *   `/api/private-chats/<agent ID>/messages` a message to it, answered later by the agent's reply turn. Any other ID, an Executor's
+ *   or Penny's included, is refused with 404; without dispatch every one is.
  * - `/api/console/sidebar`: the sidebar's browser count and Penny's state on every page.
  * - `/api/console/browsers`: the 本机登录 drawer's list, and `/api/console/browsers/revoke` its revocation, audited with the browser
  *   that asked (agent-console::US-001/AC-03).
@@ -41,6 +45,7 @@ const ASSETS: Record<string, { file: string; type: string }> = {
   "/console": { file: "overview.html", type: "text/html; charset=utf-8" },
   "/console/overview.css": { file: "overview.css", type: "text/css; charset=utf-8" },
   "/console/overview.js": { file: "overview.js", type: "text/javascript; charset=utf-8" },
+  "/console/chat-markdown.js": { file: "chat-markdown.js", type: "text/javascript; charset=utf-8" },
   "/console/mcp": { file: "mcp.html", type: "text/html; charset=utf-8" },
   "/console/teams": { file: "team.html", type: "text/html; charset=utf-8" },
   "/console/console.css": { file: "console.css", type: "text/css; charset=utf-8" },
@@ -112,8 +117,29 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
 };
 
 export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchGroups?: DispatchGroupSettings; overview?: ConsoleOverview;
-  access?: ConsoleAccess }): ConsoleRoutes {
-  const { catalog, teams, dispatchGroups, overview, access } = options;
+  access?: ConsoleAccess; chats?: PrivateConversations }): ConsoleRoutes {
+  const { catalog, teams, dispatchGroups, overview, access, chats } = options;
+
+  async function chatsApi(req: IncomingMessage, res: ServerResponse, pathname: string): Promise<void> {
+    const match = /^\/api\/private-chats\/([^/]+)(\/messages)?$/.exec(pathname);
+    if (!match || req.method !== (match[2] ? "POST" : "GET")) throw new RequestError(404, "未找到");
+    let agentId: string;
+    try { agentId = decodeURIComponent(match[1]!); } catch { throw new RequestError(404, CHAT_REFUSAL); }
+    if (!chats) throw new RequestError(404, CHAT_REFUSAL);
+    if (!match[2]) {
+      const view = chats.view(agentId);
+      if (!view) throw new RequestError(404, CHAT_REFUSAL);
+      json(res, 200, view);
+      return;
+    }
+    const input = await body(req);
+    try {
+      json(res, 200, chats.send(agentId, { text: input.text, requestId: input.requestId }));
+    } catch (error) {
+      if (error instanceof PrivateChatError) throw new RequestError(error.status, error.message);
+      throw error;
+    }
+  }
 
   async function overviewApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     if (!overview || req.method !== "GET") throw new RequestError(404, "未找到");
@@ -287,9 +313,11 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
       const team = url.pathname === "/api/teams" || url.pathname.startsWith("/api/teams/");
       const board = url.pathname === "/api/overview" || url.pathname.startsWith("/api/overview/");
       const browsers = url.pathname === "/api/console/sidebar" || url.pathname === "/api/console/browsers" || url.pathname.startsWith("/api/console/browsers/");
-      if (!team && !board && !browsers && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
+      const chat = url.pathname.startsWith("/api/private-chats/");
+      if (!team && !board && !browsers && !chat && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
       try {
         if (board) await overviewApi(req, res, url);
+        else if (chat) await chatsApi(req, res, url.pathname);
         else if (browsers) await browsersApi(req, res, url.pathname, context);
         else if (team) await teamsApi(req, res, url, context);
         else await mcpApi(req, res, url.pathname, context);
@@ -297,7 +325,7 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
         if (error instanceof RequestError) json(res, error.status, { error: error.message });
         else if (error instanceof McpConfigError) json(res, 400, { error: error.message });
         else {
-          const area = team ? "team" : board ? "overview" : browsers ? "browsers" : "mcp";
+          const area = team ? "team" : board ? "overview" : browsers ? "browsers" : chat ? "chat" : "mcp";
           process.stderr.write(`console_${area}_request_failed: ${error instanceof Error ? error.name : "error"}\n`);
           json(res, 500, { error: "请求失败" });
         }

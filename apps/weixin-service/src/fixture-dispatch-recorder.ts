@@ -1,19 +1,22 @@
 import type { LeaderTurnInput, TeamLeader } from "./agent-dispatch-leader.js";
 import type { DispatchClassifier, DispatchExecutor } from "./agent-dispatch-types.js";
+import type { PrivateReplier } from "./private-conversations.js";
 
 /**
- * One turn of the Coordinator, a Team Leader or an Executor: the input the dispatch engine gave it, what it returned or why it
- * failed, and when it started and ended. A classification names its message; every other turn names its request. A turn still
- * running has no end.
+ * One turn of the Coordinator, a Team Leader or an Executor: the input the dispatch engine or a private conversation gave it, what
+ * it returned or why it failed, and when it started and ended. A classification names its message; a private reply names its
+ * Team Leader, if it is one's; every other turn names its request. A turn still running has no end.
  *
  * The Coordinator's and a Team Leader's inputs are whole: the message with the discussion before it, the roster, the requests
  * and the group memory; the Team Leader's instructions, Brief, presets, Team Directory and own memory. Session keys and fixture
- * routing are left out, since no turn is given them. An Executor's input here is its Assignment and its prerequisites' results;
+ * routing are left out, since no turn is given them. A private reply's input is whole too: the agent, the conversation and what it
+ * sees of the owner's requests (agent-console Implementation Decisions: private conversations). An Executor's input here is its
+ * Assignment and its prerequisites' results;
  * the triggering message, its profile's instructions and its memory are added inside its turn, and its thread rollout shows them.
  */
 export type DispatchTurnRecord = {
   role: "coordinator" | "leader" | "executor";
-  turn: "classify" | "assign" | "plan" | "supplement" | "close" | "run";
+  turn: "classify" | "assign" | "plan" | "supplement" | "close" | "run" | "private";
   messageId?: string;
   requestId?: string;
   teamId?: string;
@@ -29,8 +32,9 @@ export type DispatchTurnRecord = {
  * from what each turn decided (agent-dispatch Testing Decisions). Results and errors pass through unchanged. A Team Leader's
  * correction turn stays inside its plan turn, so a record shows the plan that passed validation or the refusal that ended it.
  */
-export function recordDispatchTurns(seams: { classifier: DispatchClassifier; leader: TeamLeader; executor: DispatchExecutor },
-  options: { now?: () => number; limit?: number } = {}): { classifier: DispatchClassifier; leader: TeamLeader; executor: DispatchExecutor; turns(): DispatchTurnRecord[] } {
+export function recordDispatchTurns(seams: { classifier: DispatchClassifier; leader: TeamLeader; executor: DispatchExecutor; replier: PrivateReplier },
+  options: { now?: () => number; limit?: number } = {}): { classifier: DispatchClassifier; leader: TeamLeader; executor: DispatchExecutor; replier: PrivateReplier;
+    turns(): DispatchTurnRecord[] } {
   const now = options.now ?? Date.now, limit = options.limit ?? 200;
   const turns: DispatchTurnRecord[] = [];
   const recorded = async <T>(turn: Omit<DispatchTurnRecord, "startedAt">, work: () => Promise<T>): Promise<T> => {
@@ -49,7 +53,7 @@ export function recordDispatchTurns(seams: { classifier: DispatchClassifier; lea
       throw error;
     } finally { record.endedAt = now(); }
   };
-  const { classifier, leader, executor } = seams;
+  const { classifier, leader, executor, replier } = seams;
   // What a Team Leader's turn is given, whatever its phase.
   const given = ({ leader: self, profiles, brief, directory, memory, relay }: LeaderTurnInput) => ({ leader: self, profiles, brief, directory, memory, ...(relay ? { relay } : {}) });
   return {
@@ -73,6 +77,10 @@ export function recordDispatchTurns(seams: { classifier: DispatchClassifier; lea
         input: { assignmentId: assignment.id, executor: assignment.executor, profileId: assignment.profileId, title: assignment.title, brief: assignment.brief,
           attempt: assignment.attempt, prerequisites: prerequisites ?? [] } }, async () => executor.run(job, assignment, signal, prerequisites)),
       close: () => executor.close(),
+    },
+    replier: {
+      reply: (input) => recorded({ role: input.agent.role, turn: "private", ...(input.agent.role === "leader" ? { teamId: input.agent.id } : {}), input },
+        () => replier.reply(input)),
     },
     turns: () => structuredClone(turns),
   };

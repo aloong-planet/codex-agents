@@ -21,6 +21,9 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
   private readonly crossTeamDecisions = new Map<string, unknown>();
   private readonly dispatchCalls = new Map<string, FixtureModelToolCall[]>();
   private readonly completions = new Map<string, { promise: Promise<string>; release(): void }>();
+  /** Private-conversation replies injected per agent, in order, and the one each agent's running reply turn took. */
+  private readonly privateReplies = new Map<string, Array<{ promise: Promise<string | undefined>; release(): void }>>();
+  private readonly privateTaken = new Map<string, { release(): void }>();
   private applications = new Map<string, FixtureFeishuTransport>();
   private onboarding: { configure(settings: never): void } | undefined;
   private textOutcomes: Array<"accepted" | "rejected" | "unknown" | "held"> = [];
@@ -83,6 +86,12 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
       const completion = this.completions.get(key); return completion?.promise;
     } };
   }
+  /** The next injected private reply for `agentId`: its raw output, or undefined for the fixture's default reply once released. */
+  privateReply(agentId: string): Promise<string | undefined> | undefined {
+    const next = this.privateReplies.get(agentId)?.shift();
+    if (next) this.privateTaken.set(agentId, next);
+    return next?.promise;
+  }
   getTextOutbox() { return structuredClone(this.outbox); }
   getMediaOutbox() { return structuredClone(this.mediaOutbox); }
   async upload(input: Parameters<FeishuMediaTransport["upload"]>[0]) {
@@ -137,6 +146,25 @@ export class FixtureFeishuTransport implements FeishuTransport, FeishuMediaTrans
       const control = input.onboardingControl;
       if (!this.onboarding || !control || typeof control !== "object" || Array.isArray(control)) throw new Error("fixture_onboarding_control_invalid");
       this.onboarding.configure(control as never);
+      return;
+    }
+    if (input.privateChatControl !== undefined) {
+      // A private reply's raw output for an agent's next reply turn, held until released when `hold`; `release` lets the reply
+      // that agent's running turn took, or else its next one, go.
+      const control = input.privateChatControl as { agentId?: unknown; reply?: unknown; hold?: unknown; release?: unknown };
+      if (typeof control.agentId !== "string" || (control.reply !== undefined && (typeof control.reply !== "string" || control.reply.length > 64000))) {
+        throw new Error("fixture_private_chat_control_invalid");
+      }
+      if (control.release === true) {
+        const held = this.privateTaken.get(control.agentId) ?? this.privateReplies.get(control.agentId)?.[0];
+        if (!held) throw new Error("fixture_private_chat_control_invalid");
+        held.release(); return;
+      }
+      let release!: () => void;
+      const reply = control.reply as string | undefined;
+      const promise = new Promise<string | undefined>((resolve) => { release = () => resolve(reply); });
+      if (control.hold !== true) release();
+      this.privateReplies.set(control.agentId, [...(this.privateReplies.get(control.agentId) ?? []), { promise, release }]);
       return;
     }
     if (input.modelControl !== undefined) {

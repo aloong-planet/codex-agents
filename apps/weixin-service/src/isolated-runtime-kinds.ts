@@ -32,6 +32,9 @@ export const ISOLATED_RUNTIME_KINDS = {
     structuredOutput: "capability", serviceName: "feishu_dispatch_leader", conversation: { webSearch: "disabled" } },
   dispatchAgent: { process: "app-server", directory: "group-model-runtimes", scope: (scope) => scope, hostTools: true, readsMedia: true,
     structuredOutput: "capability", serviceName: (agentId) => `feishu_agent_${agentId}`, conversation: { webSearch: "live", automaticRecovery: true } },
+  // The owner's private conversations in the console, one runtime per agent, kept apart from every group runtime (agent-console::CON-002).
+  privateChat: { process: "app-server", directory: "private-chat-runtimes", scope: (agentId) => `private-chat-${agentId}`, hostTools: false, readsMedia: false,
+    structuredOutput: "capability", serviceName: "console_private_chat", conversation: { webSearch: "disabled" } },
   pendingRouter: { process: "app-server", directory: "group-model-runtimes", scope: "pending-router", hostTools: false, readsMedia: false,
     serviceName: "feishu_group_pending", conversation: { webSearch: "disabled", runtimeProfile: PENDING_RESPONSE_RUNTIME_PROFILE } },
   groupMemoryCurator: { process: "app-server", directory: "group-model-runtimes", scope: "memory-curator", hostTools: false, readsMedia: false,
