@@ -17,13 +17,18 @@ const MODEL_CATALOG_FILE = "direct-model-catalog.json";
 /** Host configuration, HOME and auth are separate: only login credentials enter this private runtime home, and the
  * runtime gets its own HOME, so the App Server finds no owner skills there; bundled system skills stay off. The runtime
  * offers its model only what the host grants (ADR-0030): a direct-mode model catalog in its own home removes `exec`,
- * `wait` and `apply_patch`, and user input and sub-agents are switched off. */
+ * `wait` and `apply_patch`, and user input and sub-agents are switched off.
+ *
+ * `skills` writes the runtime's own skills into the directory it is given, the Codex home's `skills`. That directory is
+ * removed and created empty first, so after every creation the home holds exactly what the host wrote at this one, whatever
+ * an earlier run or an interrupted compaction left (ADR-0031). A writer that throws leaves no runtime to start. */
 export function createIsolatedModelRuntime(options: {
   root: string;
   scope: string;
   readableRoots?: string[];
   authHome?: string;
   environment?: NodeJS.ProcessEnv;
+  skills?: (directory: string) => void;
 }): IsolatedModelRuntime {
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(options.scope) || options.scope === "." || options.scope === "..") {
     throw new Error("isolated_runtime_scope_invalid");
@@ -34,6 +39,13 @@ export function createIsolatedModelRuntime(options: {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     if (fs.lstatSync(directory).isSymbolicLink()) throw new Error("isolated_runtime_path_invalid");
     fs.chmodSync(directory, 0o700);
+  }
+  if (options.skills) {
+    const skills = path.join(codexHome, "skills");
+    // Removes a link by that name itself, never what it points to.
+    fs.rmSync(skills, { recursive: true, force: true });
+    fs.mkdirSync(skills, { mode: 0o700 });
+    options.skills(skills);
   }
   const environment = options.environment ?? process.env;
   const authHome = options.authHome ?? environment.CODEX_HOME ?? path.join(os.homedir(), ".codex");

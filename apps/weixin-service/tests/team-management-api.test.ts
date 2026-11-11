@@ -35,7 +35,7 @@ afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await st
  * and `tasks` stand in for the dispatch work and the scheduled tasks that a removal waits for.
  */
 async function start({ work: earlier, teamWork, ...options }: { now?: () => number; reservedApplications?: () => Record<string, string>; work?: string;
-  teamWork?: TeamManagementOptions["work"]; tasks?: TeamManagementOptions["tasks"] } = {}) {
+  teamWork?: TeamManagementOptions["work"]; tasks?: TeamManagementOptions["tasks"]; skills?: NonNullable<TeamManagementOptions["skills"]> } = {}) {
   const work = earlier ?? fs.mkdtempSync(path.join(os.tmpdir(), "team-api-"));
   if (!earlier) cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
   const steps: Array<() => Promise<void> | void> = [];
@@ -154,6 +154,29 @@ describe("team management API", () => {
     expect((await request("/api/teams/save", { basedOn: view.version, team: { ...daisy, executorProfiles: [{ ...daisy.executorProfiles[0]!, hostTools: ["shell.exec"] }] } })).body)
       .toEqual({ error: "工具格式无效" });
     expect((await request("/api/teams", undefined, {})).status).toBe(401);
+  });
+
+  // team-management::US-003/AC-05 at the API: a profile's skills are checked from the Skill Library.
+  it("offers the library's skills to check, saves a profile's selection in the library's current version, and refuses a skill the library no longer has", async () => {
+    const library = [{ id: "skill-aaaaaaaa", version: 3, name: "行程核对", description: "逐段核对站名" }, { id: "skill-bbbbbbbb", version: 1, name: "餐单规划", description: "按预算安排菜单" }];
+    const { request, auditEntries, teams } = await start({ skills: () => library });
+    const view = (await request("/api/teams")).body;
+    expect(view.skills).toEqual([{ id: "skill-aaaaaaaa", name: "行程核对", description: "逐段核对站名" }, { id: "skill-bbbbbbbb", name: "餐单规划", description: "按预算安排菜单" }]);
+    expect(teamOf(view, "bill")!.profiles[0]!.skills).toEqual([]);
+    const checking = (from: View, skills: unknown) => { const edit = editOf(from, "bill", ["oc_alpha", "oc_beta"]); return { ...edit, executorProfiles: edit.executorProfiles.map((profile) => ({ ...profile, skills })) }; };
+
+    const saved = (await request("/api/teams/save", { team: checking(view, ["skill-aaaaaaaa"]), basedOn: view.version })).body.view;
+    expect(teamOf(saved, "bill")!.profiles[0]!.skills).toEqual(["skill-aaaaaaaa"]);
+    expect(teams.current().definitions.teams.find(({ id }) => id === "bill")!.executorProfiles[0]!.skills).toEqual([{ id: "skill-aaaaaaaa", version: 3 }]);
+    // What the skill's details list as its use, and what a deletion is refused for.
+    expect([teams.skillUses("skill-aaaaaaaa"), teams.skillUses("skill-bbbbbbbb")]).toEqual([[{ teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" }], []]);
+    expect(auditEntries().filter(({ event }) => event === "team_profile_saved").map(({ team, profile, by }) => [team, profile, by])).toEqual([["bill", "executor-1", "browser"]]);
+
+    library.pop();
+    expect(await request("/api/teams/save", { team: checking(saved, ["skill-aaaaaaaa", "skill-bbbbbbbb"]), basedOn: saved.version }))
+      .toEqual({ status: 400, body: { error: "无法保存", reasons: ["所选的 skill 已不在 Skill 库，请重新载入页面。"] } });
+    expect((await request("/api/teams/save", { team: checking(saved, "skill-aaaaaaaa"), basedOn: saved.version })).body).toEqual({ error: "skill 格式无效" });
+    expect(teamOf((await request("/api/teams")).body, "bill")!.profiles[0]!.skills).toEqual(["skill-aaaaaaaa"]);
   });
 
   it("deletes a team nothing holds at once: it leaves the list, each group gets its leave announcement, and Sam cannot be deleted", async () => {

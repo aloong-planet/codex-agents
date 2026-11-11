@@ -23,6 +23,9 @@ export type SkillFileChange = Readonly<{ path: string; change: "changed" | "adde
  */
 export type SourceState = Readonly<{ state: "same" } | { state: "changed"; files: readonly SkillFileChange[]; fingerprint: string } | { state: "missing" } | { state: "unreadable" }>;
 export type SkillActor = Readonly<{ browser?: ConsoleBrowser }>;
+/** A skill as the console's table and details show it (skill-library::US-002, US-003). It carries no file content. */
+export type SkillView = Readonly<{ id: string; name: string; description: string; source: string; importedAt: string;
+  files: ReadonlyArray<Readonly<{ path: string; script: boolean }>>; state: SourceState; usedBy: readonly SkillUse[] }>;
 
 /**
  * Why the library refuses: `folder`, the path is missing, not a folder, not absolute or unreadable; `skill_md`, no SKILL.md
@@ -114,6 +117,13 @@ export class SkillLibrary {
   list(): StoredSkill[] {
     return [...this.versions.keys()].filter((id) => !this.deleted.has(id)).map((id) => this.latest(id)!)
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  }
+
+  /** Every skill as the console shows it: its current version, its source folder compared now, and the profiles that select it. */
+  async view(): Promise<SkillView[]> {
+    return Promise.all(this.list().map(async ({ id, name, description, source, importedAt, files }) => ({ id, name, description, source,
+      importedAt: new Date(importedAt).toISOString(), files: files.map(({ path: file, script }) => ({ path: file, script })),
+      state: await this.compare(id), usedBy: this.options.usedBy?.(id) ?? [] })));
   }
 
   /** The current version of a skill in the library; undefined for an unknown or deleted one. */

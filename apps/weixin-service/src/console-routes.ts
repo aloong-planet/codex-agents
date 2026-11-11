@@ -8,6 +8,7 @@ import type { ConsoleOverview } from "./console-overview.js";
 import { DispatchGroupRefusal, type DispatchGroupSettings } from "./dispatch-group-settings.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
+import { type SkillLibrary, SkillRefusal, type SkillRefusalKind } from "./skill-library.js";
 import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyError } from "./team-management.js";
 
 /**
@@ -31,6 +32,10 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyE
  * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
  * - `/api/overview`: its read projection; `/api/overview/memory?group=<chat ID>` a dispatch group's memory, read-only. No route
  *   changes or deletes memory (agent-console::US-005/AC-04).
+ * - `/console/skills` and its assets: the Skill 管理 page (skill-library spec).
+ * - `/api/skills/...`: the Skill Library. `/api/skills/read` reads a folder path and `/api/skills/import` imports it once the
+ *   read is confirmed; `/api/skills/<id>/reimport` and `/api/skills/<id>/delete` act on one skill. A request names a folder
+ *   and what was confirmed, never skill content (skill-library::REQ-001), and every change is audited.
  * - `/api/console/sidebar`: the sidebar's browser count and Penny's state on every page.
  * - `/api/console/browsers`: the 本机登录 drawer's list, and `/api/console/browsers/revoke` its revocation, audited with the browser
  *   that asked (agent-console::US-001/AC-03).
@@ -50,6 +55,9 @@ const ASSETS: Record<string, { file: string; type: string }> = {
   "/console/team.css": { file: "team.css", type: "text/css; charset=utf-8" },
   "/console/team.js": { file: "team.js", type: "text/javascript; charset=utf-8" },
   "/console/team-onboarding-view.js": { file: "team-onboarding-view.js", type: "text/javascript; charset=utf-8" },
+  "/console/skills": { file: "skills.html", type: "text/html; charset=utf-8" },
+  "/console/skills.css": { file: "skills.css", type: "text/css; charset=utf-8" },
+  "/console/skills.js": { file: "skills.js", type: "text/javascript; charset=utf-8" },
 };
 
 export type ConsoleRoutes = {
@@ -111,9 +119,57 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
   team_registry_group_unknown: [400, "所属群不在派单群里"],
 };
 
+/**
+ * Why the Skill Library refused, as the page shows it, with the status of the answer. A re-import has its own words for a
+ * name another skill has and for a source that changed after it was compared.
+ */
+function skillRefusal(refusal: SkillRefusalKind, reimport: boolean): [number, string] {
+  switch (refusal.kind) {
+    case "folder": return [400, "找不到或读不了这个文件夹，无法导入。请确认填的是 skill 的根目录。"];
+    case "skill_md": return [400, "这个文件夹里没有 SKILL.md，无法导入。请确认选的是 skill 的根目录。"];
+    case "front_matter": return [400, "SKILL.md 里缺少 name 或 description，无法导入。请确认选的是 skill 的根目录。"];
+    case "links": return [400, `这个文件夹里有 ${refusal.links.length} 个符号链接，无法导入：${refusal.links.join("；")}。符号链接可能指向文件夹以外的文件。请换成实际文件后重新读取。`];
+    case "duplicate": return [409, reimport ? `来源里的 SKILL.md 现在叫「${refusal.name}」，与已有的 skill 同名，没有重新导入。`
+      : `已有同名 skill「${refusal.name}」。要更新它，请在它的详情里重新导入；或换一个文件夹。`];
+    case "changed": return [409, reimport ? "文件夹在核对之后有变化，没有重新导入。请重新检查后再确认。" : "文件夹在读取之后有变化，没有导入。请重新读取后再确认。"];
+    case "in_use": return [409, `被 ${refusal.uses} 个能力档使用。先在团队管理解绑，才能删除。`];
+    case "unknown": return [404, "这个 skill 已不存在，请刷新页面。"];
+  }
+}
+
 export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: TeamManagement; dispatchGroups?: DispatchGroupSettings; overview?: ConsoleOverview;
-  access?: ConsoleAccess }): ConsoleRoutes {
-  const { catalog, teams, dispatchGroups, overview, access } = options;
+  access?: ConsoleAccess; skills?: SkillLibrary }): ConsoleRoutes {
+  const { catalog, teams, dispatchGroups, overview, access, skills } = options;
+
+  async function skillsApi(req: IncomingMessage, res: ServerResponse, pathname: string, context: ConsoleRequestContext): Promise<void> {
+    if (!skills) throw new RequestError(404, "未找到");
+    const actor = context.browser ? { browser: context.browser } : {};
+    if (pathname === "/api/skills" && req.method === "GET") { json(res, 200, { skills: await skills.view() }); return; }
+    if (req.method !== "POST") throw new RequestError(404, "未找到");
+    const one = /^\/api\/skills\/(skill-[0-9a-f]{8})\/(reimport|delete)$/u.exec(pathname);
+    if (!one && pathname !== "/api/skills/read" && pathname !== "/api/skills/import") throw new RequestError(404, "未找到");
+    const input = await body(req);
+    // A skill enters the library only from a folder on this computer: the request names its path and the confirmed read.
+    const folder = () => { if (typeof input.folder !== "string" || !input.folder.trim() || input.folder.length > 4096) throw new RequestError(400, "文件夹路径无效"); return input.folder; };
+    const confirmed = () => { if (typeof input.confirmed !== "string" || !/^[0-9a-f]{64}$/u.test(input.confirmed)) throw new RequestError(400, "需要先读取并确认"); return input.confirmed; };
+    try {
+      if (pathname === "/api/skills/read") json(res, 200, { preview: await skills.read(folder()) });
+      else if (pathname === "/api/skills/import") {
+        const { id } = await skills.import(folder(), confirmed(), actor);
+        json(res, 200, { id, skills: await skills.view() });
+      } else if (one![2] === "reimport") {
+        await skills.reimport(one![1]!, confirmed(), actor);
+        json(res, 200, { id: one![1], skills: await skills.view() });
+      } else {
+        skills.remove(one![1]!, actor);
+        json(res, 200, { deleted: one![1], skills: await skills.view() });
+      }
+    } catch (error) {
+      if (!(error instanceof SkillRefusal)) throw error;
+      const [status, message] = skillRefusal(error.refusal, one?.[2] === "reimport");
+      json(res, status, { error: message, refusal: error.refusal });
+    }
+  }
 
   async function overviewApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
     if (!overview || req.method !== "GET") throw new RequestError(404, "未找到");
@@ -287,17 +343,19 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
       const team = url.pathname === "/api/teams" || url.pathname.startsWith("/api/teams/");
       const board = url.pathname === "/api/overview" || url.pathname.startsWith("/api/overview/");
       const browsers = url.pathname === "/api/console/sidebar" || url.pathname === "/api/console/browsers" || url.pathname.startsWith("/api/console/browsers/");
-      if (!team && !board && !browsers && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
+      const skill = url.pathname === "/api/skills" || url.pathname.startsWith("/api/skills/");
+      if (!team && !board && !browsers && !skill && url.pathname !== "/api/mcp" && !url.pathname.startsWith("/api/mcp/")) return false;
       try {
         if (board) await overviewApi(req, res, url);
         else if (browsers) await browsersApi(req, res, url.pathname, context);
+        else if (skill) await skillsApi(req, res, url.pathname, context);
         else if (team) await teamsApi(req, res, url, context);
         else await mcpApi(req, res, url.pathname, context);
       } catch (error) {
         if (error instanceof RequestError) json(res, error.status, { error: error.message });
         else if (error instanceof McpConfigError) json(res, 400, { error: error.message });
         else {
-          const area = team ? "team" : board ? "overview" : browsers ? "browsers" : "mcp";
+          const area = team ? "team" : board ? "overview" : browsers ? "browsers" : skill ? "skills" : "mcp";
           process.stderr.write(`console_${area}_request_failed: ${error instanceof Error ? error.name : "error"}\n`);
           json(res, 500, { error: "请求失败" });
         }

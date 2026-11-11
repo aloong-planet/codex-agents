@@ -67,6 +67,52 @@ it("lets only the kinds that read inbound media name a media root", () => {
   expect(() => createIsolatedRuntime("research", { stateDirectory: state, instance: "feishu.group.media", mediaRoot: media, environment })).toThrow("isolated_runtime_media_unexpected");
 });
 
+// skill-library::REQ-002 at runtime creation: an Executor's home holds exactly the skills the host writes at that creation.
+// What an earlier run, an interrupted compaction or anything else left under the Codex home's `skills` is gone first.
+it("empties an Executor runtime's skills at every creation before the host writes them, and gives no other kind skills", () => {
+  const state = stateDirectory();
+  const scope = `dispatch-${"c".repeat(64)}`;
+  const authHome = path.join(state, "no-auth");
+  const create = (skills?: (directory: string) => void) => createIsolatedRuntime("dispatchAgent", { stateDirectory: state, instance: scope, authHome, environment,
+    ...(skills ? { skills } : {}) });
+  const plant = (name: string) => (directory: string) => { fs.mkdirSync(path.join(directory, name)); fs.writeFileSync(path.join(directory, name, "SKILL.md"), name); };
+  const given: string[] = [];
+  const skills = path.join(create((directory) => { given.push(directory); plant("skill-a")(directory); }).env.CODEX_HOME!, "skills");
+  expect(given).toEqual([skills]);
+  expect(fs.readdirSync(skills)).toEqual(["skill-a"]);
+
+  // A leftover folder and a link to a folder outside: both go, and what the link pointed to stays.
+  const outside = path.join(state, "outside");
+  fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, "keep.md"), "keep");
+  fs.mkdirSync(path.join(skills, "stale")); fs.symlinkSync(outside, path.join(skills, "linked"));
+  create(plant("skill-b"));
+  expect(fs.readdirSync(skills)).toEqual(["skill-b"]);
+  // A profile that selects no skill leaves the directory empty, also when the caller names none.
+  create();
+  expect(fs.readdirSync(skills)).toEqual([]);
+  // The directory itself replaced by a link: a real directory takes its place.
+  fs.rmdirSync(skills); fs.symlinkSync(outside, skills);
+  create(plant("skill-c"));
+  expect(fs.lstatSync(skills).isDirectory()).toBe(true);
+  expect(fs.readdirSync(skills)).toEqual(["skill-c"]);
+  expect(fs.readdirSync(outside)).toEqual(["keep.md"]);
+  // Skills that cannot be written leave no runtime to start with other content.
+  expect(() => create(() => { throw new Error("skill_version_unavailable"); })).toThrow(/^skill_version_unavailable$/u);
+
+  const media = path.join(state, "media"); fs.mkdirSync(media);
+  const others = { feishuGroup: { instance: "feishu.group.skills", mediaRoot: media }, dispatchCoordinator: {}, dispatchLeader: { instance: "dispatch-leader-skills" },
+    pendingRouter: {}, groupMemoryCurator: {}, research: { instance: "feishu.group.skills" }, penny: {} } as const;
+  for (const kind of Object.keys(others) as Array<keyof typeof others>) {
+    expect(() => createIsolatedRuntime(kind, { stateDirectory: state, ...others[kind], authHome, environment, skills: () => {} }), kind).toThrow(/^isolated_runtime_skills_unexpected$/u);
+  }
+  expect(Object.keys(ISOLATED_RUNTIME_KINDS).filter((kind) => ISOLATED_RUNTIME_KINDS[kind as keyof typeof ISOLATED_RUNTIME_KINDS].skills)).toEqual(["dispatchAgent"]);
+  // A kind without skills keeps whatever its home holds: only an Executor's creation empties the directory.
+  const group = createIsolatedRuntime("feishuGroup", { stateDirectory: state, instance: "feishu.group.skills", authHome, environment });
+  plant("own")(fs.mkdirSync(path.join(group.env.CODEX_HOME!, "skills"), { recursive: true })!);
+  createIsolatedRuntime("feishuGroup", { stateDirectory: state, instance: "feishu.group.skills", authHome, environment });
+  expect(fs.readdirSync(path.join(group.env.CODEX_HOME!, "skills"))).toEqual(["own"]);
+});
+
 // The tests drive ISOLATED_RUNTIME_KINDS; this keeps main.ts from creating an isolated runtime any other way, so the
 // tested list cannot drift from the one production runs. The three owner-private App Servers run in the owner's own Codex
 // home by design (ADR-0023 follow-up) and are the only other App Servers main.ts may start.

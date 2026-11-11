@@ -1,16 +1,19 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_EXIT_WAIT_MS, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent,
   type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
 import type { DispatchAssignment, DispatchJob } from "../src/agent-dispatch-types.js";
 import type { ChannelTurnAdapter } from "../src/channel-turn-adapter.js";
 import type { InboundContent } from "../src/channel-contract.js";
+import { ConsoleAudit } from "../src/console-audit.js";
+import { createIsolatedRuntime } from "../src/isolated-runtime-kinds.js";
 import { compactRuntimeHome } from "../src/runtime-home-compaction.js";
 import { RuntimePool } from "../src/runtime-pool.js";
+import { SkillLibrary } from "../src/skill-library.js";
 import { conversation } from "./support/dispatch-runtime.js";
-import { homeListing, keptListing, seedExecutorHome } from "./support/runtime-home.js";
+import { homeListing, keptListing, rolloutPath, seedExecutorHome } from "./support/runtime-home.js";
 
 // Exercises the production executor with the runtime pool; only the external App Server conversation is substituted,
 // as in agent-dispatch-classifier.test.ts. Its reply follows MAIN_REPLY_OUTPUT_SCHEMA.
@@ -152,6 +155,69 @@ it("compacts a released Executor's home once its process has exited, before a re
     await expect(retry).resolves.toMatchObject({ status: "completed" });
     expect(atCreation[1]).toEqual(keptListing("thread-A"));
     expect(conversations[1]!.startOrResume.mock.calls[0]![0]).toBe("thread-A");
+    expect(reports).toEqual([]);
+  } finally { await executor.close(); }
+});
+
+// skill-library::REQ-002, with the real runtime creation, library and compaction; only the App Server conversation is substituted.
+// Its turn reads the skills folder as the App Server would find it, and leaves the rollout a real turn leaves.
+it("gives an Executor's home exactly its profile's skills in the request's versions at every runtime creation, a retry's after compaction included", async () => {
+  const state = scratch(), root = join(state, "group-model-runtimes"), reports: string[] = [];
+  const library = new SkillLibrary({ directory: join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }), needed: () => undefined });
+  const folder = (name: string, body: string) => {
+    const source = join(scratch(), name);
+    mkdirSync(join(source, "references"), { recursive: true });
+    writeFileSync(join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} 的做法\n---\n${body}\n`);
+    writeFileSync(join(source, "references", "rules.md"), `${name} rules\n`);
+    return source;
+  };
+  const tripSource = folder("trip-check", "trip-v1");
+  const trip = await library.import(tripSource, (await library.read(tripSource)).fingerprint, {});
+  // A second skill of the library that the profile does not select: it must never reach the home.
+  const mealSource = folder("meal-plan", "meal-v1");
+  await library.import(mealSource, (await library.read(mealSource)).fingerprint, {});
+
+  const atCreation: string[][] = [], duringTurn: Array<Record<string, string>> = [];
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: closeDispatchRuntime });
+  const executor = new CodexDispatchExecutor(join(scratch(), "agent-sessions.sqlite"), {
+    agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
+      { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
+    runtimes,
+    createRuntime: (_job, scope, _tools, _agentId, skills) => {
+      const home = join(root, scope);
+      atCreation.push(existsSync(home) ? homeListing(home) : []);
+      const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: state, instance: scope, authHome: join(state, "no-auth"), environment: { PATH: "/usr/bin:/bin" },
+        skills: (directory) => library.materialize(skills, directory) });
+      const agent = conversation("thread-A");
+      agent.runTurn.mockImplementation(async () => {
+        const loaded = join(home, "codex-home", "skills");
+        duringTurn.push(Object.fromEntries(homeListing(loaded).filter((file) => !file.endsWith("/")).map((file) => [file, readFileSync(join(loaded, file), "utf8")])));
+        mkdirSync(dirname(join(home, rolloutPath("thread-A"))), { recursive: true });
+        writeFileSync(join(home, rolloutPath("thread-A")), `${JSON.stringify({ type: "session_meta", payload: { id: "thread-A" } })}\n`);
+        return { owner: "model_owned", finalText: '{"message":"已整理好商品文案。","results":[]}' };
+      });
+      return { agent, cwd: runtime.cwd };
+    },
+    tools: { bind: () => { throw new Error("tool binding is not part of this case"); } },
+    // The request's definitions version names version 1 of the one skill its profile selects.
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, skills: [{ id: trip.id, version: 1 }],
+      tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined,
+    homes: { root, compact: compactRuntimeHome }, report: (code) => reports.push(code),
+  });
+  try {
+    await executor.run(job("request-one"), assignment("assignment-a"), new AbortController().signal);
+    // The owner re-imports the skill before the retry: the library's current version is 2 from here on.
+    writeFileSync(join(tripSource, "SKILL.md"), "---\nname: trip-check\ndescription: trip-check 的做法\n---\ntrip-v2\n");
+    const state2 = await library.compare(trip.id) as { fingerprint: string };
+    expect((await library.reimport(trip.id, state2.fingerprint, {})).version).toBe(2);
+    await executor.run(job("request-one"), assignment("assignment-a", 1), new AbortController().signal);
+
+    const snapshot = { [`${trip.id}/SKILL.md`]: "---\nname: trip-check\ndescription: trip-check 的做法\n---\ntrip-v1\n", [`${trip.id}/references/rules.md`]: "trip-check rules\n" };
+    expect(duringTurn).toEqual([snapshot, snapshot]);
+    // The retry's runtime was created on a home compacted to its rollout: the skills were written again, not kept.
+    expect(atCreation).toEqual([[], keptListing("thread-A")]);
     expect(reports).toEqual([]);
   } finally { await executor.close(); }
 });

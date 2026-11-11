@@ -14,6 +14,7 @@ import { COORDINATOR_ID } from "./team-registry.js";
 import { isProfileToolRefusal, type ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
+import type { SkillRef } from "./skill-library.js";
 
 export type DispatchRuntime = {
   agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">;
@@ -38,8 +39,8 @@ export async function closeDispatchRuntime(runtime: DispatchRuntime): Promise<vo
 }
 /** The shared tool host as one Executor profile sees it, with the contract hash of what it offers. */
 export type ExecutorToolHost = DynamicToolHost & { contractHash(): string };
-/** An Assignment's Executor profile as resolved for its request's definitions version. */
-export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost }>;
+/** An Assignment's Executor profile as resolved for its request's definitions version; `skills` are the Skill Library versions it selects there, none when absent. */
+export type ExecutorProfileView = Readonly<{ instructions: string; memoryScope: ResolvedAgentProfile["memoryScope"]; tools: ExecutorToolHost; skills?: readonly SkillRef[] }>;
 
 /** An Executor's runtime home: `dispatch-` and its session scope's 64-hex hash. The one-specialist dispatch named its homes the same way. */
 export const EXECUTOR_RUNTIME_HOME = /^dispatch-([0-9a-f]{64})$/u;
@@ -74,8 +75,12 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     /** The Coordinator and every Team Leader with a sending application, as the current definitions have them. */
     agents(): readonly DispatchAgent[];
     runtimes: RuntimePool<DispatchRuntime>;
-    /** `agentId` is the Team Leader of the Assignment's team, whose application sends what the Executor produces. */
-    createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost, agentId: string): DispatchRuntime;
+    /**
+     * `agentId` is the Team Leader of the Assignment's team, whose application sends what the Executor produces. `skills` are
+     * the profile's, in the request's definitions version: the runtime's home must hold exactly these, written at every
+     * creation, a retry's included, because a released home keeps only its rollouts (skill-library::REQ-002, ADR-0031).
+     */
+    createRuntime(job: DispatchJob, scope: string, tools: ExecutorToolHost, agentId: string, skills: readonly SkillRef[]): DispatchRuntime;
     tools: ConversationTurnToolControl;
     /** The Assignment's Executor profile as resolved for its definitions version; the only source of its instructions, tools and memory scope. */
     profile(job: DispatchJob, assignment: DispatchAssignment): ExecutorProfileView;
@@ -118,7 +123,7 @@ export class CodexDispatchExecutor implements DispatchExecutor {
         return result;
       },
       ...(profile.tools.turnOwner ? { turnOwner: (context) => profile.tools.turnOwner!(context) } : {}) };
-    const result = await this.options.runtimes.use(scope, () => this.compacting(this.options.createRuntime(job, `dispatch-${scope}`, tools, role.id), scope),
+    const result = await this.options.runtimes.use(scope, () => this.compacting(this.options.createRuntime(job, `dispatch-${scope}`, tools, role.id, profile.skills ?? []), scope),
       (runtime) => this.runOn(runtime, job, assignment, role, profile, scope, eligible, signal, prerequisites), { signal, releaseWhenDone: true });
     return result.status === "failed" && refused ? { ...result, cause: "tool_refused" } : result;
   }
