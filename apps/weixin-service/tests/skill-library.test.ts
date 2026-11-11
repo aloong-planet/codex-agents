@@ -10,8 +10,6 @@
 // The tool through which an Executor reads its skills' files: that a file of hundreds of megabytes is read without being held
 // whole or holding up the service is measured by no case, since memory and timing on a shared machine would make one unstable.
 // A read that fails partway through a stored file is refused like a changed store, which no case can bring about.
-// Its check that a stored path opened as a regular file is reached alone only by an entry whose reads never end, such as a device
-// node, which a test cannot create; a folder or a named pipe in a file's place is refused by the read or the hash as well.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -645,6 +643,17 @@ describe("an Executor reading its skills' files", () => {
     const { skill, host, reports, stored } = await selecting();
     change(stored, temporary("skill-outside-"));
     expect(await call(host, { skill: "patch-writer", path: "references/testing.md" })).toEqual(failure("skill_file_unavailable", "这个文件现在读不了。"));
+    expect(reports).toEqual([`skill_file_integrity_failed:${skill.id}`]);
+  });
+
+  it("refuses an empty stored file replaced by a named pipe, whose read gives the same empty bytes, and reports the skill", async () => {
+    const { library, settings } = open(), reports: string[] = [];
+    const skill = await imported(library, write(path.join(temporary("skill-source-"), "empty-read"), { "SKILL.md": skillMd("empty-read", "empty"), "references/empty.md": "" }));
+    const host = new SkillFileToolHost(INNER, library, [skill], (code) => reports.push(code));
+    const stored = path.join(settings.directory, skill.id, "1", "files", "references", "empty.md");
+    fs.rmSync(stored);
+    execFileSync("mkfifo", [stored]);
+    expect(await call(host, { skill: "empty-read", path: "references/empty.md" })).toEqual(failure("skill_file_unavailable", "这个文件现在读不了。"));
     expect(reports).toEqual([`skill_file_integrity_failed:${skill.id}`]);
   });
 
