@@ -175,6 +175,10 @@ const fixtureCompactionHold = process.env.WORKFLOW_FIXTURE_COMPACTION_HOLD === "
 if (fixtureCompactionHold && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 // Fixture-only seam: the fake onboarding platform's answers before startup resumes onboarding.
 if (process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+// Fixture-only seam: the first closes of a dispatch choice, as many as the switch says, fail, so a case can reach what follows a
+// choice that could not be closed. Refused outside fixture mode.
+if (process.env.WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
+let fixtureChoiceCloseFailures = Number(process.env.WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES ?? 0);
 const fixtureLiveMainModel = fixtureMode && process.env.WORKFLOW_SIMULATOR_MODEL === "live";
 const fixtureLiveWorkflowAgents = fixtureLiveMainModel ||
   (fixtureMode && process.env.WORKFLOW_SIMULATOR_PENDING_ROUTER === "live");
@@ -921,6 +925,14 @@ const privateWorkflowAdapter = new ConversationWorkflowTriggerAdapter({ engine: 
   ...(pendingResponseRouter ? { pendingResponseRouter } : {}) });
 const groupWorkflowAdapter = new ConversationWorkflowTriggerAdapter({ engine: workflowEngine, pendingPresentations: workflowPendingPresentations,
   ...(groupPendingResponseRouter ? { pendingResponseRouter: groupPendingResponseRouter } : {}) });
+// The group adapter's routing over an engine whose open choices take no answer: an answer or a cancel is refused as for a closed
+// request, and a new goal replaces nothing. It tells whether a message is addressed to a choice the dispatch holds, and leaves
+// the choice's run as it is.
+const heldChoiceAdapter = new ConversationWorkflowTriggerAdapter({ engine: {
+  listPendingSignals: (accountRef, targetRef, requesterRef) => workflowEngine.listPendingSignals(accountRef, targetRef, requesterRef),
+  get: (runId) => workflowEngine.get(runId), supersedePendingSignals: () => [],
+  signal: async () => { throw new Error("workflow_signal_request_closed"); }, cancelPending: async () => { throw new Error("workflow_signal_request_closed"); },
+}, pendingPresentations: workflowPendingPresentations, ...(groupPendingResponseRouter ? { pendingResponseRouter: groupPendingResponseRouter } : {}) });
 const codexService = conversationRouter ? new ConversationService(
   conversationRouter, codexAgent, codexServiceStore, process.cwd(), Date.now, writeGuard, runtimeWorkspaceRoots,
   appServerCapabilities.restrictedReadSupported, mediaReadRoot, conversationRouter,
@@ -1134,11 +1146,15 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         .some((item) => item.signalRef === presentation.signalRef && item.revision === presentation.revision && item.expiresAt > Date.now());
       if (current) workflowPendingPresentations.put(presentation);
     },
-    pending: async (event) => {
+    pending: async (event, held) => {
       const requests = workflowEngine.listPendingSignals(event.accountId, event.target, event.senderId).filter((request) => request.expiresAt > Date.now());
       if (requests.length === 0) return { handled: false };
       if (requests.length > 1) return { handled: true, result: { status: "waiting", message: "有多个工作流等待选择，请带上提示中的引用。" } };
-      const request = requests[0]!, destination = workflowRunTargets.resolveRunTarget(request.runId);
+      const request = requests[0]!;
+      // A choice the dispatch holds takes no answer. The message is routed as for any open choice, without acting on the run: one
+      // addressed to the choice is reported as held, and any other is the Coordinator's, as when no choice is open.
+      if (held(request.runId)) return (await heldChoiceAdapter.tryHandlePending(event)).handled ? { handled: true, held: true, runRef: request.runId } : { handled: false };
+      const destination = workflowRunTargets.resolveRunTarget(request.runId);
       if (!destination || !channel.state({ ...destination, channel: "feishu" }).enabled) return { handled: true,
         result: { status: "failed", message: "原接单机器人当前不可用，尚未继续操作。请恢复后再试。" } };
       const result = await groupWorkflowAdapter.tryHandlePending(event);
@@ -1148,10 +1164,17 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         result: { status: cancelled ? "cancelled" : result.outcome === "succeeded" ? "completed" : result.outcome === "needs_input" ? "waiting" : "failed", message: result.reply } };
     },
     closeChoices: async (job, assignments) => {
-      for (const event of runEvents(job, assignments)) {
-        const choice = workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId)?.pendingInput;
+      // Each Executor's run, found by the message that keys it, and the runs a supplement superseded: an Assignment that reran for the
+      // supplement is keyed by the supplement, so its superseded run is reached only by the request's record of it.
+      const runs = [...runEvents(job, assignments).map((event) => ({ event, run: workflowEngine.getTriggeredRun("weixin", event.key, event.accountId, event.target, event.senderId) })),
+        ...(job.supersededRuns ?? []).map((runId) => ({ event: job.event, run: workflowEngine.get(runId) }))];
+      const seen = new Set<string>();
+      for (const { event, run } of runs) {
+        const choice = run?.pendingInput;
         // An expired choice takes no answer any more.
-        if (!choice || choice.expiresAt <= Date.now()) continue;
+        if (!choice || choice.expiresAt <= Date.now() || seen.has(choice.signalRef)) continue;
+        seen.add(choice.signalRef);
+        if (fixtureChoiceCloseFailures > 0) { fixtureChoiceCloseFailures -= 1; throw new Error("workflow_pending_cancel_conflict"); }
         await workflowEngine.cancelPending({ cancellationId: `dispatch-cancel:${choice.signalRef}`, signalRef: choice.signalRef, expectedRevision: choice.revision,
           accountRef: event.accountId, targetRef: event.target, ...(event.senderId ? { requesterRef: event.senderId } : {}) });
       }
