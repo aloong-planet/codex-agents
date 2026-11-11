@@ -225,6 +225,63 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   await expect.poll(() => isAlive(pid), LONG).toBe(false);
 });
 
+// A server that a profile attaches (mcp-catalog::US-003/AC-03, US-005/AC-01, REQ-002). Profiles exist only with Feishu dispatch,
+// so this journey starts the service with a dispatch roster; the attachment is saved through the team API as setup.
+test.describe("with a profile that attaches the server", () => {
+  const SAM_APP = "cli_0123456789abcdef";
+  test.use({ fixtureStart: { channelConfiguration: { channel: "feishu", taskScope: { accountId: "fixture-bot", target: "fixture-user@im.wechat" },
+    owner: { memoryAccountId: "fixture-bot", bindings: [{ channel: "weixin", accountId: "fixture-bot", target: "fixture-user@im.wechat", senderId: "fixture-user@im.wechat" },
+      { channel: "feishu", accountId: SAM_APP, target: "oc_private", senderId: "ou_owner" }] },
+    feishu: { appId: SAM_APP, appSecret: "fixture-secret", groups: [{ chatId: "oc_alpha", allowedSenderIds: ["ou_owner"] }],
+      dispatch: { groupChatIds: ["oc_alpha"], agents: [{ id: "sam" }, { id: "alice", appId: "cli_aaaaaaaaaaaaaaaa", appSecret: "fixture-alice" },
+        { id: "bill", appId: "cli_bbbbbbbbbbbbbbbb", appSecret: "fixture-bill" }, { id: "jack", appId: "cli_cccccccccccccccc", appSecret: "fixture-jack" }] } } } } });
+
+  test("lists the attaching profile with a link to its team, keeps delete disabled with the reason, and says a changed command reaches running requests", async ({ page, fixtureServer }, testInfo) => {
+    const work = workDirectory();
+    const first = testServerFiles(work, "first"), second = testServerFiles(work, "second");
+    const server = { name: "amap", command: process.execPath, args: testServerArgs(first) };
+    await registerViaApi(fixtureServer, server);
+    const api = async (pathname: string, body?: unknown) => (await fetch(`${fixtureServer.url}${pathname}`, body === undefined ? { headers: { cookie: fixtureServer.cookie } }
+      : { method: "POST", headers: { cookie: fixtureServer.cookie, origin: fixtureServer.url, "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+    const view = await api("/api/teams");
+    const bill = view.teams.find(({ id }: { id: string }) => id === "bill");
+    const saved = await api("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader, groups: ["oc_alpha"],
+      executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }: Record<string, unknown>) => ({ id, name, noun, instructions, hostTools,
+        mcpServers: [{ name: "amap", confirmed: view.mcpServers[0].launchLine }] })) } });
+    expect(saved.teamId).toBe("bill");
+
+    await page.goto(`${fixtureServer.url}/console/mcp`);
+    await expect(row(page, "amap")).toContainText("已连接", LONG);
+    await expect(row(page, "amap").locator("td").last()).toHaveText("1 个能力档");
+    await page.locator('[data-open="amap"]').click();
+    const used = page.locator("#amc-drawer .acf-section", { has: page.getByRole("heading", { name: "绑定的能力档" }) });
+    await expect(used.locator(".acv5-list li")).toHaveText(["Bill · 生活团队能力档：能力档 1去团队管理解绑"]);
+    const danger = page.locator("#amc-drawer .acf-danger");
+    await expect(danger.locator(".acf-section-note")).toHaveText("被 1 个能力档绑定。先在团队管理解绑，才能删除。");
+    await expect(danger.getByRole("button", { name: "删除服务器" })).toBeDisabled();
+
+    await page.locator('[data-f="args"]').fill(testServerArgs(second).join("\n"));
+    await expect(page.locator("#amc-launch")).toHaveText([process.execPath, ...testServerArgs(second)].join(" "));
+    await expect(page.locator("#amc-grant")).toContainText("已绑定到 1 个能力档。确认后服务器重新连接，之后的每次调用都使用新的命令，包括进行中的事务；定义有变化的工具会暂停提供，复核后再提供。");
+    await expect(page.locator("#amc-grant")).not.toContainText("登记后还要在团队管理里绑定到能力档");
+    await page.locator("#amc-drawer .acv2-drawer-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await testInfo.attach("attached-server-drawer", { body: await page.screenshot(), contentType: "image/png" });
+
+    // The link opens the team page on that team, where the server is unbound; the server can then be deleted.
+    await used.getByRole("link", { name: "去团队管理解绑" }).click();
+    await expect(page).toHaveURL(/\/console\/teams\?team=bill$/);
+    await expect(page.locator("[data-editor] h2")).toHaveText("Bill · 生活团队");
+    await page.locator("[data-editor] .atm-mcp").getByRole("button", { name: "解绑" }).click();
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator("#atm-savebar")).toHaveText(/已保存/);
+    await page.goto(`${fixtureServer.url}/console/mcp`);
+    await expect(row(page, "amap").locator("td").last()).toHaveText("未绑定");
+    await page.locator('[data-open="amap"]').click();
+    await expect(danger.locator(".acf-section-note")).toHaveText("没有能力档绑定它，可以删除。");
+    await expect(danger.getByRole("button", { name: "删除服务器" })).toBeEnabled();
+  });
+});
+
 test("reconnects enabled servers when the service restarts", async () => {
   const work = workDirectory();
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-e2e-state-"));
