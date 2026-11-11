@@ -37,8 +37,13 @@ type AssignmentStatus = DispatchAssignment["status"];
 const ENDED: readonly AssignmentStatus[] = ["completed", "failed", "cancelled", "interrupted", "blocked"];
 const UNFINISHED: readonly AssignmentStatus[] = ["queued", "running", "waiting"];
 const INTERRUPTED = "服务中断，本次处理已停止。";
-/** The Coordinator's reply to a control of a request that is no longer active, and to an answer to a cancelled request's choice. */
+/**
+ * The Coordinator's reply to a control of a request that is no longer active, to an answer to a cancelled request's choice, and to
+ * an answer to a superseded choice of a request that has ended.
+ */
 const REQUEST_ENDED = "这项请求已经结束或无法继续，请说明新的需求。";
+/** The Coordinator's reply to an answer to a choice that a supplement superseded, while the request goes on with the supplement. */
+const CHOICE_SUPERSEDED = "这次选择已被你的补充取代，不再生效；这项请求会按补充后的要求继续处理。";
 
 /** How an Assignment failed, as far as the host knows it. */
 export type AssignmentFailure = Readonly<{ kind: "reported"; toolRefused: boolean }> | Readonly<{ kind: "error"; error: unknown }> | Readonly<{ kind: "shutdown" }>;
@@ -213,7 +218,12 @@ export class AgentDispatch {
     completedWork(job: DispatchJob, assignments: readonly DispatchAssignment[]): string;
     presentation(event: InboundContent, runRef: string): Omit<PendingPresentation, "acceptedAt"> | undefined;
     presented(presentation: PendingPresentation): void;
-    pending?(event: InboundContent): Promise<DispatchPendingResult>;
+    /**
+     * Has the host take a message that an open choice of its requester may be waiting for. `held` names a run whose choice takes no
+     * answer any more. The host asks it before it acts on the message: for such a run it resumes, cancels and replaces nothing, and
+     * reports a message addressed to that choice as held.
+     */
+    pending?(event: InboundContent, held: (runRef: string) => boolean): Promise<DispatchPendingResult>;
     /**
      * Closes every choice the request's Executors left open, so that no later answer resumes work its requester cancelled or
      * superseded with a supplement. `assignments` are the request's own; a request stored before Assignments existed has none.
@@ -388,12 +398,21 @@ export class AgentDispatch {
           .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })),
         memory: this.options.memory.recall(this.options.memoryScope, event, event.text) };
       try {
-        const pending = await this.options.pending?.(event);
-        if (pending && !pending.handled && pending.cancelledRunRef) {
+        const pending = await this.options.pending?.(event, (runRef) => this.heldRequest(runRef, event) !== undefined);
+        if (pending && !pending.handled && pending.cancelledRunRef && !this.heldRequest(pending.cancelledRunRef, event)) {
           const superseded = this.requestOfRun(pending.cancelledRunRef, event);
           if (superseded) { superseded.status = "cancelled"; this.save(superseded); }
         }
         if (pending?.handled) {
+          const held = pending.runRef ? this.heldRequest(pending.runRef, event) : undefined;
+          if (held || "held" in pending) {
+            // An answer to a choice that a supplement superseded changes nothing in the request or its Assignments and starts nothing,
+            // whatever the host made of it. The choice is closed again, and the requester is told once, in a post of its own.
+            if (held) await this.closeChoices(held);
+            const goesOn = held !== undefined && !held.cancelRequested && ["queued", "running", "waiting"].includes(held.status);
+            await this.coordinate(event, bindingHash, goesOn ? CHOICE_SUPERSEDED : REQUEST_ENDED);
+            this.finishInput(event.key); continue;
+          }
           const agent = this.options.agents().find((item) => pending.senderAccountId ? item.senderAccountId === pending.senderAccountId : item.id === COORDINATOR_ID);
           if (!agent) throw new Error("dispatch_pending_sender_unavailable");
           const original = pending.runRef ? this.requestOfRun(pending.runRef, event) : undefined;
@@ -493,8 +512,16 @@ export class AgentDispatch {
               // cancel, nothing else changes the request meanwhile, and a stop in between leaves the supplement to be taken in again.
               await this.closeChoices(job);
               this.transaction(() => {
-                for (const assignment of this.assignments(job.id)) if (assignment.status === "waiting") { assignment.status = "cancelled"; this.saveAssignment(assignment); }
+                // The superseded runs stay with the request: a choice that could not be closed is still open, and its Assignment
+                // may get a run of its own when it reruns for the supplement. A waiting Assignment was superseded on the run it
+                // keeps, and on none if it keeps none: the request's run may then be another Assignment's, which goes on. Only a
+                // request stored before Assignments existed waits on its own run.
+                const assignments = this.assignments(job.id), superseded = new Set(job.supersededRuns);
+                const waitedOn = assignments.length ? assignments.filter(({ status }) => status === "waiting").map(({ runRef }) => runRef) : [job.runRef];
+                for (const runRef of waitedOn) if (runRef) superseded.add(runRef);
+                for (const assignment of assignments) if (assignment.status === "waiting") { assignment.status = "cancelled"; this.saveAssignment(assignment); }
                 this.blockDependents(job.id);
+                if (superseded.size) job.supersededRuns = [...superseded];
                 job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job);
               });
             }
@@ -1028,9 +1055,9 @@ export class AgentDispatch {
 
   /**
    * Has the host close the choices the request's Executors left open (agent-dispatch::REQ-007/AC-03). A choice that cannot be
-   * closed stops nothing: the failure is reported. The host then still acts on an answer to that choice before it hands the
-   * result over. Where pending answers are taken in, a request that is cancelled, or is being cancelled, and its Assignments
-   * are kept as they are; a request that goes on after a supplement is not, and takes the choice's result.
+   * closed stops nothing: the failure is reported. Where pending answers are taken in, a superseded choice's run is named to the
+   * host before it acts, so nothing of it is resumed. For a cancelled request's choice the host still acts on an answer before it
+   * hands the result over; the request, cancelled or being cancelled, and its Assignments are then kept as they are.
    */
   private async closeChoices(job: DispatchJob): Promise<void> {
     try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
@@ -1068,6 +1095,11 @@ export class AgentDispatch {
   private requestOfRun(runRef: string, event: InboundContent): DispatchJob | undefined {
     return this.jobs().find((job) => job.event.target === event.target && job.event.senderId === event.senderId &&
       (job.runRef === runRef || this.assignments(job.id).some((assignment) => assignment.runRef === runRef)));
+  }
+
+  /** The requester's request that keeps `runRef` among the runs a supplement superseded: that run's choice takes no answer any more. */
+  private heldRequest(runRef: string, event: InboundContent): DispatchJob | undefined {
+    return this.jobs().find((job) => job.event.target === event.target && job.event.senderId === event.senderId && job.supersededRuns?.includes(runRef));
   }
 
   private recordResult(job: DispatchJob, id = `${job.id}:result:${job.attempt}`, notice = this.notice(job, job.result!)): { id: string; notice: Notice } {
