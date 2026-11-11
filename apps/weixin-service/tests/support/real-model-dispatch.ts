@@ -188,6 +188,9 @@ export type ScenarioRun = {
   until(what: string, predicate: (state: State) => boolean, timeoutMs: number): Promise<State>;
   /** The temporary directory granted to the Executors' file tools, where `files` were written. */
   grantedDirectory: string;
+  /** The console's API as the authorized owner, for what a scenario sets up before its message: a POST and a GET of a JSON route. */
+  post<T = unknown>(route: string, body: unknown): Promise<T>;
+  get<T = unknown>(route: string): Promise<T>;
 };
 
 /**
@@ -218,6 +221,8 @@ export async function realModelScenario(scenario: { id: string; acceptance: stri
     await body({
       grantedDirectory,
       state: () => service.state(),
+      post: (route, payload) => service.post(route, payload),
+      get: (route) => service.get(route),
       async send(messageId, text, options = {}) {
         const mentioned = options.mention ? TEAMS[options.mention] : undefined;
         const content = JSON.stringify({ text: mentioned ? `@_user_0 ${text}` : text });

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { FeishuDispatchConfiguration, LocalDispatchConfiguration } from "./feishu-agent-config.js";
+import type { SkillRef } from "./skill-library.js";
 
 /** The Coordinator's fixed identity: Sam cannot be replaced, deleted or unbound (team-management::REQ-001/AC-01). */
 export const COORDINATOR_ID = "sam";
@@ -19,15 +20,17 @@ const SEEDED_EXECUTOR_INSTRUCTIONS: Readonly<Record<string, string>> = {
   bill: "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。",
 };
 
-/** An agent's instructions and host-tool allowlist. MCP servers and skills join with their catalogs. */
+/** An agent's instructions and host-tool allowlist. MCP servers join with their catalog. */
 export type AgentProfile = Readonly<{ instructions: string; hostTools: readonly string[] }>;
 /** What an Executor is called in its group when a profile names none, and in versions saved before profiles had a noun. */
 export const DEFAULT_EXECUTOR_NOUN = "执行者";
 /**
  * One of a team's preset Agent Profiles for its Executors; `id` stays stable across renames. Its Executors are named
- * `<noun> <n>`; versions saved before the noun existed omit it and read as DEFAULT_EXECUTOR_NOUN.
+ * `<noun> <n>`; versions saved before the noun existed omit it and read as DEFAULT_EXECUTOR_NOUN. `skills` are the Skill
+ * Library versions its Executors load, so a definitions version fixes their content (agent-dispatch::REQ-017/AC-01); a
+ * profile that selects none omits it.
  */
-export type ExecutorProfile = AgentProfile & Readonly<{ id: string; name: string; noun?: string }>;
+export type ExecutorProfile = AgentProfile & Readonly<{ id: string; name: string; noun?: string; skills?: readonly SkillRef[] }>;
 export type BindingState = "onboarding" | "accepting" | "draining" | "removed";
 export type TeamBinding = Readonly<{ chatId: string; state: BindingState }>;
 export type TeamDefinition = Readonly<{
@@ -52,8 +55,8 @@ export type CoordinatorDefinition = Readonly<{
 /** Everything one definitions version holds. Application secrets are never part of it. */
 export type TeamDefinitions = Readonly<{ coordinator: CoordinatorDefinition; dispatchGroups: readonly string[]; teams: readonly TeamDefinition[] }>;
 export type DefinitionsVersion = Readonly<{ version: number; basedOn: number | null; source: "local_configuration" | "console" | "onboarding" | "removal"; definitions: TeamDefinitions }>;
-/** An Executor profile as the console edits it; a profile without `id` is new. */
-export type ExecutorProfileEdit = Readonly<{ id?: string; name: string; noun: string; instructions: string; hostTools: readonly string[] }>;
+/** An Executor profile as the console edits it; a profile without `id` is new. `skills` are the IDs of the skills it checks. */
+export type ExecutorProfileEdit = Readonly<{ id?: string; name: string; noun: string; instructions: string; hostTools: readonly string[]; skills?: readonly string[] }>;
 /**
  * One team as the console saves it: its editable fields and the dispatch groups it is checked into. A team without `id` is new.
  * Binding states are the registry's: the console only says which groups are checked (team-management Implementation Decisions).
@@ -177,8 +180,11 @@ export class TeamRegistry {
    * or secret the save carries, and an application attached since `basedOn` does not make the save stale. The save that first
    * chooses QR creation starts one creation; a save as an existing application ends it. Returns the saved version, the
    * team's ID and whether a creation was started or ended.
+   *
+   * `skills` gives the current version of every skill in the Skill Library. Each skill a profile checks is saved in that
+   * version, whichever version the profile had before; a checked skill the library no longer has refuses the save.
    */
-  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number }>):
+  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number; skills?: Readonly<Record<string, number>> }>):
     Readonly<{ version: DefinitionsVersion; teamId: string; creation?: "started" | "ended" }> {
     let teamId = edit.id ?? "";
     let creation: "started" | "ended" | undefined;
@@ -197,7 +203,8 @@ export class TeamRegistry {
       }
       if (edit.groups.some((chatId) => !definitions.dispatchGroups.includes(chatId))) throw new Error("team_registry_group_unknown");
       const appId = qr ? existing?.leader.appId ?? "" : edit.leader.appId.trim();
-      const reasons = teamReasons({ ...edit, leader: { ...edit.leader, appId } }, definitions, options.reserved ?? {});
+      const skills = options.skills ?? {};
+      const reasons = teamReasons({ ...edit, leader: { ...edit.leader, appId } }, definitions, options.reserved ?? {}, skills);
       if (reasons.length) throw new TeamDefinitionError(reasons);
       teamId = existing?.id ?? `team-${randomUUID().slice(0, 8)}`;
       const replaced = existing !== undefined && existing.leader.appId !== appId;
@@ -216,7 +223,8 @@ export class TeamRegistry {
         leader: { name: edit.leader.name.trim(), appId, ...(qr ? { method: "qr" as const } : {}),
           profile: { instructions: edit.leader.instructions, hostTools: existing?.leader.profile.hostTools ?? [] } },
         executorProfiles: edit.executorProfiles.map((profile) => ({ id: profile.id ?? freshId(), name: profile.name.trim(),
-          noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)] })),
+          noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)],
+          ...(profile.skills?.length ? { skills: [...new Set(profile.skills)].map((id) => ({ id, version: skills[id]! })) } : {}) })),
         bindings };
       const teams = existing ? definitions.teams.map((candidate) => candidate.id === teamId ? team : candidate) : [...definitions.teams, team];
       if (qr) {
@@ -295,6 +303,28 @@ export class TeamRegistry {
       attached = true;
     });
     return attached ? { version: this.current()!, ...(replaced ? { replaced } : {}) } : undefined;
+  }
+
+  /**
+   * Moves every profile that selects one of the given skills to the version given for it, in one new definitions version:
+   * requests admitted from then on load that version, and requests admitted earlier keep the one of their own definitions
+   * (agent-dispatch::REQ-017/AC-01). A re-import calls it with the re-imported skill, and a start with every skill's current
+   * version. Returns undefined when no profile had to move.
+   */
+  followSkills(versions: Readonly<Record<string, number>>): DefinitionsVersion | undefined {
+    let moved = false;
+    this.transaction(() => {
+      const latest = this.current();
+      if (!latest) return;
+      const teams = latest.definitions.teams.map((team) => ({ ...team, executorProfiles: team.executorProfiles.map((profile) => {
+        if (!profile.skills?.some(({ id, version }) => versions[id] !== undefined && versions[id] !== version)) return profile;
+        moved = true;
+        return { ...profile, skills: profile.skills.map((ref) => ({ id: ref.id, version: versions[ref.id] ?? ref.version })) };
+      }) }));
+      // A console-originated version: only a console save can have selected the skill.
+      if (moved) this.append({ ...latest.definitions, teams }, latest.version, "console");
+    });
+    return moved ? this.current()! : undefined;
   }
 
   /** Saves the Coordinator's responsibility and instructions, the only parts of Sam the console edits (team-management::REQ-001/AC-01). */
@@ -511,6 +541,17 @@ export class TeamRegistry {
 }
 
 /**
+ * The latest definitions a registry file holds, for a service that runs without dispatch: no team management has the registry
+ * open then, yet the teams stay stored for when dispatch is enabled again, and their profiles still select skills. Undefined
+ * when there is no registry file, or it holds no version.
+ */
+export function storedDefinitions(databasePath: string): TeamDefinitions | undefined {
+  if (!existsSync(databasePath)) return undefined;
+  const registry = new TeamRegistry(databasePath);
+  try { return registry.current()?.definitions; } finally { registry.close(); }
+}
+
+/**
  * The teams that accept work in a group, in registry order, as the Coordinator routes to them and every Team Leader's Team
  * Directory lists them there: team name and responsibility (agent-dispatch::REQ-015, team-management::REQ-004/AC-02).
  */
@@ -536,12 +577,14 @@ function representable({ coordinator, dispatchGroups, teams }: TeamDefinitions):
 function editable(team: TeamDefinition, application: boolean) {
   return { teamName: team.teamName, responsibility: team.responsibility,
     leader: { name: team.leader.name, ...(application ? { appId: team.leader.appId } : {}), method: team.leader.method ?? "existing", instructions: team.leader.profile.instructions },
-    profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools })),
+    // The checked skills, not their versions: a re-import since the page loaded does not make its save stale.
+    profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools, skills }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools,
+      skills: (skills ?? []).map((ref) => ref.id) })),
     groups: team.bindings.filter(({ state }) => state !== "draining" && state !== "removed").map(({ chatId }) => chatId) };
 }
 
 /** Why a team cannot be saved (team-management::REQ-002), in the order the save bar lists them. */
-function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Readonly<Record<string, string>>): string[] {
+function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Readonly<Record<string, string>>, skills: Readonly<Record<string, number>>): string[] {
   const reasons: string[] = [];
   if (!edit.leader.name.trim()) reasons.push("缺少负责人名称");
   if (!edit.teamName.trim()) reasons.push("缺少团队名称");
@@ -552,6 +595,7 @@ function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Rea
   if (duplicate) reasons.push(`两个能力档同名：「${duplicate}」`);
   const appId = edit.leader.appId.trim();
   if (appId) reasons.push(...applicationReasons(appId, edit.id, definitions, reserved));
+  if (edit.executorProfiles.some((profile) => profile.skills?.some((id) => !Object.hasOwn(skills, id)))) reasons.push("所选的 skill 已不在 Skill 库，请重新载入页面。");
   return reasons;
 }
 

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DynamicToolContext, DynamicToolHost, DynamicToolResult } from "./dynamic-tool-host.js";
+import type { SkillRef } from "./skill-library.js";
 import type { TeamDefinitions } from "./team-registry.js";
 import { WorkflowToolCatalog } from "./workflow-tool-catalog.js";
 
@@ -16,6 +17,8 @@ export type ResolvedAgentProfile = Readonly<{
   instructions: string;
   /** Host tools offered to the turn: the profile allowlist ∩ the catalog. Module permissions still gate every call. */
   hostTools: readonly string[];
+  /** The Skill Library versions an Executor's runtime loads (agent-dispatch::REQ-016/AC-04); the Coordinator and Team Leaders load none. */
+  skills: readonly SkillRef[];
   memoryScope: AgentMemoryScope;
 }>;
 
@@ -31,20 +34,20 @@ export function memoryAccountId(groupAccount: string, scope: AgentMemoryScope): 
   return `${DISPATCH_MEMORY_ACCOUNT_PREFIX}${createHash("sha256").update(JSON.stringify(key)).digest("hex")}`;
 }
 
-/** The one resolution point for a dispatch agent's instructions, host tools and memory scope in a definitions version. */
+/** The one resolution point for a dispatch agent's instructions, host tools, skills and memory scope in a definitions version. */
 export function resolveAgentProfile(definitions: TeamDefinitions, agent: AgentRef, catalogToolIds: readonly string[]): ResolvedAgentProfile {
   // The Coordinator's session never receives business tools, whatever its profile lists (agent-dispatch::CON-003).
-  if (agent.role === "coordinator") return { instructions: definitions.coordinator.profile.instructions, hostTools: [], memoryScope: { kind: "group" } };
+  if (agent.role === "coordinator") return { instructions: definitions.coordinator.profile.instructions, hostTools: [], skills: [], memoryScope: { kind: "group" } };
   // A Team Leader plans and summarizes; it holds no side-effecting tools, whatever its profile lists (agent-dispatch::REQ-002/AC-05).
   if (agent.role === "leader") {
     const team = definitions.teams.find(({ id }) => id === agent.teamId);
     if (!team) throw new Error("agent_profile_unknown");
-    return { instructions: team.leader.profile.instructions, hostTools: [], memoryScope: { kind: "leader", teamId: team.id } };
+    return { instructions: team.leader.profile.instructions, hostTools: [], skills: [], memoryScope: { kind: "leader", teamId: team.id } };
   }
   const profile = definitions.teams.find(({ id }) => id === agent.teamId)?.executorProfiles.find(({ id }) => id === agent.profileId);
   if (!profile) throw new Error("agent_profile_unknown");
   const allowed = new Set(profile.hostTools);
-  return { instructions: profile.instructions, hostTools: catalogToolIds.filter((id) => allowed.has(id)),
+  return { instructions: profile.instructions, hostTools: catalogToolIds.filter((id) => allowed.has(id)), skills: profile.skills ?? [],
     memoryScope: { kind: "profile", teamId: agent.teamId, profileId: profile.id } };
 }
 
@@ -84,19 +87,29 @@ const HOST_TOOL_WORDS: ReadonlyArray<readonly [tool: string, words: string]> = [
   ["schedules.run_now", "立即执行定时任务"], ["schedules.retry_news", "重试日报任务"], ["schedules.delete", "删除定时任务"],
 ];
 
+/** How much of a skill's description a Team Leader is told. */
+const SKILL_DESCRIPTION_LIMIT = 200;
+
 /**
  * What an Executor created from a preset can do now, in plain words (agent-dispatch::REQ-011/AC-01). `hostTools` is the preset's
  * resolved view in the request's definitions version. A tool is named when the preset still allows it (`stillAllowed`, undefined
  * once the preset is gone; agent-dispatch::REQ-017/AC-02) and the current module permissions grant it
  * (agent-dispatch::REQ-016/AC-02). Web search follows the Executor's runtime. A granted tool with no words is named by its ID.
+ * `skills` are the skills the preset selects in the request's definitions version, each named with its description, cut to
+ * SKILL_DESCRIPTION_LIMIT characters: its Executors load them whatever the current definitions say (agent-dispatch::REQ-017/AC-01).
  */
 export function executorCapabilities(hostTools: readonly string[], stillAllowed: readonly string[] | undefined,
-  scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>, webSearch: boolean): string[] {
+  scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>, webSearch: boolean,
+  skills: ReadonlyArray<Readonly<{ name: string; description: string }>> = []): string[] {
   const kept = new Set(stillAllowed ?? []);
   const { offered } = effectiveHostTools(hostTools.filter((tool) => kept.has(tool)), scopes);
   const worded = new Set(HOST_TOOL_WORDS.map(([tool]) => tool));
   return [...HOST_TOOL_WORDS.filter(([tool]) => offered.includes(tool)).map(([, words]) => words), ...offered.filter((tool) => !worded.has(tool)),
-    ...(webSearch ? ["联网搜索"] : [])];
+    ...(webSearch ? ["联网搜索"] : []),
+    ...skills.map(({ name, description }) => {
+      const characters = [...description];
+      return `技能「${name}」：${characters.length > SKILL_DESCRIPTION_LIMIT ? `${characters.slice(0, SKILL_DESCRIPTION_LIMIT).join("")}…` : description}`;
+    })];
 }
 
 /**

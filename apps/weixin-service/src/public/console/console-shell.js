@@ -10,6 +10,8 @@
     network: '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
     idcard: '<path d="M13 19a4 4 0 00-8 0"/><path d="M16 10h2"/><path d="M16 14h2"/><circle cx="9" cy="12" r="3"/><rect x="2" y="5" width="20" height="14" rx="2"/>',
     plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8z"/>',
+    // The owner-chosen icon of Skill 管理 (agent-console::CON-003).
+    spark: '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
     // Lucide MessageCircle: the round speech bubble of the chat button beside the Coordinator and each Team Leader (agent-console::US-006/AC-01).
@@ -19,6 +21,7 @@
     { id: "overview", label: "团队总览", icon: "network", href: "/console" },
     { id: "teams", label: "团队管理", icon: "idcard", href: "/console/teams" },
     { id: "mcp", label: "MCP 管理", icon: "plug", href: "/console/mcp" },
+    { id: "skills", label: "Skill 管理", icon: "spark", href: "/console/skills" },
   ];
   const APP_NAME = "Codex Weixin";
   // The owner's private entries, on every page. On the team overview they open that page's drawer in place; on other pages they

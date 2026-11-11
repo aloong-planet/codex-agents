@@ -8,9 +8,10 @@ import type { ConsoleAudit } from "./console-audit.js";
 import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { GroupNames } from "./group-names.js";
 import type { AnnouncementSend, TeamAnnouncements } from "./team-announcements.js";
+import type { SkillUse } from "./skill-library.js";
 import { type ApplicationCredentials, type CreationEnd, type OnboardingPlatform, TeamOnboarding } from "./team-onboarding.js";
 import { acceptingTeams, COORDINATOR_ID, DEFAULT_EXECUTOR_NOUN, type DefinitionsVersion, type OnboardingMethod, type OnboardingOutcome, type TeamDefinition,
-  TeamDefinitionError, type TeamEdit, type TeamRegistry, type TestMessageOutcome } from "./team-registry.js";
+  type TeamDefinitions, TeamDefinitionError, type TeamEdit, type TeamRegistry, type TestMessageOutcome } from "./team-registry.js";
 
 /** A console input that is not a team definition at all; the page never sends one. */
 export class TeamInputError extends Error {}
@@ -52,6 +53,8 @@ export type TeamManagementOptions = Readonly<{
   rosterChanged(roster: Readonly<FeishuDispatchConfiguration>): void;
   /** Applications no team may use, such as Penny's, each with the reason the save bar shows. */
   reservedApplications?(): Readonly<Record<string, string>>;
+  /** The Skill Library's skills in their current versions, which profiles check (team-management::US-003/AC-05). */
+  skills?(): ReadonlyArray<Readonly<{ id: string; version: number; name: string; description: string }>>;
   report(code: string): void;
   now?: () => number;
   /** Group names shared with the dispatch-group form; without it, team management reads names on its own. */
@@ -133,7 +136,7 @@ export class TeamManagement {
     const basedOn = parseVersion(options.basedOn);
     const before = edit.id === undefined ? undefined : this.current().definitions.teams.find(({ id }) => id === edit.id);
     const { version, teamId, creation } = this.options.registry.saveTeam(edit, { basedOn, reserved: this.options.reservedApplications?.() ?? {}, at: this.now(),
-      ...(secret === undefined ? {} : { secret }) });
+      skills: Object.fromEntries((this.options.skills?.() ?? []).map((skill) => [skill.id, skill.version])), ...(secret === undefined ? {} : { secret }) });
     const after = version.definitions.teams.find(({ id }) => id === teamId)!;
     const method: OnboardingMethod = edit.method ?? "existing";
     this.auditTeamSave(before, after, secret !== undefined && method === "existing", version.version, options.actor, before === undefined || creation ? method : undefined);
@@ -207,6 +210,13 @@ export class TeamManagement {
     this.audit(actor, { event: "team_task_deleted", team: team.id, task: task.id, name: task.name, group: task.chatId });
     this.settle();
   }
+
+  /**
+   * Moves the profiles that select the given skills to the versions given for them, so requests admitted from now on load
+   * those and requests admitted earlier keep theirs (agent-dispatch::REQ-017/AC-01). Called after a re-import, and at
+   * startup with every skill's current version.
+   */
+  followSkills(versions: Readonly<Record<string, number>>): void { this.options.registry.followSkills(versions); }
 
   /** Saves Sam's responsibility and instructions, the only parts the console may change (team-management::REQ-001/AC-01). */
   saveCoordinator(input: unknown, options: Readonly<{ basedOn: unknown; actor: TeamActor }>): void {
@@ -289,6 +299,7 @@ export class TeamManagement {
     for (const { chatId, teamId, kind, state, text: message } of this.options.announcements.list()) latest.set(`${teamId}\n${chatId}`, { kind, state, text: message });
     return {
       configured: true, version: current.version,
+      skills: (this.options.skills?.() ?? []).map(({ id, name, description }) => ({ id, name, description })),
       groups: definitions.dispatchGroups.map((chatId) => ({ chatId, name: names[chatId] ?? chatId })),
       tools: effectiveHostTools(this.options.catalogToolIds, scopes).offered.reduce((granted, id) => ({ ...granted, [id]: true }),
         Object.fromEntries(this.options.catalogToolIds.map((id) => [id, false])) as Record<string, boolean>),
@@ -311,9 +322,10 @@ export class TeamManagement {
           ...(record.credentials ? { credentials: record.credentials } : {}),
           bindings: team.bindings.filter(({ state }) => state !== "removed").map(({ chatId, state }) => ({ chatId, state, ...(record.joins[chatId] ? { join: record.joins[chatId] } : {}),
             ...(state === "draining" ? { removal: removal(team, work, tasks, chatId) } : {}) })),
-          profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => {
+          profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools, skills }) => {
             const effective = effectiveHostTools(hostTools, scopes);
-            return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted };
+            return { id, name, noun: noun || DEFAULT_EXECUTOR_NOUN, instructions, hostTools: [...hostTools], effective: effective.offered, ungranted: effective.ungranted,
+              skills: (skills ?? []).map((ref) => ref.id) };
           }),
           activeAssignments: active[team.id] ?? 0,
           announcements: Object.fromEntries(team.bindings.flatMap(({ chatId }) => latest.has(`${team.id}\n${chatId}`) ? [[chatId, latest.get(`${team.id}\n${chatId}`)!]] : [])) };
@@ -434,6 +446,8 @@ export class TeamManagement {
 
 export type TeamsView = Readonly<{
   configured: true; version: number;
+  /** The Skill Library's skills, for the profiles' checkboxes. */
+  skills: Array<{ id: string; name: string; description: string }>;
   groups: Array<{ chatId: string; name: string }>;
   /** Each catalog host tool and whether module permissions grant it. */
   tools: Record<string, boolean>;
@@ -451,7 +465,9 @@ export type TeamsView = Readonly<{
     /** Step 6: the latest test message of the team's application in each group it sent one to, and the text a new one would carry. */
     tests: Record<string, TestMessageOutcome>; testMessage: string;
     credentials?: OnboardingOutcome; bindings: Array<{ chatId: string; state: string; join?: OnboardingOutcome; removal?: RemovalView }>;
-    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[] }>;
+    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; effective: string[]; ungranted: string[];
+      /** The IDs of the skills the profile checks. */
+      skills: string[] }>;
     activeAssignments: number;
     announcements: Record<string, { kind: "join" | "leave"; state: string; text: string }>;
   }>;
@@ -468,6 +484,12 @@ export type TeamsView = Readonly<{
  */
 export type RemovalView = { active: number; awaitingRequester: number; closing: number; tasks: Array<{ id: string; name: string; when: string }>;
   waiting: Array<{ requestId: string; label: string; summary: string; requester: "owner" | "member"; waitingFor: string[] }> };
+
+/** The profiles in `definitions` that select a skill. Also asked of the stored definitions while no team management runs. */
+export function skillUsesIn(definitions: TeamDefinitions, skillId: string): SkillUse[] {
+  return definitions.teams.flatMap((team) => team.executorProfiles.filter(({ skills }) => skills?.some(({ id }) => id === skillId))
+    .map((profile) => ({ teamId: team.id, leader: team.leader.name, teamName: team.teamName, profile: profile.name })));
+}
 
 const outcome = ({ status, reason }: OnboardingOutcome) => reason ? `${status}:${reason}` : status;
 function object(value: unknown): Record<string, unknown> {
@@ -495,8 +517,10 @@ function parseTeamEdit(input: unknown, catalogToolIds: readonly string[]): Reado
     const profile = object(item);
     if (profile.id !== undefined && typeof profile.id !== "string") throw new TeamInputError("能力档编号无效");
     if (!Array.isArray(profile.hostTools) || !profile.hostTools.every((tool) => typeof tool === "string" && catalogToolIds.includes(tool))) throw new TeamInputError("工具格式无效");
+    // A page loaded before skills existed sends none; the registry judges whether the library still has each checked skill.
+    if (profile.skills !== undefined && (!Array.isArray(profile.skills) || profile.skills.length > 200 || !profile.skills.every((id) => typeof id === "string"))) throw new TeamInputError("skill 格式无效");
     return { ...(profile.id === undefined ? {} : { id: profile.id as string }), name: text(profile.name, "能力档名称"), noun: text(profile.noun, "执行者称呼"),
-      instructions: text(profile.instructions, "执行者提示词"), hostTools: profile.hostTools as string[] };
+      instructions: text(profile.instructions, "执行者提示词"), hostTools: profile.hostTools as string[], ...(profile.skills === undefined ? {} : { skills: profile.skills as string[] }) };
   });
   const edit: TeamEdit = { ...(value.id === undefined ? {} : { id: value.id as string }), teamName: text(value.teamName, "团队名称"),
     responsibility: text(value.responsibility, "职责"),

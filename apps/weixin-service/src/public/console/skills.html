@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skill 管理</title>
+<link rel="stylesheet" href="/console/console.css">
+<link rel="stylesheet" href="/console/skills.css">
+</head>
+<body>
+<div class="acv2-app">
+<header class="acv2-header"><div class="acv2-brand">Agent 工作台 <small>工作空间 / Skill 管理</small></div><div class="acv2-local"><span class="acv2-dot"></span>本机工作空间</div></header>
+<main class="acv2-main">
+<div class="acv2-heading"><div class="acv-tip-row"><h1>Skill 管理</h1><span data-console-tip="从本机文件夹导入 skill；页面不能编辑内容。
+· 内容在文件夹里修改后重新导入，新事务使用新内容，进行中的事务保持原内容。
+· 团队管理里的执行者能力档从这里选择。"></span></div><div class="asl-actions"><a class="acv2-button" href="/console/teams">返回团队管理</a><button class="acv2-button acv2-primary" type="button" id="asl-new">从文件夹导入</button></div></div>
+<div class="acv2-workspace"><section class="acv5-panel"><div class="acv5-panel-head">Skill 库<small id="asl-count"></small></div><div class="acv5-scroll"><table class="acv5-table"><thead><tr><th>名称</th><th>来源文件夹</th><th>文件</th><th>导入时间</th><th>来源状态</th><th>使用情况</th></tr></thead><tbody id="asl-rows"></tbody></table></div></section>
+<aside class="acv2-drawer" id="asl-drawer" aria-label="Skill 详情" hidden><div class="acv2-drawer-head"><div><div class="acv2-eyebrow" id="asl-kind"></div><h2 id="asl-title"></h2></div><div class="acv2-drawer-actions"><button class="acv3-icon-close" id="asl-close" type="button" aria-label="关闭抽屉"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></div></div><div class="acv2-drawer-scroll"><div class="asl-body" id="asl-body"></div></div></aside><div class="acv2-mask"></div></div>
+</main></div>
+<script src="/console/console-shell.js"></script>
+<script src="/console/skills.js"></script>
+</body>
+</html>

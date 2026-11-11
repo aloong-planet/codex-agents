@@ -14,7 +14,8 @@ const definitions: TeamDefinitions = {
     profile: { instructions: "协调规则", hostTools: ["files.read"] } },
   dispatchGroups: ["oc_alpha"],
   teams: [{ id: "bill", teamName: "生活团队", responsibility: "生活", leader: { name: "Bill", appId: "cli_2222222222222222", profile: { instructions: "负责人规则", hostTools: ["files.write"] } },
-    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] }],
+    executorProfiles: [{ id: "executor-1", name: "能力档 1", instructions: "行程规则", hostTools: ["files.write", "files.read", "unknown.tool"] },
+      { id: "executor-2", name: "行程核对", instructions: "", hostTools: [], skills: [{ id: "skill-aaaaaaaa", version: 2 }, { id: "skill-bbbbbbbb", version: 1 }] }],
     bindings: [{ chatId: "oc_alpha", state: "accepting" }] }],
 };
 const trusted: TrustedWorkflowTurn = { eventKey: "event-1", accountId: "account-1", target: "target-1", occurredAt: 1_788_200_000_000, originalTextRef: "text-ref-1", attachmentRefs: [] };
@@ -30,11 +31,13 @@ const offered = (tools: ProfileToolHost) => tools.definitions().flatMap((namespa
 describe("agent profile resolution", () => {
   it.each([
     ["the Coordinator with no host tools and the group memory, even when its profile lists tools", { role: "coordinator" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "协调规则", hostTools: [], memoryScope: { kind: "group" } }],
+      { instructions: "协调规则", hostTools: [], skills: [], memoryScope: { kind: "group" } }],
     ["a Team Leader with its own instructions, no host tools and its own memory, even when its profile lists tools", { role: "leader", teamId: "bill" } as const, PRODUCTION_TOOL_IDS,
-      { instructions: "负责人规则", hostTools: [], memoryScope: { kind: "leader", teamId: "bill" } }],
+      { instructions: "负责人规则", hostTools: [], skills: [], memoryScope: { kind: "leader", teamId: "bill" } }],
     ["an Executor's host tools as its allowlist intersected with the catalog, and its profile's memory", { role: "executor", teamId: "bill", profileId: "executor-1" } as const,
-      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" } }],
+      ["files.read", "schedules.create", "files.write"], { instructions: "行程规则", hostTools: ["files.read", "files.write"], skills: [], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-1" } }],
+    ["an Executor's skills in the versions its definitions version names", { role: "executor", teamId: "bill", profileId: "executor-2" } as const, PRODUCTION_TOOL_IDS,
+      { instructions: "", hostTools: [], skills: [{ id: "skill-aaaaaaaa", version: 2 }, { id: "skill-bbbbbbbb", version: 1 }], memoryScope: { kind: "profile", teamId: "bill", profileId: "executor-2" } }],
   ])("resolves %s", (_case, agent, catalog, expected) => {
     expect(resolveAgentProfile(definitions, agent, catalog)).toEqual(expected);
   });
@@ -137,6 +140,15 @@ describe("Executor capabilities in plain words", () => {
     ["a runtime without web search", PRODUCTION_TOOL_IDS, ["files.read"], READ_WRITE, false, ["读取授权目录里的文件"]],
   ] as const)("names, with %s, exactly what an Executor can do now", (_case, versionTools, stillAllowed, scopes, webSearch, expected) => {
     expect(executorCapabilities(versionTools, stillAllowed, scopes, webSearch)).toEqual(expected);
+  });
+
+  // What a selected skill gives an Executor joins the list after the tools: its name and what its SKILL.md says it is for.
+  it("names each skill the preset selects with its description, cut to 200 characters, also for a preset since removed", () => {
+    const long = "逐段核对站名与换乘。".repeat(21);
+    expect(executorCapabilities(["files.read"], ["files.read"], READ_WRITE, true, [{ name: "行程核对", description: "逐段核对站名、换乘与开放时间" }, { name: "long", description: long }]))
+      .toEqual(["读取授权目录里的文件", "联网搜索", "技能「行程核对」：逐段核对站名、换乘与开放时间", `技能「long」：${long.slice(0, 200)}…`]);
+    // The request's Executors still load the skill: it comes from the request's definitions version, not the current one.
+    expect(executorCapabilities(["files.read"], undefined, READ_WRITE, false, [{ name: "行程核对", description: "核对" }])).toEqual(["技能「行程核对」：核对"]);
   });
 });
 

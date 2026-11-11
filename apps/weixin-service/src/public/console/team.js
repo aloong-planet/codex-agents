@@ -3,7 +3,8 @@
 // runs onboarding and audits every change. Every value from the service is inserted as text (agent-console::REQ-005/AC-04).
 // A team gets its Feishu application by QR creation, with six onboarding steps, or as an existing application, with the last
 // three; the choice is saved with the team, and the QR code is asked for by the save that chooses it (team-management::US-002).
-// Not built yet (ticket 11, decision D1): MCP binding and skills.
+// A profile's skills are checked from the Skill Library, which the Skill 管理 page maintains (team-management::US-003/AC-05).
+// Not built yet (ticket 11, decision D1): MCP binding.
 // The dispatch-group form (agent-console::US-009) fills the 未配置 panel and, with dispatch, the 派单群设置 drawer; a save writes
 // the channel configuration file and applies after the service restarts.
 (() => {
@@ -36,6 +37,8 @@
   /** The service's team view. */
   let view = null;
   let selected = null;
+  /** The team a link from another page asks for (`?team=<ID>`, as the skill's details link to unbind it); taken once the view has loaded. */
+  let linked = new window.URLSearchParams(location.search).get("team");
   /** Per list entry, the editor's copy: the edit, the definitions version it is based on, the save bar state and a refusal. */
   const drafts = new Map();
   let query = "";
@@ -84,12 +87,12 @@
     if (id === SAM) return { responsibility: view.coordinator.responsibility, instructions: view.coordinator.instructions };
     if (id === NEW) {
       return { teamName: "", responsibility: "", leader: { name: "", appId: "", instructions: "" }, groups: [], method: "qr", secretEditing: false, secret: "",
-        profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools) }] };
+        profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools), skills: [] }] };
     }
     const team = shownTeam(id);
     return { id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader }, method: team.method, secretEditing: false, secret: "",
       groups: team.bindings.filter(({ state }) => state !== "draining").map(({ chatId }) => chatId),
-      profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools] })) };
+      profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools, skills }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools], skills: [...skills] })) };
   }
 
   const current = () => drafts.get(selected);
@@ -191,13 +194,21 @@
     }).join("")}</div></div>`).join("");
   }
 
+  /** The Skill Library's skills as checkboxes: each by its name, with what its SKILL.md says it is for. */
+  function skillsHtml(profile, index) {
+    const list = view.skills.length
+      ? `<div class="atm-skill-list">${view.skills.map((skill) => `<label class="acf-check"><input type="checkbox" data-skill="${esc(skill.id)}" data-profile="${index}" ${profile.skills.includes(skill.id) ? "checked" : ""}><span>${esc(skill.name)}<small>${esc(skill.description)}</small></span></label>`).join("")}</div>`
+      : '<p class="acf-section-note">Skill 库里还没有 skill。</p>';
+    return `<div class="acf-sub">skills<small>从 Skill 管理里已导入的 skill 勾选</small></div>${list}<div class="acf-row-actions"><a class="acv2-button" href="/console/skills">去 Skill 管理导入</a></div>`;
+  }
+
   function profilesHtml(draft) {
     return `<section class="acf-section"><div class="acv-tip-row"><h3>执行者能力档</h3>${tip("负责人派活时选一个能力档创建临时执行者。\n· 实际可用的工具 = 勾选的工具 ∩ 模块授权。\n· 新增的工具只对新事务生效；取消勾选立即生效。")}</div>`
       + draft.profiles.map((profile, index) => `<div class="atm-profile"><div class="atm-profile-head"><strong data-profile-title="${index}">${esc(profile.name || "未命名能力档")}</strong><button class="acv2-button" type="button" data-profile-remove="${index}">删除能力档</button></div>`
         + `<div class="acf-fields"><label class="acf-field">能力档名称<input class="acv2-input" data-profile-field="name" data-profile="${index}" value="${esc(profile.name)}" placeholder="例如：商品文案"></label>`
         + `<label class="acf-field">执行者称呼<input class="acv2-input" data-profile-field="noun" data-profile="${index}" value="${esc(profile.noun)}" placeholder="执行者"><span class="atm-noun-hint" data-noun-hint="${index}">${esc(nounHint(profile))}</span></label></div>`
         + `<label class="acf-field atm-field-gap">执行者提示词<textarea class="acf-textarea" data-profile-field="instructions" data-profile="${index}">${esc(profile.instructions)}</textarea></label>`
-        + `<div class="acf-sub">工具<small>实际可用的工具 = 勾选的工具 ∩ 模块授权</small></div>${toolsHtml(profile, index)}${effectiveHtml(profile)}</div>`).join("")
+        + `<div class="acf-sub">工具<small>实际可用的工具 = 勾选的工具 ∩ 模块授权</small></div>${toolsHtml(profile, index)}${effectiveHtml(profile)}${skillsHtml(profile, index)}</div>`).join("")
       + '<div class="acf-row-actions"><button class="acv2-button" type="button" data-profile-add>新增能力档</button></div></section>';
   }
 
@@ -444,6 +455,7 @@
       entry.value = fromView(id);
       entry.basedOn = view.version;
     }
+    if (linked !== null) { if (teamOf(linked)) selected = linked; linked = null; }
     if (selected === null || (selected !== SAM && selected !== NEW && !shownTeam(selected))) selected = view.teams[0]?.id ?? SAM;
     if (!drafts.has(selected)) drafts.set(selected, entryFor(selected));
   }
@@ -481,7 +493,7 @@
     // In QR creation the application is the service's to set; a secret is sent only for an existing application.
     return { ...(draft.id ? { id: draft.id } : {}), teamName: draft.teamName, responsibility: draft.responsibility, method: draft.method,
       leader: { name: draft.leader.name, appId: draft.leader.appId, instructions: draft.leader.instructions }, groups: draft.groups,
-      executorProfiles: draft.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ ...(id ? { id } : {}), name, noun, instructions, hostTools })),
+      executorProfiles: draft.profiles.map(({ id, name, noun, instructions, hostTools, skills }) => ({ ...(id ? { id } : {}), name, noun, instructions, hostTools, skills })),
       ...(draft.method === "existing" && draft.secretEditing && draft.secret.trim() ? { secret: draft.secret } : {}) };
   }
 
@@ -613,7 +625,7 @@
     if (sendButton) { void sendTest(sendButton); return; }
     if (target.closest("[data-secret-edit]")) { draft.secretEditing = true; edited(); renderEditor(); document.querySelector('[data-field="secret"]')?.focus(); return; }
     if (target.closest("[data-secret-cancel]")) { draft.secretEditing = false; draft.secret = ""; renderEditor(); return; }
-    if (target.closest("[data-profile-add]")) { draft.profiles.push({ name: `能力档 ${draft.profiles.length + 1}`, noun: "执行者", instructions: "", hostTools: [] }); edited(); renderEditor(); return; }
+    if (target.closest("[data-profile-add]")) { draft.profiles.push({ name: `能力档 ${draft.profiles.length + 1}`, noun: "执行者", instructions: "", hostTools: [], skills: [] }); edited(); renderEditor(); return; }
     const remove = target.closest("[data-profile-remove]");
     if (remove) { draft.profiles.splice(Number(remove.dataset.profileRemove), 1); edited(); renderEditor(); return; }
     const recheckButton = target.closest("[data-recheck]");
@@ -677,6 +689,12 @@
       const profile = draft.profiles[Number(target.dataset.profile)];
       profile.hostTools = target.checked ? [...profile.hostTools, tool] : profile.hostTools.filter((id) => id !== tool);
       edited(); renderEditor(); return;
+    }
+    const skill = target.dataset.skill;
+    if (skill) {
+      const profile = draft.profiles[Number(target.dataset.profile)];
+      profile.skills = target.checked ? [...profile.skills, skill] : profile.skills.filter((id) => id !== skill);
+      edited(); return;
     }
     const group = target.dataset.group;
     if (group) {

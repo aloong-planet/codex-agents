@@ -41,7 +41,7 @@ We adopt **option 1**.
   - A group or dispatch-agent runtime is offered exactly its host tools, plus `web.run` where web search is live.
   - Group research through `codex exec` is offered `web.run` only.
   - The three owner-private App Servers run in the owner's own Codex home and keep the owner's tool surface: the main conversation, the pending responder and the private memory curator.
-- **One table.** `ISOLATED_RUNTIME_KINDS` (`apps/weixin-service/src/isolated-runtime-kinds.ts`) holds each kind's root, scope, host tools, media access and conversation options. `main.ts` creates every isolated runtime from it, an architecture test enforces that, and the tests drive the same table.
+- **One table.** `ISOLATED_RUNTIME_KINDS` (`apps/weixin-service/src/isolated-runtime-kinds.ts`) holds each kind's root, scope, host tools, media access, whether the host writes skills into its home, and conversation options. `main.ts` creates every isolated runtime from it, an architecture test enforces that, and the tests drive the same table.
 - **No reset for older threads.** A thread saved before this change keeps the old tool list in its history and sends it again when resumed. Every tool on it is refused as an unsupported call and has no effect. This was decided on the owner's delegation on 2026-11-08, in preference to starting such threads afresh, which would drop group history and touch every thread store.
 
 ## Consequences

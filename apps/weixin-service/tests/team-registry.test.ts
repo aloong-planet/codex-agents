@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
-import { acceptingTeams, TeamDefinitionError, TeamRegistry, type TeamDefinitions, type TeamEdit } from "../src/team-registry.js";
+import { acceptingTeams, storedDefinitions, TeamDefinitionError, TeamRegistry, type TeamDefinitions, type TeamEdit } from "../src/team-registry.js";
 
 // Registry seam only. The local configuration follows the documented shape in docs/ops/feishu-agent-dispatch.md;
 // the owner's real channel.json is production data and is not read. Real-main wiring is in team-management.integration.test.ts.
@@ -739,5 +739,94 @@ describe("teams accepting work in a group", () => {
     ["oc_gamma", []],
   ] as const)("lists only the teams accepting work in %s, by team name and responsibility", (chatId, expected) => {
     expect(acceptingTeams(definitions, chatId)).toEqual(expected);
+  });
+});
+
+// team-management::US-003/AC-05 at the registry: a profile's checked skills are stored as Skill Library versions, so a
+// definitions version fixes what its requests load (agent-dispatch::REQ-017/AC-01).
+describe("skills of an Executor profile", () => {
+  const A = "skill-aaaaaaaa", B = "skill-bbbbbbbb";
+  function seeded() {
+    const registry = new TeamRegistry(databasePath());
+    return { registry, first: registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS }) };
+  }
+  /** The console's edit of a stored team with its first profile checking `skills`. */
+  const checking = (definitions: TeamDefinitions, id: string, skills: string[]): TeamEdit => {
+    const edit = editOf(definitions, id);
+    return { ...edit, executorProfiles: edit.executorProfiles.map((profile, index) => index ? profile : { ...profile, skills }) };
+  };
+  const profile = (version: { definitions: TeamDefinitions }, id: string) => version.definitions.teams.find((team) => team.id === id)!.executorProfiles[0]!;
+
+  it("stores each checked skill in the library's current version, and leaves a profile that checks none as it was", () => {
+    const { registry, first } = seeded();
+    try {
+      const saved = registry.saveTeam(checking(first.definitions, "bill", [A, B, A]), { basedOn: 1, skills: { [A]: 2, [B]: 1, "skill-cccccccc": 5 } }).version;
+      expect(profile(saved, "bill").skills).toEqual([{ id: A, version: 2 }, { id: B, version: 1 }]);
+      const other = registry.saveTeam({ ...checking(first.definitions, "alice", []), responsibility: "运营新职责" }, { basedOn: 1, skills: { [A]: 2 } }).version;
+      expect(profile(other, "alice")).toEqual(profile(first, "alice"));
+      // Unchecking everything takes the skills out of the profile again.
+      const cleared = registry.saveTeam(checking(other.definitions, "bill", []), { basedOn: other.version, skills: { [A]: 2 } }).version;
+      expect(profile(cleared, "bill")).toEqual(profile(first, "bill"));
+    } finally { registry.close(); }
+  });
+
+  it("refuses a save that checks a skill the library no longer has", () => {
+    const { registry, first } = seeded();
+    try {
+      let refused: unknown;
+      try { registry.saveTeam(checking(first.definitions, "bill", [A, B]), { basedOn: 1, skills: { [A]: 1 } }); } catch (error) { refused = error; }
+      expect((refused as TeamDefinitionError).reasons).toEqual(["所选的 skill 已不在 Skill 库，请重新载入页面。"]);
+      expect(registry.current()).toEqual(first);
+    } finally { registry.close(); }
+  });
+
+  it("moves every profile that selects a re-imported skill to its new version, in one version, and leaves earlier versions as they were", () => {
+    const { registry, first } = seeded();
+    try {
+      registry.saveTeam(checking(first.definitions, "bill", [A, B]), { basedOn: 1, skills: { [A]: 1, [B]: 1 } });
+      registry.saveTeam(checking(first.definitions, "alice", [A]), { basedOn: 1, skills: { [A]: 1, [B]: 1 } });
+      const before = registry.saveTeam(checking(first.definitions, "jack", [B]), { basedOn: 1, skills: { [A]: 1, [B]: 1 } }).version;
+
+      const moved = registry.followSkills({ [A]: 2 })!;
+      expect({ version: moved.version, basedOn: moved.basedOn, source: moved.source }).toEqual({ version: before.version + 1, basedOn: before.version, source: "console" });
+      expect([profile(moved, "bill").skills, profile(moved, "alice").skills, profile(moved, "jack").skills])
+        .toEqual([[{ id: A, version: 2 }, { id: B, version: 1 }], [{ id: A, version: 2 }], [{ id: B, version: 1 }]]);
+      // A request admitted under the earlier version still finds version 1 there.
+      expect(profile(registry.version(before.version)!, "bill").skills).toEqual([{ id: A, version: 1 }, { id: B, version: 1 }]);
+      // Nothing to move: no version is added.
+      expect(registry.followSkills({ [A]: 2, [B]: 1 })).toBeUndefined();
+      expect(registry.followSkills({ "skill-cccccccc": 9 })).toBeUndefined();
+      expect(registry.current()!.version).toBe(moved.version);
+    } finally { registry.close(); }
+  });
+
+  it("refuses a save from a page that loaded another selection, but not one that loaded before a re-import", () => {
+    const { registry, first } = seeded();
+    try {
+      const loaded = registry.saveTeam(checking(first.definitions, "bill", [A]), { basedOn: 1, skills: { [A]: 1, [B]: 1 } }).version;
+      // The skill is re-imported while the page is open: its save is not stale, and takes the newest version.
+      registry.followSkills({ [A]: 2 });
+      const saved = registry.saveTeam({ ...checking(loaded.definitions, "bill", [A]), responsibility: "新职责" }, { basedOn: loaded.version, skills: { [A]: 2, [B]: 1 } }).version;
+      expect(profile(saved, "bill").skills).toEqual([{ id: A, version: 2 }]);
+      // Another page checks a second skill; a save from the page that loaded before that would silently uncheck it.
+      registry.saveTeam(checking(saved.definitions, "bill", [A, B]), { basedOn: saved.version, skills: { [A]: 2, [B]: 1 } });
+      expect(() => registry.saveTeam({ ...checking(saved.definitions, "bill", [A]), responsibility: "另一页的修改" }, { basedOn: saved.version, skills: { [A]: 2, [B]: 1 } }))
+        .toThrow(/^team_registry_version_stale$/);
+    } finally { registry.close(); }
+  });
+
+  // A service without dispatch opens no registry, yet the stored profiles still select skills (agent-console::US-009).
+  it("gives the definitions a closed registry file holds, and nothing where there is no registry, without creating one", () => {
+    const file = databasePath();
+    expect(storedDefinitions(file)).toBeUndefined();
+    expect(existsSync(file)).toBe(false);
+    const registry = new TeamRegistry(file);
+    let saved: TeamDefinitions;
+    try {
+      const first = registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS });
+      saved = registry.saveTeam(checking(first.definitions, "bill", [A]), { basedOn: 1, skills: { [A]: 2 } }).version.definitions;
+    } finally { registry.close(); }
+    expect(storedDefinitions(file)).toEqual(saved);
+    expect(storedDefinitions(file)!.teams.find(({ id }) => id === "bill")!.executorProfiles[0]!.skills).toEqual([{ id: A, version: 2 }]);
   });
 });

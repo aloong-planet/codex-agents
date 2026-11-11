@@ -1,0 +1,12 @@
+/* Skill 管理 page rules, from the owner-confirmed skill library prototype. Spacing and wrapping that the prototype wrote
+   inline sit in classes, because the console's content security policy refuses inline styles. */
+.asl-actions{display:flex;gap:8px;align-items:center;flex:none}
+.asl-body{padding:14px 0 4px}
+.asl-desc{margin:0;font-size:11px;line-height:1.7;color:var(--acv-ink)}
+/* A folder path: one line in the table, cut with an ellipsis; wrapped in the drawer and in a refusal's list of links. */
+.asl-code{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--acv-ink);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.asl-code.asl-wrap{max-width:none;white-space:normal;overflow-wrap:anywhere}
+.asl-error{padding:9px 10px;border:1px solid var(--acv-error);border-radius:7px;font-size:11px;line-height:1.7;color:var(--acv-error);margin-top:10px}
+.asl-error .asl-code{color:inherit}
+.asl-preview{margin-top:12px}
+.asl-flush{margin:0}
