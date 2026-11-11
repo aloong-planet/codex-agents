@@ -147,5 +147,54 @@
 .acv2-related button:hover{background:var(--acv-selected)}
 .acv2-path{display:block;background:var(--acv-paper);border:1px solid var(--acv-line);border-radius:5px;padding:8px;margin:6px 0;font:10px/1.7 var(--acv-mono);overflow-wrap:anywhere;color:var(--acv-ink)}
 .acv2-drawer-foot{flex:none;border-top:1px solid var(--acv-line);font-size:10px;color:var(--acv-muted);padding:10px 16px;background:var(--acv-raise)}
+/* Private conversations (agent-console::US-006), from the owner-confirmed prototype: the frameless chat button beside a name, the
+ * drawer's conversation with its request selector, log and composer. The pane replaces the records' tabs, list and foot. */
+.ats-chat-launch{width:28px;height:28px;min-width:28px;flex:none;display:grid;place-items:center;padding:0;border:0;border-radius:6px;background:transparent;color:var(--ats-tone)}
+.ats-chat-launch .acv-i{width:16px;height:16px}
+.ats-chat-launch:hover{color:var(--acv-brand)}
+.ats-chat-pane{flex:1;min-height:0;display:flex;flex-direction:column}
+.ats-chat-pane[hidden],#ats-record-tabs[hidden],#ats-drawer-scroll[hidden],#ats-record-foot[hidden]{display:none}
+.ats-chat-context{flex:none;padding:10px 14px;border-bottom:1px solid var(--acv-line);background:var(--acv-paper);font-size:10px;color:var(--acv-muted)}
+.ats-chat-context label{display:flex;gap:8px;align-items:center}
+.ats-chat-context select{flex:1;min-width:0;height:30px;border:1px solid var(--acv-line);border-radius:5px;background:var(--acv-paper);color:var(--acv-ink);font-size:11px}
+.ats-chat-context p{margin:6px 0 0;line-height:1.6;overflow-wrap:anywhere}
+.ats-chat-log{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:14px;background:var(--acv-paper)}
+.ats-chat-message{margin-bottom:14px;max-width:94%;font-size:11px}
+.ats-chat-message.ats-chat-self{margin-left:auto}
+.ats-chat-speaker{color:var(--acv-muted);font-size:10px;margin-bottom:4px}
+.ats-chat-self .ats-chat-speaker{text-align:right}
+.ats-chat-bubble{padding:10px 11px;border:1px solid var(--acv-line);border-radius:9px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--acv-paper);color:var(--acv-ink)}
+.ats-chat-self .ats-chat-bubble{background:var(--acv-selected)}
+.ats-chat-preview{padding:9px;border-radius:6px;background:var(--acv-soft);line-height:1.7;margin:10px 0;color:var(--acv-ink);font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
+.ats-chat-actions{display:flex;gap:7px;margin-top:10px;flex-wrap:wrap}
+.ats-chat-actions .acv2-button{font-size:11px;min-height:30px}
+.ats-chat-compose{flex:none;border-top:1px solid var(--acv-line);padding:11px 14px 12px;background:var(--acv-paper)}
+.ats-chat-compose textarea{display:block;width:100%;resize:none;min-height:72px;max-height:140px;padding:9px 10px;border:1px solid var(--acv-line);border-radius:7px;background:var(--acv-paper);color:var(--acv-ink);font-family:inherit;font-size:12px;line-height:1.6;overflow:auto}
+.ats-chat-compose textarea:focus-visible{outline:2px solid var(--acv-brand);outline-offset:-2px}
+.ats-chat-compose-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px}
+.ats-chat-compose-foot small{font-size:10px;color:var(--acv-muted)}
+.ats-chat-compose button:disabled{opacity:.5;cursor:default}
+.ats-chat-empty{font-size:11px;color:var(--acv-muted);line-height:1.7;padding:10px 0;margin:0}
+/* A reply still on its way, and one that did not come, sit inline under the owner's message (agent-console::US-002/AC-04). */
+.ats-chat-wait{font-size:11px;color:var(--acv-muted);margin:0 0 12px}
+.ats-chat-notice{margin:0 0 12px;padding:9px 10px;border-radius:7px;background:var(--acv-warning-soft);color:var(--acv-warning);font-size:11px;line-height:1.7;overflow-wrap:anywhere}
+/* Markdown replies from the Coordinator and the Team Leaders (chat-markdown.js). These rules select rendered content only, inside
+ * .ats-md; no rule of the pane's own elements reaches into it. A table scrolls in its region, both ways, inside the bubble. */
+.ats-chat-bubble.ats-md{white-space:normal}
+.ats-md>:first-child{margin-top:0}
+.ats-md>:last-child{margin-bottom:0}
+.ats-md h4,.ats-md h5,.ats-md h6{margin:10px 0 4px;font-size:12px;font-weight:700;color:var(--acv-ink)}
+.ats-md h4{font-size:13px}
+.ats-md p{margin:6px 0}
+.ats-md ul,.ats-md ol{margin:6px 0;padding-left:18px}
+.ats-md code{font:10.5px/1.6 var(--acv-mono);background:var(--acv-soft);border-radius:4px;padding:0 4px}
+.ats-md pre{margin:6px 0;padding:8px 9px;border-radius:7px;background:var(--acv-soft);overflow:auto;white-space:pre;overflow-wrap:normal}
+.ats-md pre code{background:none;padding:0}
+.ats-md a{color:var(--acv-brand)}
+.ats-md-table{max-height:220px;overflow:auto;margin:6px 0;border:1px solid var(--acv-line);border-radius:7px}
+.ats-md table{border-collapse:collapse;font-size:10.5px;width:max-content;min-width:100%}
+.ats-md th,.ats-md td{padding:4px 8px;border-bottom:1px solid var(--acv-line-2);text-align:left;white-space:nowrap;overflow-wrap:normal}
+.ats-md th{position:sticky;top:0;background:var(--acv-raise);font-weight:650}
+.ats-md-img{color:var(--acv-muted)}
 @media(max-width:719px){.ats-group-head{padding:0 12px}.ats-legend{gap:7px}.ats-footer-hint{display:none}.ats-footer-actions{margin-left:auto}.acv2-drawer-foot{font-size:9px}}
 @media(max-width:359px){.acv2-record-meta{gap:4px;font-size:9px}.acv2-record-delivery{font-size:9px}.acv2-agent{font-size:10px}}

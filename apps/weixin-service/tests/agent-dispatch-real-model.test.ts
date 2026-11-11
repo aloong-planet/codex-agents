@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { LeaderPlan } from "../src/agent-dispatch-leader.js";
 import type { DispatchDecision, DispatchExecutionResult, PrerequisiteResult } from "../src/agent-dispatch-types.js";
 import type { DispatchTurnRecord } from "../src/fixture-dispatch-recorder.js";
+import type { CoordinatorRequestView, LeaderRequestView, PrivateTurnInput } from "../src/private-conversations.js";
 import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 import type { State } from "./support/real-main.js";
 import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
@@ -29,6 +30,11 @@ import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenari
 // - A plan that passed only after its correction turn looks like one that passed at once: the correction stays inside the plan turn.
 // - The over-ceiling correction turn (agent-dispatch::REQ-011/AC-02), multi-turn controls and cross-team work (ticket 35).
 // - Application permissions, ingress and receipt in a real group: live acceptance.
+//
+// Private conversations (agent-console::US-006): the owner's console messages to Sam and to a request's lead Team Leader, about a
+// request their group finished. Asserted: a reply came, what each reply turn was given (Sam never an Assignment, a Brief or an
+// Executor's result), and that the conversation created no request and posted nothing. Whether a reply says only what its input
+// holds, and answers the question, is judged from the run record.
 
 const DECISION_WAIT_MS = 180_000, DECISION_LIMIT_MS = 240_000;
 const REQUEST_WAIT_MS = 1_200_000, REQUEST_LIMIT_MS = 1_320_000;
@@ -293,4 +299,67 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       }
       for (const assignment of assignments) expect(ENDED).toContain(assignment.status);
     }), REQUEST_LIMIT_MS);
+});
+
+describe.skipIf(!realModelDispatch)("private conversations on the real model", () => {
+  const PRIVATE_WAIT_MS = 180_000;
+  /** A request Alice's team finished in the group, for a private conversation to discuss: its ID and the state at its end. */
+  async function finishedRequest(run: ScenarioRun, messageId: string): Promise<{ requestId: string; state: State }> {
+    await run.send(messageId, "帮我写一句闲鱼上架二手 iPad 的标题，不超过 30 个字，直接在群里告诉我就行，不用做成文件。");
+    const state = await run.until("the request's end", (current) => atRest(current, messageId), REQUEST_WAIT_MS);
+    expect(decisionOn(state, messageId)).toMatchObject({ kind: "dispatch", agentId: "alice" });
+    expect(state.agentDispatch?.jobs).toHaveLength(1);
+    expect(state.agentDispatch!.jobs[0]).toMatchObject({ agentId: "alice", status: "completed" });
+    return { requestId: state.agentDispatch!.jobs[0]!.id, state };
+  }
+  /** The private reply turn the conversation with `agentId` ran last, which must have produced a reply without failing. */
+  function privateTurn(state: State, agentId: string): PrivateTurnInput {
+    const turn = turns(state, "private").filter((item) => (item.input as PrivateTurnInput).agent.id === agentId).at(-1);
+    expect(turn?.error, "the private reply turn failed").toBeUndefined();
+    expect(turn?.output, "the private reply turn's output").toBeDefined();
+    return turn!.input as PrivateTurnInput;
+  }
+  /** The conversation's reply came and nothing of it reached the group: no request was created and no post was sent. */
+  async function answeredPrivately(run: ScenarioRun, before: State, chat: Awaited<ReturnType<ScenarioRun["converse"]>>): Promise<State> {
+    expect(chat.messages.map(({ role, state }) => [role, state])).toEqual([["owner", "answered"], ["agent", undefined]]);
+    expect(chat.messages[1]!.text.trim().length).toBeGreaterThan(0);
+    const after = await run.state();
+    expect(after.agentDispatch?.jobs).toHaveLength(before.agentDispatch!.jobs.length);
+    expect(posts(after)).toEqual(posts(before));
+    return after;
+  }
+
+  it("has Sam answer the owner privately about a finished request from its state, teams and reports, never an Executor's content", () => realModelScenario(
+    { id: "private-coordinator", acceptance: ["agent-console::US-006/AC-01", "agent-console::REQ-002/AC-03", "agent-console::CON-002"] }, async (run) => {
+      const { requestId, state: before } = await finishedRequest(run, "om_real_private_sam");
+      const chat = await run.converse("sam", "刚才那件 iPad 标题的事办完了吗？是哪个团队做的？", requestId, PRIVATE_WAIT_MS);
+      const after = await answeredPrivately(run, before, chat);
+      const input = privateTurn(after, "sam");
+      expect(input.selected).not.toBeNull();
+      const shown = input.requests.find(({ id }) => id === input.selected) as CoordinatorRequestView | undefined;
+      expect(shown).toMatchObject({ state: "completed", lead: "Alice" });
+      expect(shown!.reports.length).toBeGreaterThanOrEqual(1);
+      // Sam reads what was posted, never an Assignment, the Brief its Executor got or the Executor's own result.
+      const given = JSON.stringify(input);
+      expect(given).not.toContain("\"assignments\"");
+      const plan = (turns(after, "plan")[0] as Turn<unknown, LeaderPlan> | undefined)?.output;
+      for (const { brief } of plan!.assignments) expect(given).not.toContain(brief.slice(0, 40));
+      for (const executorRun of turns(after, "run") as ExecutorRun[]) {
+        const posted = posts(after).some(({ message }) => message.includes(executorRun.output!.message.slice(0, 40)));
+        // An Executor's result may reach Sam only as far as its Team Leader posted it in the group.
+        if (!posted) expect(given).not.toContain(executorRun.output!.message.slice(0, 40));
+      }
+    }), REQUEST_LIMIT_MS + 240_000);
+
+  it("has the lead Team Leader answer the owner privately about its finished request from its own Executor's result", () => realModelScenario(
+    { id: "private-lead", acceptance: ["agent-console::US-006/AC-01", "agent-console::CON-002"] }, async (run) => {
+      const { requestId, state: before } = await finishedRequest(run, "om_real_private_lead");
+      const chat = await run.converse("alice", "你们最后写的标题是什么？我想再看一眼原文。", requestId, PRIVATE_WAIT_MS);
+      const after = await answeredPrivately(run, before, chat);
+      const input = privateTurn(after, "alice");
+      const shown = input.requests.find(({ id }) => id === input.selected) as LeaderRequestView | undefined;
+      expect(shown, "the selected request is in Alice's input").toBeDefined();
+      const results = (turns(after, "run") as ExecutorRun[]).map(({ output }) => output!.message);
+      expect(shown!.assignments.map(({ result }) => result.slice(0, 40))).toEqual(results.map((result) => result.slice(0, 40)));
+    }), REQUEST_LIMIT_MS + 240_000);
 });

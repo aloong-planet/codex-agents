@@ -3,8 +3,9 @@ import { LeaderOutputError, type LeaderTurnInput, type TeamLeader } from "../src
 import type { DispatchAssignment, DispatchClassifier, DispatchExecutionResult, DispatchExecutor, DispatchJob } from "../src/agent-dispatch-types.js";
 import type { InboundContent } from "../src/channel-contract.js";
 import { recordDispatchTurns } from "../src/fixture-dispatch-recorder.js";
+import type { PrivateTurnInput } from "../src/private-conversations.js";
 
-// The recorder at its own boundary: the three dispatch seams it wraps are substitutes that return literals.
+// The recorder at its own boundary: the three dispatch seams and the private replier it wraps are substitutes that return literals.
 const event: InboundContent = { key: "feishu:om_one", accountId: "cli_sam", target: "feishu.group.oc_alpha", senderId: "ou_owner", conversationType: "group",
   messageId: "om_one", source: "text", text: "整理商品文案", receivedAt: 1, mentionedAgentIds: ["alice"],
   discussion: [{ key: "feishu:om_zero", senderId: "ou_colleague", text: "那台 iPad 该挂出去了", receivedAt: 0 }] };
@@ -26,7 +27,7 @@ function substitutes(overrides: { classify?: DispatchClassifier["classify"]; run
   const leader: TeamLeader = { plan: overrides.plan ?? (async () => structuredClone(plan)), supplement: async () => ({ affected: [1], assignments: [], decisions: [], parts: [], help: [] }),
     close: async () => "文案已整理好。" };
   const executor: DispatchExecutor = { run: overrides.run ?? (async () => ({ ...result })), close: async () => {} };
-  return { classifier, leader, executor };
+  return { classifier, leader, executor, replier: { reply: async () => JSON.stringify({ message: "**文案**已写好。" }) } };
 }
 /** A clock that advances by one on every reading, so each start and end has its own time. */
 const ticking = () => { let time = 0; return () => ++time; };
@@ -103,4 +104,18 @@ it("keeps only its latest turns", async () => {
   await recorded.leader.plan(leaderInput);
   await recorded.leader.close(leaderInput, closingView);
   expect(recorded.turns().map(({ turn }) => turn)).toEqual(["plan", "close"]);
+});
+
+it("records a private reply turn with everything it was given, under its agent", async () => {
+  const recorded = recordDispatchTurns(substitutes(), { now: ticking() });
+  const agent = { id: "alice", name: "Alice", role: "leader" as const, teamName: "运营团队", responsibility: "商品运营", instructions: "LEADER_INSTRUCTIONS" };
+  const requests = [{ id: "feishu:o", group: "银河护卫队", message: "整理商品文案", summary: "整理商品文案", state: "completed" as const, lead: "Alice",
+    assignments: [{ title: "撰写文案", executor: "执行者 1", profile: "能力档 1", status: "completed", result: "文案已写好。" }], posts: ["我安排执行者 1 处理：撰写文案。"] }];
+  const input: PrivateTurnInput = { agent, transcript: [{ from: "owner", text: "早" }], message: "文案呢？", selected: "feishu:o", requests };
+  expect(await recorded.replier.reply(input)).toBe(JSON.stringify({ message: "**文案**已写好。" }));
+  await recorded.replier.reply({ ...input, agent: { ...agent, id: "sam", name: "Sam", role: "coordinator" } });
+  expect(recorded.turns()).toEqual([
+    { role: "leader", turn: "private", teamId: "alice", startedAt: 1, endedAt: 2, output: JSON.stringify({ message: "**文案**已写好。" }), input },
+    { role: "coordinator", turn: "private", startedAt: 3, endedAt: 4, output: JSON.stringify({ message: "**文案**已写好。" }), input: expect.objectContaining({ agent: expect.objectContaining({ id: "sam" }) }) },
+  ]);
 });

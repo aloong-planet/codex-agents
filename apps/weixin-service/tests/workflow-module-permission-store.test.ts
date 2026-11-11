@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
+import { narrowingRootsBelow, WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 
 const tempDirs: string[] = [];
 
@@ -184,5 +184,38 @@ describe("WorkflowModulePermissionStore", () => {
       moduleId: "local-media", access: "read", scopeId: "a-downloads",
     })).toThrow("workflow_module_permission_denied");
     await store.close();
+  });
+});
+
+// Failure mode 4: a scope saved below a grant narrows what the grant reaches there.
+describe("narrowingRootsBelow", () => {
+  const scope = (directory: string, read: boolean, write: boolean) => ({ directory, read, write });
+
+  it.each([
+    ["closed", false, false, { closedRoots: ["/home/Documents/vault"], readOnlyRoots: [] }],
+    ["read-only", true, false, { closedRoots: [], readOnlyRoots: ["/home/Documents/vault"] }],
+    ["read and write", true, true, { closedRoots: [], readOnlyRoots: [] }],
+    // As the earlier schema saved it: write includes read.
+    ["write without read", false, true, { closedRoots: [], readOnlyRoots: [] }],
+  ])("takes a %s scope below the grant by what it allows", (_kind, read, write, expected) => {
+    expect(narrowingRootsBelow("/home/Documents", [scope("/home/Documents/vault", read, write)])).toEqual(expected);
+  });
+
+  it.each([
+    ["the grant's own directory", "/home/Documents", "/home/Documents", false],
+    ["a directory above the grant", "/home/Documents", "/home", false],
+    ["a sibling whose name begins with the grant's", "/home/Documents", "/home/Documents-old", false],
+    ["a directory beside the grant", "/home/Documents", "/home/Downloads/vault", false],
+    ["a directory several levels below the grant", "/home/Documents", "/home/Documents/a/b/vault", true],
+    // One directory on a case-insensitive volume, and one in either Unicode form.
+    ["a directory below the grant spelled in another case", "/home/Documents", "/HOME/documents/vault", true],
+    ["a directory below the grant spelled in another Unicode form", "/home/Documénts", "/home/Documénts/vault", true],
+  ])("tells whether a scope lies below the grant: %s", (_kind, grant, directory, below) => {
+    expect(narrowingRootsBelow(grant, [scope(directory, false, false)])).toEqual({ closedRoots: below ? [directory] : [], readOnlyRoots: [] });
+  });
+
+  it("lets every scope saved at one directory narrow it, and lists each directory once in a fixed order", () => {
+    expect(narrowingRootsBelow("/home", [scope("/home/b", false, false), scope("/home/b", true, false), scope("/home/a", false, false),
+      scope("/home/b", false, false), scope("/home/b", true, true)])).toEqual({ closedRoots: ["/home/a", "/home/b"], readOnlyRoots: ["/home/b"] });
   });
 });

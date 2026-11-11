@@ -110,6 +110,8 @@ function validateAccess(value) {
       directory: scope.directory,
       read: scope.read,
       write: scope.write,
+      closedRoots: narrowingRoots(scope.closedRoots),
+      readOnlyRoots: narrowingRoots(scope.readOnlyRoots),
     };
   });
   if (typeof value.spoolDirectory !== "string" || !path.isAbsolute(value.spoolDirectory)) {
@@ -124,9 +126,19 @@ function validateAccess(value) {
     spoolDirectory: value.spoolDirectory, deniedRoots: folded };
 }
 
-function isDeniedPath(candidate) {
+function narrowingRoots(value = []) {
+  if (!Array.isArray(value) || value.some((root) => typeof root !== "string" || !path.isAbsolute(root))) {
+    throw new Error("file_sandbox_access_invalid");
+  }
+  return value.map(foldDeniedPath);
+}
+
+// Refused through `scope`: the service's own state lies outside every grant, and a scope saved below this one closes its
+// directory or, for a write, leaves it read-only (workflow-module-permissions, failure mode 4).
+function isDeniedPath(candidate, scope, forWrite = false) {
   const folded = foldDeniedPath(candidate);
-  return access.deniedRoots.some((root) => isContainedPath(root, folded));
+  const holds = (root) => isContainedPath(root, folded);
+  return access.deniedRoots.some(holds) || scope.closedRoots.some(holds) || (forWrite && scope.readOnlyRoots.some(holds));
 }
 
 // Case- and normalization-insensitive volumes (APFS) give one file many spellings; a protected location that does not
@@ -157,7 +169,7 @@ async function* findEntries(scopes, concurrency) {
           const observations = await Promise.all(window.map(async (entry) => {
             if (!safeEntryName(entry.name) || entry.isSymbolicLink()) return undefined;
             const absolutePath = path.join(directory, entry.name);
-            if (isDeniedPath(absolutePath)) return undefined;
+            if (isDeniedPath(absolutePath, scope)) return undefined;
             const info = await fs.promises.lstat(absolutePath);
             if (info.isSymbolicLink() || info.dev !== rootInfo.dev) return undefined;
             const kind = info.isDirectory() ? "directory" : info.isFile() ? "file" : undefined;
@@ -172,7 +184,7 @@ async function* findEntries(scopes, concurrency) {
               kind, sizeBytes: kind === "file" ? info.size : 0, modifiedAt: info.mtimeMs };
             if (kind === "directory" && !isApplePhotosLibrary(entry.name)) {
               const real = await fs.promises.realpath(absolutePath);
-              if (isDeniedPath(real)) continue;
+              if (isDeniedPath(real, scope)) continue;
               const relative = path.relative(root, real);
               if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
                 yield* visit(real, nextParts);
@@ -314,14 +326,14 @@ async function grep(operation) {
         const nextParts = [...parts, entry.name];
         const relativePath = nextParts.join("/");
         const absolutePath = path.join(directory, entry.name);
-        if (isDeniedPath(absolutePath)) continue;
+        if (isDeniedPath(absolutePath, scope)) continue;
         const info = await fs.promises.lstat(absolutePath);
         if (info.isSymbolicLink() || info.dev !== rootInfo.dev) continue;
         if (info.isDirectory()) {
           scanned += 1;
           if (!isApplePhotosLibrary(entry.name)) {
             const real = await fs.promises.realpath(absolutePath);
-            if (isDeniedPath(real)) continue;
+            if (isDeniedPath(real, scope)) continue;
             const relative = path.relative(root, real);
             if (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
               await visit(real, nextParts);
@@ -410,11 +422,11 @@ async function read(operation) {
   const root = await fs.promises.realpath(scope.directory);
   const relativePath = normalizeRelativePath(operation.relativePath);
   const candidate = path.join(root, ...relativePath.split("/"));
-  if (isDeniedPath(candidate)) throw new Error("file_sandbox_permission_denied");
+  if (isDeniedPath(candidate, scope)) throw new Error("file_sandbox_permission_denied");
   const initial = await fs.promises.lstat(candidate);
   if (!initial.isFile() || initial.isSymbolicLink()) throw new Error("file_sandbox_file_invalid");
   const real = await fs.promises.realpath(candidate);
-  if (!isContainedPath(root, real) || isDeniedPath(real)) throw new Error("file_sandbox_permission_denied");
+  if (!isContainedPath(root, real) || isDeniedPath(real, scope)) throw new Error("file_sandbox_permission_denied");
   const handle = await fs.promises.open(real, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   let info;
   let body;
@@ -520,7 +532,7 @@ async function snapshot(operation) {
   const root = await fs.promises.realpath(scope.directory);
   const relativePath = normalizeRelativePath(operation.relativePath);
   const source = await fs.promises.realpath(path.join(root, ...relativePath.split("/")));
-  if (!isContainedPath(root, source) || isDeniedPath(source)) throw new Error("file_sandbox_permission_denied");
+  if (!isContainedPath(root, source) || isDeniedPath(source, scope)) throw new Error("file_sandbox_permission_denied");
   const handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
   let body;
   try {
@@ -627,14 +639,14 @@ async function resolveWritableTarget(scopeRef, relativePath, targetMustExist) {
   if (!scope) throw new Error("file_sandbox_permission_denied");
   const root = await fs.promises.realpath(scope.directory);
   const normalized = normalizeRelativePath(relativePath);
-  if (isDeniedPath(path.join(root, ...normalized.split("/")))) throw new Error("file_sandbox_permission_denied");
+  if (isDeniedPath(path.join(root, ...normalized.split("/")), scope, true)) throw new Error("file_sandbox_permission_denied");
   const segments = normalized.split("/");
   const fileName = segments.pop();
   if (!fileName) throw new Error("file_sandbox_operation_invalid");
   let parent = root;
   for (const segment of segments) {
     const next = path.join(parent, segment);
-    if (isDeniedPath(next)) throw new Error("file_sandbox_permission_denied");
+    if (isDeniedPath(next, scope, true)) throw new Error("file_sandbox_permission_denied");
     try {
       const info = await fs.promises.lstat(next);
       if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("file_sandbox_path_unsafe");
@@ -649,10 +661,10 @@ async function resolveWritableTarget(scopeRef, relativePath, targetMustExist) {
       }
     }
     parent = await fs.promises.realpath(next);
-    if (!isContainedPath(root, parent) || isDeniedPath(parent)) throw new Error("file_sandbox_permission_denied");
+    if (!isContainedPath(root, parent) || isDeniedPath(parent, scope, true)) throw new Error("file_sandbox_permission_denied");
   }
   const absolutePath = path.join(parent, fileName);
-  if (!isContainedPath(root, absolutePath) || isDeniedPath(absolutePath)) throw new Error("file_sandbox_permission_denied");
+  if (!isContainedPath(root, absolutePath) || isDeniedPath(absolutePath, scope, true)) throw new Error("file_sandbox_permission_denied");
   return { absolutePath };
 }
 
