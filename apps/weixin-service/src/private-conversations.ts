@@ -15,9 +15,12 @@ import { COORDINATOR_ID, type TeamDefinitions } from "./team-registry.js";
  * only discusses: it creates no request and enters no dispatch admission.
  */
 
-/** The longest message the owner can send, and the longest reply an agent may give, in characters. */
+/**
+ * The longest message the owner can send, and the longest reply an agent may give, in characters. A reply may hold a long table
+ * (agent-console Failure modes: a 2,000-row table), which scrolls inside its message.
+ */
 export const MESSAGE_LIMIT = 4000;
-const REPLY_LIMIT = 4000;
+const REPLY_LIMIT = 64_000;
 /** What a reply turn gets of the conversation and the requests, so that its input stays bounded. */
 const TRANSCRIPT_MESSAGES = 20, TRANSCRIPT_CHARS = 12_000, REQUEST_LIMIT = 20, TEXT_LIMIT = 2_000, POST_LIMIT = 10;
 /** The most messages a conversation's view returns, the latest ones. */

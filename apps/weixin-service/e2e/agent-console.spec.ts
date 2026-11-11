@@ -95,6 +95,12 @@ async function inbound(server: Server, chatId: string, messageId: string, text: 
 }
 const jobs = async (server: Server) => ((await (await fetch(`${server.url}/api/state`, { headers: { cookie: server.cookie } })).json()) as Jobs).agentDispatch?.jobs ?? [];
 const reply = (message: string, subject: string, status = "completed") => JSON.stringify({ message, results: [{ subject, status }] });
+/** The next private reply of `agentId`, injected as the reply turn's raw output; `hold` keeps it until `release` lets it go. */
+async function privateReply(server: Server, agentId: string, control: { reply?: string; hold?: boolean; release?: boolean }) {
+  const response = await fetch(`${server.url}/api/fixture/inbound`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" },
+    body: JSON.stringify({ privateChatControl: { agentId, ...control } }) });
+  expect(response.status, await response.text()).toBe(200);
+}
 /**
  * Three requests: in 银河护卫队, Alice's partly failed one, then Alice's held one with a part placed with Bill; in 产品讨论组, Bill's
  * completed one. Alice takes one request at a time in a group, so the held one comes last there.
@@ -253,7 +259,7 @@ test.describe("with Feishu dispatch", () => {
     // Expanded, in order: result, path, Assignments, group posts, original message and storage links.
     const order = await record.locator(".acv2-record-detail > *").evaluateAll((elements) => elements.map((element) => element.className || element.tagName));
     expect(order).toEqual(["acv4-detail-title", "acv2-result acv2-warning", "ats-path-line", "acv2-detail-label", "ats-asg-list", "acv2-process", "acv2-detail-label",
-      "acv2-message", "acv2-detail-label", "acv2-related"]);
+      "acv2-message", "ats-chat-actions", "acv2-detail-label", "acv2-related"]);
     await expect(record.locator(".ats-asg .acv2-badge")).toHaveText(["已完成", "失败"]);
     // Each Assignment shows the Brief its Executor received, under its meta line.
     await expect(record.locator(".ats-asg-brief")).toHaveText(["交办：逐段校对", "交办：核对三家"]);
@@ -404,5 +410,156 @@ test.describe("with Feishu dispatch", () => {
     // Long content wraps or scrolls inside its record and never widens the page.
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
     await testInfo.attach("drawer-phone", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  test("chats privately with Sam and each Team Leader from the bubble beside the name, keeping each draft, and from a record with its request selected", async ({ page, fixtureServer }, testInfo) => {
+    await seedRequests(fixtureServer);
+    await page.goto("/console");
+    const card = (name: string) => page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: new RegExp(`^${name}$`) }) });
+    const drawer = page.locator("#ats-drawer"), input = page.locator("#ats-chat-input"), mode = page.locator("#ats-mode-button");
+    // A frameless round speech bubble beside Sam's and each Team Leader's name; Executors have none (agent-console::US-006/AC-01).
+    for (const name of ["Sam", "Alice", "Bill", "Jack"]) await expect(card(name).locator(".ats-card-head .ats-chat-launch")).toHaveAttribute("aria-label", `与 ${name} 私聊`);
+    await expect(page.locator(".ats-req-frame .ats-chat-launch")).toHaveCount(0);
+    const launch = card("Sam").locator(".ats-chat-launch");
+    expect(await launch.evaluate((button) => { const style = getComputedStyle(button); return [style.borderTopWidth, style.backgroundColor, style.width, style.height]; }))
+      .toEqual(["0px", "rgba(0, 0, 0, 0)", "28px", "28px"]);
+    const [name, bubble] = await Promise.all([card("Sam").locator(".ats-name").boundingBox(), launch.boundingBox()]);
+    expect(Math.abs((name!.y + name!.height / 2) - (bubble!.y + bubble!.height / 2))).toBeLessThan(2);
+    expect(bubble!.x).toBeGreaterThan(name!.x + name!.width - 1);
+
+    // The bubble opens the conversation in the drawer; its header switches between chat and records.
+    await launch.click();
+    await expect(page.locator("#ats-drawer-title")).toHaveText("与 Sam 私聊");
+    await expect(page.locator("#ats-drawer-kind")).toHaveText("本人私聊 · 仅本人可见");
+    await expect(page.locator("#ats-record-tabs")).toBeHidden();
+    await expect(mode).toHaveText("查看记录");
+    // Sam's selector lists every one of the owner's requests (US-006/AC-03).
+    await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊", /^群 · 整理发布说明 · /, /^群 · 商品 D 上架 · /, /^群 · 商品 C 上架/]);
+    await expect(page.locator(".ats-chat-context p")).toHaveText("可直接讨论，或在上方选择本人发起的事务；私聊内容不进入群记录。");
+    await mode.click();
+    await expect(page.locator("#ats-drawer-title")).toHaveText("Sam");
+    await expect(page.locator("#ats-record-tabs")).toBeVisible();
+    await expect(mode).toHaveText("私聊");
+    await mode.click();
+    await expect(page.locator("#ats-chat-pane")).toBeVisible();
+
+    // Each conversation keeps its own unsent draft when the drawer closes, when it switches to records and when another leader's
+    // conversation is opened in between (US-006/AC-02). The drawer covers the cards to its left on this width, so it closes first.
+    const chatWith = async (name: string) => { await page.keyboard.press("Escape"); await expect(drawer).toBeHidden(); await card(name).locator(".ats-chat-launch").click(); };
+    await chatWith("Bill");
+    await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊", /^群 · 整理发布说明 · /, /^群 · 商品 D 上架 · /]);
+    await input.fill("给 Bill 的草稿：周末行程先别订");
+    await chatWith("Jack");
+    await expect(page.locator("#ats-chat-task option")).toHaveText(["新的私聊"]);
+    await expect(input).toHaveValue("");
+    await input.fill("给 Jack 的草稿");
+    await chatWith("Bill");
+    await expect(input).toHaveValue("给 Bill 的草稿：周末行程先别订");
+    await mode.click();
+    await expect(page.locator("#ats-chat-pane")).toBeHidden();
+    await mode.click();
+    await expect(input).toHaveValue("给 Bill 的草稿：周末行程先别订");
+    await chatWith("Jack");
+    await expect(input).toHaveValue("给 Jack 的草稿");
+    await page.keyboard.press("Escape");
+
+    // A record's chat action opens that leader's conversation with the request selected (US-006/AC-03).
+    await card("Alice").locator(".ats-name").click();
+    const record = drawer.locator(".acv2-record", { hasText: "商品 D 上架" });
+    await record.locator(".acv2-record-button").click();
+    await expect(record.locator(".ats-chat-actions button")).toHaveText(["与 Alice 私聊讨论", "与 Bill 私聊讨论"]);
+    await record.locator(".ats-chat-actions button", { hasText: "Bill" }).click();
+    const running = (await jobs(fixtureServer))[1]!.id;
+    await expect(page.locator("#ats-drawer-title")).toHaveText("与 Bill 私聊");
+    await expect(page.locator("#ats-chat-task")).toHaveValue(running);
+    await expect(page.locator(".ats-chat-context p")).toHaveText("来源：银河护卫队 · 发起人：本人");
+    await expect(page.locator(".ats-chat-preview")).toContainText("执行中 · 3 项分工");
+    await expect(input).toHaveValue("给 Bill 的草稿：周末行程先别订");
+    // Sending: the owner's own message stays plain text, and the reply arrives in the conversation.
+    await input.fill("**先做脚本** [说明](https://example.com/plan)");
+    await input.press("Enter");
+    await expect(page.locator(".ats-chat-self .ats-chat-bubble")).toHaveText("**先做脚本** [说明](https://example.com/plan)");
+    // The fixture's reply quotes the message, so this one renders as Markdown: its emphasis and its link are formatted.
+    await expect(page.locator(".ats-chat-message:not(.ats-chat-self) .ats-chat-bubble")).toHaveText("收到：先做脚本 说明", { timeout: processWaitLimitMs });
+    await expect(page.locator(".ats-chat-self a, .ats-chat-self strong")).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    await testInfo.attach("chat-bill", { body: await page.screenshot(), contentType: "image/png" });
+
+    // The private conversations' store is its own node, reached from Sam's and each leader's 关系与存储 (US-005/AC-02).
+    await mode.click();
+    await page.locator("#ats-tab-storage").click();
+    await page.locator("#ats-panel-storage .acv2-related button", { hasText: "负责人私聊记录" }).click();
+    await expect(page.locator("#ats-drawer-title")).toHaveText("负责人私聊记录");
+    await expect(page.locator("#ats-drawer-kind")).toHaveText("私人区域 · 仅本人可见");
+    await expect(page.locator("#ats-panel-storage .ats-drawer-summary")).toHaveText("与 Sam 和各负责人的对话分别保存；私聊正文不进入群记录、群记忆或普通私聊的记忆。");
+    await expect(page.locator("#ats-panel-storage .ats-path-line")).toHaveText("本人 → 负责人私聊");
+    await expect(page.locator("#ats-panel-storage .acv2-path")).toContainText("private-conversations.sqlite");
+    await expect(page.locator("#ats-panel-storage .acv2-related")).toHaveCount(0);
+    await testInfo.attach("private-store", { body: await page.screenshot(), contentType: "image/png" });
+    await page.locator("#ats-tab-records").click();
+    await expect(page.locator("#ats-records")).toHaveText("负责人私聊分别保存从 Sam 或负责人名字旁的聊天按钮进入。");
+    await page.locator("#ats-back").click();
+    await expect(page.locator("#ats-drawer-title")).toHaveText("Bill");
+  });
+
+  test("renders a leader's reply as Markdown, says when a reply is on its way or did not come, and keeps a 2,000-row table inside its message on a phone", async ({ page, fixtureServer }, testInfo) => {
+    const rows = Array.from({ length: 2000 }, (_, index) => `| ${index + 1} | 商品 ${index + 1} | 九成新 |`).join("\n");
+    const markdown = `### 本周计划\n- **先**写文案\n- 再拍主图，用 \`npm test\` 核对\n\n[价格表](https://example.com/prices) [脚本](javascript:alert(1)) [本机](file:///etc/hosts)\n\n![商品主图](https://example.com/d.png)\n\n<img src="https://example.com/x.png"><script>window.leaked = true</script>\n\n| 序号 | 商品 | 说明：九成新、附件齐全、可以当天发货、外地包邮、支持验货 |\n| --- | --- | --- |\n${rows}`;
+    await privateReply(fixtureServer, "alice", { reply: JSON.stringify({ message: markdown }), hold: true });
+    await page.goto("/console");
+    const alice = page.locator(".ats-card", { has: page.locator(".ats-name strong", { hasText: /^Alice$/ }) });
+    await alice.locator(".ats-chat-launch").click();
+    const input = page.locator("#ats-chat-input"), send = page.locator("#ats-chat-send");
+    await expect(send).toBeDisabled();
+    await input.fill("这周的上新计划？");
+    await send.click();
+    // While the reply is on its way, the conversation says so and takes no other message (D6).
+    await expect(page.locator(".ats-chat-wait")).toHaveText("Alice正在回复…");
+    await input.fill("还有一件事");
+    await expect(send).toBeDisabled();
+    await privateReply(fixtureServer, "alice", { release: true });
+    const reply = page.locator(".ats-chat-message:not(.ats-chat-self) .ats-md");
+    await expect(reply.locator("h6")).toHaveText("本周计划", { timeout: processWaitLimitMs });
+    await expect(page.locator(".ats-chat-wait")).toHaveCount(0);
+    await expect(send).toBeEnabled();
+    // Markdown (REQ-005/AC-01); only the http(s) link opens, in a new tab without opener; other targets stay text (AC-02).
+    await expect(reply.locator("li")).toHaveText(["先写文案", "再拍主图，用 npm test 核对"]);
+    await expect(reply.locator("a")).toHaveCount(1);
+    await expect(reply.locator("a")).toHaveAttribute("href", "https://example.com/prices");
+    await expect(reply.locator("a")).toHaveAttribute("target", "_blank");
+    await expect(reply.locator("a")).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(reply).toContainText("脚本（javascript:alert(1）)");
+    await expect(reply).toContainText("本机（file:///etc/hosts）");
+    // No image is loaded, an image shows its alternative text, and raw HTML is text (AC-03).
+    await expect(reply.locator(".ats-md-img")).toHaveText("［图片：商品主图］");
+    await expect(page.locator("#ats-chat-pane img, #ats-chat-pane script")).toHaveCount(0);
+    await expect(reply).toContainText('<img src="https://example.com/x.png"><script>window.leaked = true</script>');
+    expect(await page.evaluate(() => (window as unknown as { leaked?: boolean }).leaked)).toBeUndefined();
+    // The pane's own rules do not reach into the reply: its paragraphs and headings keep the Markdown block's spacing.
+    expect(await reply.locator("p").first().evaluate((element) => getComputedStyle(element).marginTop)).toBe("6px");
+    await testInfo.attach("chat-markdown", { body: await page.screenshot(), contentType: "image/png" });
+
+    // A reply that did not come says why, and the owner can send again.
+    await privateReply(fixtureServer, "alice", { reply: "这不是 JSON" });
+    await input.fill("再说一遍");
+    await send.click();
+    await expect(page.locator(".ats-chat-notice")).toHaveText("Alice这次没有回复：回复格式无效。可以重新发送。", { timeout: processWaitLimitMs });
+    await expect(send).toBeDisabled();
+    await input.fill("再说一遍");
+    await expect(send).toBeEnabled();
+
+    // On a phone the 2,000-row table scrolls inside its message, both ways, and never widens the page (AC-05).
+    await page.setViewportSize({ width: 390, height: 844 });
+    // The sidebar slides off-screen as the window narrows; measure once it has.
+    await page.locator(".acv-side").evaluate((side) => Promise.all(side.getAnimations().map((animation) => animation.finished)));
+    const table = reply.locator(".ats-md-table");
+    await table.scrollIntoViewIfNeeded();
+    await expect(reply.locator("tbody tr")).toHaveCount(2000);
+    const [region, message] = await Promise.all([table.boundingBox(), reply.boundingBox()]);
+    expect(region!.x).toBeGreaterThanOrEqual(message!.x);
+    expect(region!.x + region!.width).toBeLessThanOrEqual(message!.x + message!.width);
+    expect(await table.evaluate((element) => [element.scrollWidth > element.clientWidth, element.scrollHeight > element.clientHeight])).toEqual([true, true]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await testInfo.attach("chat-table-phone", { body: await page.screenshot(), contentType: "image/png" });
   });
 });

@@ -11,13 +11,14 @@
   /** One line's inline formatting, on text already escaped. Code spans are set aside first, so nothing inside them is formatted. */
   function inline(text) {
     const codes = [];
-    const marked = text.replace(/`([^`]+)`/g, (match, code) => { codes.push(code); return `\u0000${codes.length - 1}\u0000`; })
+    // A private-use character marks each set-aside span; any such character in the reply itself only yields an escaped code span.
+    const marked = text.replace(/`([^`]+)`/g, (match, code) => { codes.push(code); return `\uE000${codes.length - 1}\uE000`; })
       .replace(/!\[([^\]]*)\]\(([^)\s]*)\)/g, (match, alt) => `<span class="ats-md-img">［图片：${alt || "无说明"}］</span>`)
       .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => /^https?:\/\//i.test(url)
         ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : `${label}（${url}）`)
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
-    return marked.replace(/\u0000(\d+)\u0000/g, (match, index) => `<code>${codes[Number(index)]}</code>`);
+    return marked.replace(/\uE000(\d+)\uE000/g, (match, index) => codes[Number(index)] === undefined ? match : `<code>${codes[Number(index)]}</code>`);
   }
 
   /** The reply as HTML for the message bubble: block by block, a line starting a new block ending a paragraph. */

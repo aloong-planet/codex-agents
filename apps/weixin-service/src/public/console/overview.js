@@ -2,8 +2,12 @@
 // Coordinator, its Team Leaders and, under each, a dashed frame per request with that team's running or waiting Executors; and a
 // drawer with a node's related records and its relationships and storage. Text from members, agents and tools is always escaped
 // and set as text, so nothing in it links, loads or runs (agent-console::REQ-005/AC-04). The view is read-only.
+// The same drawer holds the owner's private conversation with the Coordinator or a Team Leader (agent-console::US-006): the chat
+// button beside a name opens it, and its header switches between the conversation and the agent's records. Only a reply from the
+// agent renders as Markdown (REQ-005/AC-01 to AC-03, chat-markdown.js); everything else in it is plain text.
 (() => {
-  const { esc, tip } = window.ConsoleShell;
+  const { esc, tip, icon } = window.ConsoleShell;
+  const { render: markdown } = window.ConsoleMarkdown;
   window.ConsoleShell.mount("overview");
   const $ = (id) => document.getElementById(id);
 
@@ -19,7 +23,7 @@
   const WARN = new Set(["waiting", "partially_failed", "failed", "partially_unassigned", "cancelled"]);
   // Tree geometry: Executor card width and gap, frame padding (plus 1px borders), gap between frames, and the canvas height.
   const CARD_W = 174, CARD_GAP = 20, FRAME_PAD = 10, FRAME_GAP = 16, BRANCH_GAP = 36, CANVAS_H = 690;
-  const PRIVATE = new Set(["penny", "penny-store", "personal", "personal-store"]);
+  const PRIVATE = new Set(["penny", "penny-store", "personal", "personal-store", "private-chats"]);
 
   let view = null, scope = null, scale = 1, fitMode = true, canvasWidth = 1120;
   const collapsed = new Set();
@@ -27,6 +31,11 @@
   let selected, expandedRequest = null, tab = "records", trail = [], lastTrigger = null;
   // Records whose group-post timeline the owner opened, kept open when the records are redrawn.
   const openPosts = new Set();
+  // The drawer shows a node's records or, in chat mode, the conversation with `chatAgent`. Each conversation keeps its draft,
+  // its selected request and the service's view of it in the page, across closing the drawer, switching to records and to
+  // another agent (agent-console::US-006/AC-02); a reload starts with empty drafts.
+  let mode = "records", chatAgent = null;
+  const chats = new Map();
 
   const tone = (id) => `ats-tone ats-tone-${TONES.has(id) ? id : "other"}`;
   const toneKey = (id) => TONES.has(id) ? id : "other";
@@ -44,6 +53,12 @@
   const pad = (n) => String(n).padStart(2, "0");
   const clock = (ms) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const stamp = (ms) => { const d = new Date(ms), now = new Date(); return d.toDateString() === now.toDateString() ? clock(ms) : `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${clock(ms)}`; };
+  // The agent a node stands for, and whether the owner can chat with it: the Coordinator and the Team Leader of every defined team.
+  const agentOf = (id) => id === "coordinator" ? coordinator() : id?.startsWith("team:") ? id.slice(5) : null;
+  const nodeOf = (agentId) => agentId === coordinator() ? "coordinator" : `team:${agentId}`;
+  const chatable = (agentId) => Boolean(agentId) && (agentId === coordinator() || view.teams.some((team) => team.id === agentId));
+  // A request's result line, or what stands for it while there is none.
+  const resultText = (r) => r.result ?? (r.status === "proposed" ? "等待发起人确认后开始。" : ["queued", "running", "waiting"].includes(r.status) ? "事务进行中，收尾后在这里显示结果。" : "没有记录结果。");
 
   // The service's view, as text, so that a poll that finds nothing new changes nothing on the page.
   let loaded = "";
@@ -73,7 +88,8 @@
     const kept = { left: canvas?.scrollLeft ?? 0, top: canvas?.scrollTop ?? 0, drawer: drawer.scrollTop };
     render();
     if ($("ats-scroll")) { $("ats-scroll").scrollLeft = kept.left; $("ats-scroll").scrollTop = kept.top; }
-    if (!$("ats-drawer").hidden) {
+    if (!$("ats-drawer").hidden && mode === "chat") renderChatLog();
+    else if (!$("ats-drawer").hidden) {
       $("ats-drawer-title").textContent = title(selected);
       renderRows();
       if (!storeOf(selected)) $("ats-panel-storage").innerHTML = relation(selected);
@@ -89,15 +105,17 @@
   });
   function coordinatorCard() {
     const id = "coordinator", sam = coordinator();
-    return `<div class="ats-card ${tone(sam)}" data-card="${id}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${id}" aria-label="查看${esc(name(sam))}的记录"><strong>${esc(name(sam))}</strong></button></div><button class="ats-node-button" type="button" data-open="${id}" aria-pressed="${selected === id}"><span class="ats-role">总调度 · 协调分派</span><span class="ats-bot">${esc(name(sam))} Bot</span></button></div>`;
+    return `<div class="ats-card ${tone(sam)}" data-card="${id}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${id}" aria-label="查看${esc(name(sam))}的记录"><strong>${esc(name(sam))}</strong></button>${chatButton(sam)}</div><button class="ats-node-button" type="button" data-open="${id}" aria-pressed="${selected === id}"><span class="ats-role">总调度 · 协调分派</span><span class="ats-bot">${esc(name(sam))} Bot</span></button></div>`;
   }
   function leaderCard(team, frameCount) {
     const id = `team:${team.id}`, c = team.counts[scope] ?? { running: 0, waiting: 0, history: 0 }, open = !collapsed.has(team.id);
     const toggle = frameCount
       ? `<button class="ats-toggle" type="button" data-toggle="${esc(team.id)}" aria-expanded="${open}">${open ? "收起事务" : `展开 ${frameCount} 项事务`}</button>`
       : `<button class="ats-toggle" type="button" data-open="${esc(id)}">查看历史记录 · ${c.history}</button>`;
-    return `<div class="ats-card ${tone(team.id)}" data-card="${esc(id)}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${esc(id)}" aria-label="查看${esc(name(team.id))}的记录"><strong>${esc(name(team.id))}</strong></button>${team.deleting ? '<span class="acv2-badge acv2-waiting" title="不接新事务，进行中的做完后移除">删除中</span>' : ""}<span class="ats-count">${c.running + c.waiting} 活动</span></div><button class="ats-node-button" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}"><span class="ats-role">${esc(teamName(team.id))}负责人 · 拆分统筹</span><span class="ats-bot">${esc(name(team.id))} Bot</span><span class="ats-node-foot">${c.running} 执行中 · ${c.waiting} 待确认 · ${c.history} 历史</span></button>${toggle}</div>`;
+    return `<div class="ats-card ${tone(team.id)}" data-card="${esc(id)}" data-active="${selected === id}"><div class="ats-card-head"><button class="ats-name" type="button" data-open="${esc(id)}" aria-label="查看${esc(name(team.id))}的记录"><strong>${esc(name(team.id))}</strong></button>${chatButton(team.id)}${team.deleting ? '<span class="acv2-badge acv2-waiting" title="不接新事务，进行中的做完后移除">删除中</span>' : ""}<span class="ats-count">${c.running + c.waiting} 活动</span></div><button class="ats-node-button" type="button" data-open="${esc(id)}" aria-pressed="${selected === id}"><span class="ats-role">${esc(teamName(team.id))}负责人 · 拆分统筹</span><span class="ats-bot">${esc(name(team.id))} Bot</span><span class="ats-node-foot">${c.running} 执行中 · ${c.waiting} 待确认 · ${c.history} 历史</span></button>${toggle}</div>`;
   }
+  // The frameless round speech bubble beside the Coordinator's and each Team Leader's name; Executors have none (agent-console::US-006/AC-01).
+  const chatButton = (agentId) => `<button class="ats-chat-launch" type="button" data-chat="${esc(agentId)}" aria-label="与 ${esc(name(agentId))} 私聊" aria-pressed="${mode === "chat" && chatAgent === agentId && !$("ats-drawer").hidden}">${icon("chat")}</button>`;
   // An Executor: its profile, its Assignment, status and ID; no bot identity and no chat entry (agent-console::US-003/AC-04).
   function executorCard(a) {
     const id = `exec:${a.id}`;
@@ -213,7 +231,7 @@
     if (id.startsWith("group:")) return groupName(id.slice(6));
     const store = storeOf(id);
     if (store) return STORE_TITLE[store.kind] ?? id;
-    return { penny: "Penny", "penny-store": "独立财务存储", personal: "个人助手", "personal-store": "私人记忆与会话" }[id] ?? id;
+    return { penny: "Penny", "penny-store": "独立财务存储", personal: "个人助手", "personal-store": "私人记忆与会话", "private-chats": "负责人私聊记录" }[id] ?? id;
   }
   function chatOf(id) {
     if (id === null || PRIVATE.has(id)) return null;
@@ -230,14 +248,17 @@
   function detail(r) {
     const cross = r.crossTeams;
     const ended = r.assignments.length > 0 && !r.assignments.some((a) => active(a.status) || a.status === "queued");
-    const result = r.result ?? (r.status === "proposed" ? "等待发起人确认后开始。" : ["queued", "running", "waiting"].includes(r.status) ? "事务进行中，收尾后在这里显示结果。" : "没有记录结果。");
+    const result = resultText(r);
     const sam = esc(name(coordinator()));
     const path = `群任务 · ${esc(groupName(r.chatId))}<br>分派路径：${sam} → ${esc(name(r.lead))}（主责）${cross.map((teamId) => `<br>跨队：${sam} → ${esc(name(teamId))} · 应 ${esc(name(r.lead))} 请求`).join("")}${r.parts.filter((part) => part.teamId === null).map((part) => `<br>未承接：${esc(part.title)} · 没有团队承接`).join("")}<br>汇报：${[r.lead, ...cross].map((teamId) => esc(name(teamId))).join("、")} · 原群${ended ? "<br>全部执行者已结束，执行记录保留。" : ""}`;
     const assignments = r.assignments.length ? `<div class="acv2-detail-label">分工 · ${r.assignments.length} 项</div><ul class="ats-asg-list">${r.assignments.map((a) => `<li class="ats-asg"><div class="ats-asg-top"><button class="ats-asg-name ${tone(a.teamId)}" type="button" data-open="${esc(`exec:${a.id}`)}">${esc(a.executor)}</button>${badge(a.status)}</div><div class="ats-asg-meta">${esc(name(a.teamId))} 负责 · 能力档：${esc(a.profile)}${a.crossTeam ? " · 跨队" : ""}</div>${a.brief ? `<p class="ats-asg-brief">交办：${esc(a.brief)}</p>` : ""}<p>${esc(a.title)}${a.result ? `：${esc(a.result)}` : ""}${active(a.status) || a.status === "queued" || a.status === "blocked" ? "" : " 执行者已结束，记录保留。"}</p></li>`).join("")}</ul>` : "";
     const posts = `<details class="acv2-process" data-posts="${esc(r.id)}"${openPosts.has(r.id) ? " open" : ""}><summary>群内汇报 · ${r.posts.length} 条</summary><ol class="acv2-timeline">${r.posts.map((post) => `<li class="acv2-step"><time>${post.acceptedAt ? esc(clock(post.acceptedAt)) : ""}</time><div><span class="ats-report-who ${tone(post.agentId)}">${esc(name(post.agentId))}${KIND[post.kind] ? ` · ${KIND[post.kind]}` : ""}</span><p class="ats-report-text">${esc(post.text)} · ${esc(DELIVERY[post.state] ?? post.state)}</p></div></li>`).join("")}</ol></details>`;
     const source = [r.requester === "owner" ? "本人" : "群成员", groupName(r.chatId), SOURCE[r.message.source]].filter(Boolean).map(esc).join(" / ");
     const message = `${r.message.text}${r.message.attachments.length ? `\n附件：${r.message.attachments.join("、")}` : ""}`;
-    return `<div class="acv2-record-detail"><h3 class="acv4-detail-title">${esc(r.title)}</h3><div class="acv2-result${WARN.has(r.status) ? " acv2-warning" : ""}">${esc(result)}</div><div class="ats-path-line">${path}</div>${assignments}${posts}<div class="acv2-detail-label">原始信息 · ${source}</div><blockquote class="acv2-message">${esc(message)}</blockquote><div class="acv2-detail-label">对应存储</div><div class="acv2-related"><button type="button" data-open="store:group-memory:${esc(r.chatId)}">群业务记忆 · 仅 ${sam}</button><button type="button" data-open="store:agent-memory:${esc(r.chatId)}">负责人与执行者记忆</button><button type="button" data-open="store:team-store:${esc(r.chatId)}">执行记录与交付文件</button></div></div>`;
+    // The owner's own request: a chat action for each involved leader, opening its conversation with this request selected (US-006/AC-03).
+    const leaders = r.requester === "owner" ? [r.lead, ...cross].filter(chatable) : [];
+    const chatActions = leaders.length ? `<div class="ats-chat-actions">${leaders.map((teamId) => `<button class="acv2-button" type="button" data-chat="${esc(teamId)}" data-chat-request="${esc(r.id)}">与 ${esc(name(teamId))} 私聊讨论</button>`).join("")}</div>` : "";
+    return `<div class="acv2-record-detail"><h3 class="acv4-detail-title">${esc(r.title)}</h3><div class="acv2-result${WARN.has(r.status) ? " acv2-warning" : ""}">${esc(result)}</div><div class="ats-path-line">${path}</div>${assignments}${posts}<div class="acv2-detail-label">原始信息 · ${source}</div><blockquote class="acv2-message">${esc(message)}</blockquote>${chatActions}<div class="acv2-detail-label">对应存储</div><div class="acv2-related"><button type="button" data-open="store:group-memory:${esc(r.chatId)}">群业务记忆 · 仅 ${sam}</button><button type="button" data-open="store:agent-memory:${esc(r.chatId)}">负责人与执行者记忆</button><button type="button" data-open="store:team-store:${esc(r.chatId)}">执行记录与交付文件</button></div></div>`;
   }
   const searchText = (r) => `${r.title} ${r.message.text} ${r.result ?? ""} ${r.assignments.map((a) => `${a.executor} ${a.title}`).join(" ")} ${name(r.lead)} ${r.id}`.toLowerCase();
   function renderRows() {
@@ -246,7 +267,9 @@
     const deliveryKey = (r) => r.delivery === "queued" ? "sending" : r.delivery;
     const list = records(selected).filter((r) => (status === "all" || r.status === status) && (delivery === "all" || deliveryKey(r) === delivery) && searchText(r).includes(query));
     $("ats-count").textContent = metadata ? "私人范围" : `${list.length} 条`;
-    $("ats-records").innerHTML = metadata
+    $("ats-records").innerHTML = selected === "private-chats"
+      ? `<div class="acv2-empty"><strong>负责人私聊分别保存</strong><p>从 ${esc(name(coordinator()))} 或负责人名字旁的聊天按钮进入。</p></div>`
+      : metadata
       ? `<div class="acv2-empty"><strong>${selected.startsWith("penny") ? "账务内容保持私密" : "私人会话独立保存"}</strong><p>${selected.startsWith("penny") ? "仅显示状态与存储位置。请到 Penny 私聊查看账务。" : "普通私聊的会话与记忆不在工作台显示。"}</p></div>`
       : list.length ? rows(list) : '<div class="acv2-empty"><strong>暂无关联记录</strong><p>事务开始后会显示在这里，结束后也会保留。</p></div>';
   }
@@ -291,7 +314,9 @@
     const related = (buttons) => buttons.length ? `<div class="acv2-related">${buttons.map(([target, label]) => `<button type="button" data-open="${esc(target)}">${esc(label)}</button>`).join("")}</div>` : "";
     if (id === null) return `<p class="ats-drawer-summary">本人的工作空间记录按来源群分开保存，每件事务保留主责负责人、各项分工的临时执行者和结果；Penny 账务不纳入此处。</p>${related(view.groups.map((group) => [`group:${group.chatId}`, group.name]))}`;
     const chatId = chatOf(id), group = chatId ? groupName(chatId) : "";
-    const groupStores = chatId ? related([[`store:group-memory:${chatId}`, `群业务记忆 · 仅 ${sam}`], [`store:agent-memory:${chatId}`, "负责人与执行者记忆"], [`store:team-store:${chatId}`, "执行记录"]]) : "";
+    // Sam's and each Team Leader's tab also lead to the store of the owner's private conversations with them (agent-console::US-005/AC-02).
+    const privateStore = chatable(agentOf(id)) ? [["private-chats", "负责人私聊记录"]] : [];
+    const groupStores = chatId ? related([[`store:group-memory:${chatId}`, `群业务记忆 · 仅 ${sam}`], [`store:agent-memory:${chatId}`, "负责人与执行者记忆"], [`store:team-store:${chatId}`, "执行记录"], ...privateStore]) : "";
     let summary, path, store, links = [];
     const groupStore = storeOf(id);
     if (groupStore) { [summary, store] = STORE_INFO[groupStore.kind](sam); path = `${group} → ${sam} → 团队负责人 → 临时执行者`; }
@@ -299,6 +324,7 @@
     else if (id === "penny-store") { summary = "仅展示位置和隔离关系，不展示交易数量、金额、账务正文或截图。"; store = "penny/ledger.sqlite / journal.sqlite / media/"; path = "本人 → Penny Bot → Penny"; }
     else if (id === "personal") { summary = "本人普通问答、文件与提醒。"; store = "memory/accounts/<私人作用域>/ / codex-service.json"; path = "本人普通私聊 → 个人助手"; }
     else if (id === "personal-store") { summary = "私人偏好与会话不进入群业务记忆或财务存储。"; store = "memory/accounts/<私人作用域>/ / codex-service.json"; path = "本人普通私聊 → 个人助手"; }
+    else if (id === "private-chats") { summary = `与 ${sam} 和各负责人的对话分别保存；私聊正文不进入群记录、群记忆或普通私聊的记忆。`; store = "private-conversations.sqlite"; path = "本人 → 负责人私聊"; }
     else if (id === "coordinator") { summary = `职责：${view.coordinator?.responsibility ?? ""}。只负责总协调：把事务交给合适的负责人，跨团队的需要由 ${sam} 指派并在群里通报。读取群业务记忆和负责人汇报，看不到执行者的内容。`; store = "agent-dispatch.sqlite / memory/accounts/<本群作用域>/memory.sqlite"; path = `${group} → ${sam}`; }
     else if (id.startsWith("group:")) { summary = `${sam} 接收群消息并交给负责人。负责人把事务拆成分工，每项分工按能力档创建一名临时执行者，并统一向原群汇报；需要其他团队时由 ${sam} 指派并在群里通报。`; store = "agent-dispatch.sqlite"; path = `${group} → ${sam}`; }
     else if (id.startsWith("team:")) {
@@ -345,6 +371,7 @@
     for (const item of document.querySelectorAll(".acv-side .acv-s-item[data-open]")) item.setAttribute("aria-pressed", String(open && item.dataset.open === selected));
     for (const card of document.querySelectorAll(".ats-card")) card.dataset.active = String(open && card.dataset.card === selected);
     for (const button of document.querySelectorAll(".ats-node-button[data-open],.ats-req-label[data-open]")) button.setAttribute("aria-pressed", String(open && button.dataset.open === selected));
+    for (const button of document.querySelectorAll(".ats-chat-launch")) button.setAttribute("aria-pressed", String(open && mode === "chat" && button.dataset.chat === chatAgent));
   }
   // On phones the drawer fills the workspace and the content underneath is inert (agent-console::US-002/AC-05).
   function responsive() { $("ats-view").inert = innerWidth < 720 && !$("ats-drawer").hidden; }
@@ -355,6 +382,7 @@
     $("ats-drawer-kind").textContent = id === null ? "本人工作空间 · 群任务" : PRIVATE.has(id) ? "私人区域 · 仅本人可见" : `${chatId ? groupName(chatId) : ""} · 团队协作`;
     $("ats-scope-label").textContent = id?.startsWith("team:") ? "团队事务 · 包含历史" : id?.startsWith("exec:") ? "该执行者所在事务" : id?.startsWith("req:") ? "事务记录" : "关联记录";
     $("ats-back").hidden = trail.length === 0;
+    $("ats-mode-button").hidden = !chatable(agentOf(id));
     $("ats-panel-storage").innerHTML = relation(id);
     const store = storeOf(id);
     if (store?.kind === "group-memory") void loadMemory(id, store.chatId);
@@ -367,6 +395,7 @@
     else { trail = []; if (trigger) lastTrigger = trigger; }
     expandedRequest = id?.startsWith("req:") ? id.slice(4) : null;
     $("ats-search").value = ""; $("ats-status").value = "all"; $("ats-delivery").value = "all";
+    setMode("records");
     $("ats-drawer").hidden = false;
     if (!related) setTab("records");
     show(id);
@@ -391,6 +420,133 @@
     if (lastTrigger && document.contains(lastTrigger)) lastTrigger.focus({ preventScroll: true });
   }
 
+  // ── Private conversations (agent-console::US-006) ──
+  const chatState = (agentId) => {
+    if (!chats.has(agentId)) chats.set(agentId, { draft: "", requestId: "", view: null, error: "", loaded: "" });
+    return chats.get(agentId);
+  };
+  function setMode(next) {
+    mode = next;
+    const chat = mode === "chat";
+    $("ats-record-tabs").hidden = chat; $("ats-drawer-scroll").hidden = chat; $("ats-record-foot").hidden = chat; $("ats-chat-pane").hidden = !chat;
+    $("ats-mode-button").textContent = chat ? "查看记录" : "私聊";
+  }
+  /** Opens the conversation with `agentId` in the drawer; a record's chat action selects its request (US-006/AC-03). */
+  function openChat(agentId, requestId, trigger) {
+    if (!chatable(agentId)) return;
+    if (trigger) lastTrigger = trigger;
+    const state = chatState(agentId);
+    if (requestId) state.requestId = requestId;
+    trail = []; expandedRequest = null; selected = nodeOf(agentId); chatAgent = agentId;
+    setMode("chat");
+    $("ats-drawer").hidden = false;
+    $("ats-drawer-title").textContent = `与 ${name(agentId)} 私聊`;
+    $("ats-drawer-kind").textContent = "本人私聊 · 仅本人可见";
+    $("ats-back").hidden = true;
+    $("ats-mode-button").hidden = false;
+    renderChat();
+    void loadChat(agentId);
+    updateSelection();
+    responsive();
+    window.requestAnimationFrame(fit);
+    if (innerWidth < 720) $("ats-close").focus();
+  }
+  async function loadChat(agentId) {
+    const state = chatState(agentId);
+    try {
+      const response = await fetch(`/api/private-chats/${encodeURIComponent(agentId)}`);
+      if (response.status === 401) { location.reload(); return; }
+      if (!response.ok) throw new Error(String(response.status));
+      const text = await response.text();
+      if (text === state.loaded) return;
+      state.loaded = text; state.view = JSON.parse(text);
+    } catch {
+      if (state.view) return;
+      state.error = "暂时读不到这段私聊，请稍后再试。";
+    }
+    if (mode === "chat" && chatAgent === agentId && !$("ats-drawer").hidden) renderChatLog();
+  }
+  // The requests this conversation can select, as the service lists them, with what the overview shows of each.
+  const chatRequests = (state) => (state.view?.requests ?? []).map(findRequest).filter(Boolean);
+  function chatContext(state) {
+    const options = chatRequests(state);
+    if (state.requestId && !options.some((r) => r.id === state.requestId)) state.requestId = "";
+    const r = state.requestId ? findRequest(state.requestId) : null;
+    return `<label>关联事务<select id="ats-chat-task" aria-label="关联本人发起的事务"><option value="">新的私聊</option>${options.map((x) => `<option value="${esc(x.id)}"${x.id === state.requestId ? " selected" : ""}>群 · ${esc(x.title)} · ${esc(STATUS[x.status]?.[0] ?? x.status)}</option>`).join("")}</select></label><p>${r ? `来源：${esc(groupName(r.chatId))} · 发起人：本人` : "可直接讨论，或在上方选择本人发起的事务；私聊内容不进入群记录。"}</p>`;
+  }
+  function chatLog(state) {
+    const who = esc(name(chatAgent)), r = state.requestId ? findRequest(state.requestId) : null;
+    const messages = (state.view?.messages ?? []).map((m) => {
+      const bubble = m.role === "owner"
+        ? `<div class="ats-chat-message ats-chat-self"><div class="ats-chat-speaker">你</div><div class="ats-chat-bubble">${esc(m.text)}</div></div>`
+        : `<div class="ats-chat-message"><div class="ats-chat-speaker">${who}</div><div class="ats-chat-bubble ats-md">${markdown(m.text)}</div></div>`;
+      // An unanswered message says why, inline (D6).
+      const after = m.state === "pending" ? `<p class="ats-chat-wait">${who}正在回复…</p>`
+        : m.state === "failed" ? `<p class="ats-chat-notice">${who}这次没有回复：${esc(m.reason ?? "运行出错")}。可以重新发送。</p>`
+          : m.state === "interrupted" ? '<p class="ats-chat-notice">服务中断，没有回复。可以重新发送。</p>' : "";
+      return bubble + after;
+    }).join("");
+    const preview = r ? `<div class="ats-chat-preview">${esc(STATUS[r.status]?.[0] ?? r.status)} · ${r.assignments.length} 项分工<br>${esc(resultText(r))}${r.status === "completed" ? "<br>全部执行者已结束，历史记录保留。" : ""}</div>` : "";
+    const error = state.error ? `<p class="ats-chat-notice" role="alert">${esc(state.error)}</p>` : "";
+    return `${messages}${preview}${error}${r ? "" : '<p class="ats-chat-empty">告诉我你想完成什么，或在上方选择已有事务继续讨论。</p>'}`;
+  }
+  const canSend = (state) => Boolean(state.draft.trim()) && !state.view?.pending;
+  /** Draws the whole conversation: on opening it, after a send and when the selected request changes. */
+  function renderChat() {
+    const state = chatState(chatAgent), who = esc(name(chatAgent));
+    $("ats-chat-pane").innerHTML = `<div class="ats-chat-context" id="ats-chat-context">${chatContext(state)}</div><div class="ats-chat-log" id="ats-chat-log" aria-live="polite">${chatLog(state)}</div><form class="ats-chat-compose" id="ats-chat-form"><textarea id="ats-chat-input" rows="2" aria-label="给 ${who} 的私聊消息" placeholder="与 ${who} 讨论具体事务…">${esc(state.draft)}</textarea><div class="ats-chat-compose-foot"><small>Enter 发送 · Shift + Enter 换行</small><button class="acv2-button acv2-primary" id="ats-chat-send" type="submit"${canSend(state) ? "" : " disabled"}>发送</button></div></form>`;
+    $("ats-chat-log").scrollTop = $("ats-chat-log").scrollHeight;
+  }
+  /** Follows the service without touching the draft being typed: the log, the selector when its options change, and 发送. */
+  function renderChatLog() {
+    const state = chatState(chatAgent), log = $("ats-chat-log");
+    if (!log) return;
+    const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 24;
+    const select = $("ats-chat-task"), options = ["", ...chatRequests(state).map((r) => r.id)].join("\n");
+    if (select && [...select.options].map((option) => option.value).join("\n") !== options) $("ats-chat-context").innerHTML = chatContext(state);
+    log.innerHTML = chatLog(state);
+    if (atEnd) log.scrollTop = log.scrollHeight;
+    $("ats-chat-send").disabled = !canSend(state);
+  }
+  async function sendChat() {
+    const agentId = chatAgent, state = chatState(agentId), text = state.draft.trim();
+    if (!canSend(state)) return;
+    $("ats-chat-send").disabled = true;
+    try {
+      const response = await fetch(`/api/private-chats/${encodeURIComponent(agentId)}/messages`, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text, requestId: state.requestId || null }) });
+      if (response.status === 401) { location.reload(); return; }
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) { state.error = body.error ?? "发送失败，请稍后再试。"; }
+      else { state.view = body; state.loaded = ""; state.draft = ""; state.error = ""; }
+    } catch {
+      state.error = "发送失败，请稍后再试。";
+    }
+    if (mode === "chat" && chatAgent === agentId && !$("ats-drawer").hidden) { renderChat(); $("ats-chat-input").focus({ preventScroll: true }); }
+  }
+  document.addEventListener("input", (event) => {
+    if (event.target.id !== "ats-chat-input") return;
+    const state = chatState(chatAgent);
+    state.draft = event.target.value;
+    $("ats-chat-send").disabled = !canSend(state);
+  });
+  document.addEventListener("change", (event) => {
+    if (event.target.id !== "ats-chat-task") return;
+    chatState(chatAgent).requestId = event.target.value;
+    $("ats-chat-context").innerHTML = chatContext(chatState(chatAgent));
+    renderChatLog();
+  });
+  document.addEventListener("submit", (event) => {
+    if (event.target.id !== "ats-chat-form") return;
+    event.preventDefault();
+    void sendChat();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.target.id !== "ats-chat-input" || event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+    event.preventDefault();
+    void sendChat();
+  });
+
   document.addEventListener("click", (event) => {
     const target = event.target;
     if (!view) return;
@@ -404,6 +560,8 @@
       else { fitMode = false; scale = Math.max(0.5, Math.min(1.4, scale + (zoom.dataset.zoom === "in" ? 0.1 : -0.1))); applyScale(); }
       return;
     }
+    const chat = target.closest("[data-chat]");
+    if (chat) { openChat(chat.dataset.chat, chat.dataset.chatRequest ?? "", chat); return; }
     const opener = target.closest("[data-open]");
     if (opener) { open(opener.dataset.open, opener, Boolean(opener.closest("#ats-drawer"))); return; }
     const job = target.closest("[data-job]");
@@ -414,6 +572,11 @@
   $("ats-all").addEventListener("click", (event) => open(null, event.currentTarget));
   $("ats-close").addEventListener("click", close);
   $("ats-back").addEventListener("click", back);
+  // The header switches between the agent's conversation and its records (agent-console::US-006/AC-01).
+  $("ats-mode-button").addEventListener("click", (event) => {
+    if (mode === "chat") open(nodeOf(chatAgent), event.currentTarget);
+    else openChat(agentOf(selected), "", event.currentTarget);
+  });
   for (const key of ["records", "storage"]) $(`ats-tab-${key}`).addEventListener("click", () => setTab(key));
   $("ats-record-tabs").addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
@@ -431,5 +594,9 @@
   }, true);
   void load();
   // Requests start and end in the service, and a revoked browser must lose the page; like the other console pages, it follows the service.
-  setInterval(() => { if (!document.hidden) void load(); }, 2000);
+  setInterval(() => {
+    if (document.hidden) return;
+    void load();
+    if (mode === "chat" && chatAgent && !$("ats-drawer").hidden) void loadChat(chatAgent);
+  }, 2000);
 })();

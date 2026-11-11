@@ -45,6 +45,7 @@ const ASSETS: Record<string, { file: string; type: string }> = {
   "/console": { file: "overview.html", type: "text/html; charset=utf-8" },
   "/console/overview.css": { file: "overview.css", type: "text/css; charset=utf-8" },
   "/console/overview.js": { file: "overview.js", type: "text/javascript; charset=utf-8" },
+  "/console/chat-markdown.js": { file: "chat-markdown.js", type: "text/javascript; charset=utf-8" },
   "/console/mcp": { file: "mcp.html", type: "text/html; charset=utf-8" },
   "/console/teams": { file: "team.html", type: "text/html; charset=utf-8" },
   "/console/console.css": { file: "console.css", type: "text/css; charset=utf-8" },
