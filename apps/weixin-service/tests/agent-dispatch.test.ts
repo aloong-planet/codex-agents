@@ -964,8 +964,8 @@ it("names a superseded choice's run to the host before the host acts on its answ
     close: async () => { turns.push("close"); return "已收尾。"; } };
   // The close fails when the supplement supersedes the choice and again at the first answer; at the second answer it works.
   const openChoices = new Set(["run-1"]), resumed: string[] = [];
-  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
-  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { pending: answering(openChoices, resumed), closeChoices: closingChoices(openChoices, 2) });
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [], captures: Capture[] = [];
+  const dispatch = dispatchWith(directory(), leader, executor, deliveries, { pending: answering(openChoices, resumed), closeChoices: closingChoices(openChoices, 2), captures });
   const expected = [`cli_alice: ${start(1)}`, "cli_alice: 请选择要发送的文件。", `cli_alice: ${start(1)}`];
   try {
     await dispatch.start();
@@ -987,6 +987,89 @@ it("names a superseded choice's run to the host before the host acts on its answ
   expect(resumed).toEqual([]);
   expect(turns).toEqual(["plan", "supplement", "close"]);
   expect(executor.runs).toBe(2);
+  // The two replies belong to no request: the request's records hold only its Team Leader's posts, and so does the group memory.
+  const requestPosts = [start(1), "请选择要发送的文件。", start(1), "已收尾。"];
+  expect(dispatch.records()[0]?.posts.map(({ text }) => text)).toEqual(requestPosts);
+  expect(groupCaptures(captures).map(({ assistantText }) => assistantText)).toEqual([requestPosts.join("\n")]);
+});
+
+it.each([
+  ["is queued behind another request of its team", "queued"],
+  ["waits again, on a question of its rerun Executor", "waiting"],
+] as const)("tells the requester that the request goes on when its superseded choice is answered while the request %s", async (_name, state) => {
+  const rerun = deferred();
+  // Waiting: the rerun asks back, with no run of its own. Queued: the team's other request runs, held, when the supplement arrives.
+  const executor = supersededExecutor(rerun.promise, state === "waiting" ? { status: "waiting", message: "请补充要发送的版本。" } : undefined);
+  const openChoices = new Set(["run-1"]), resumed: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, deliveries, { pending: answering(openChoices, resumed), closeChoices: unclosable });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    if (state === "queued") {
+      dispatch.admit(event("other", "alice"));
+      await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    } else rerun.resolve();
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]).toMatchObject({ status: state, attempt: 1 }), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "choose:1"));
+    await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(`cli_sam: ${SUPERSEDED}`), { timeout: 2000, interval: 10 });
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: state, attempt: 1 });
+    expect(resumed).toEqual([]);
+  } finally { rerun.resolve(); }
+});
+
+it("replies as for an ended request when a superseded choice is answered while its request is being cancelled", async () => {
+  const rerun = deferred();
+  // The rerun's Executor ends, cancelled, only once `rerun` resolves, however early it is cancelled.
+  const executor = supersededExecutor(rerun.promise, { status: "cancelled", message: "已取消" });
+  const openChoices = new Set(["run-1"]), resumed: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, deliveries, { pending: answering(openChoices, resumed), closeChoices: unclosable });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(executor.runs).toBe(2), { timeout: 2000, interval: 10 });
+    // The cancel is taken in while the rerun's Executor is still stopping; the answer follows it.
+    dispatch.admit(event("three", "cancel:one"));
+    dispatch.admit(event("four", "choose:1"));
+    await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(`cli_sam: ${ENDED}`), { timeout: 2000, interval: 10 });
+    expect(classified).toEqual(["dispatch", "supplement", "cancel"]);
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "running" }] });
+    expect(resumed).toEqual([]);
+  } finally { rerun.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
+  expect(messages(deliveries)).toEqual([start(1), "请选择要发送的文件。", start(1), ENDED, "已停止继续处理。已经完成的操作不会自动撤销。"]);
+});
+
+it("also holds the answer when the superseded Assignment kept no run of its own and waited on the request's run", async () => {
+  const rerun = deferred();
+  // The second Assignment waits without a run of its own, and the request's run has the open choice: what a build that kept a
+  // choice's run only on the request left behind. The supplement reruns the first Assignment, held.
+  let first = 0;
+  const executor: DispatchExecutor = { run: async (_job, assignment) => {
+    if (assignment.title === "核对价格") return { status: "waiting", message: "请选择要发送的文件。" };
+    if (++first > 1) await rerun.promise;
+    return { status: "completed", message: "文案已整理。", runRef: "run-1" };
+  }, close: () => {} };
+  const openChoices = new Set(["run-1"]), resumed: string[] = [];
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, deliveries, { pending: answering(openChoices, resumed), closeChoices: unclosable });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]).toMatchObject({ status: "waiting", runRef: "run-1", assignments: [{ status: "completed" }, { status: "waiting" }] }),
+      { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(first).toBe(2), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "choose:1"));
+    await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(`cli_sam: ${SUPERSEDED}`), { timeout: 2000, interval: 10 });
+    expect(resumed).toEqual([]);
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", attempt: 1, assignments: [{ status: "running", attempt: 1 }, { status: "cancelled" }] });
+  } finally { rerun.resolve(); }
 });
 
 it("still holds an answer to a superseded choice after the rerun reported a run of its own and the request has ended, with the reply of an ended request", async () => {

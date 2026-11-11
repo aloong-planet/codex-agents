@@ -506,13 +506,13 @@ export class AgentDispatch {
               await this.closeChoices(job);
               this.transaction(() => {
                 // The superseded runs stay with the request: a choice that could not be closed is still open, and its Assignment
-                // may get a run of its own when it reruns for the supplement.
-                const superseded = new Set(job.supersededRuns);
-                for (const assignment of this.assignments(job.id)) {
-                  if (assignment.status !== "waiting") continue;
-                  if (assignment.runRef) superseded.add(assignment.runRef);
-                  assignment.status = "cancelled"; this.saveAssignment(assignment);
-                }
+                // may get a run of its own when it reruns for the supplement. A waiting part that keeps no run of its own waits on
+                // the request's run, as where pending answers are taken in: an Assignment stored before each kept its run, and a
+                // request stored before Assignments existed.
+                const assignments = this.assignments(job.id), superseded = new Set(job.supersededRuns);
+                const waitedOn = assignments.length ? assignments.filter(({ status }) => status === "waiting").map(({ runRef }) => runRef ?? job.runRef) : [job.runRef];
+                for (const runRef of waitedOn) if (runRef) superseded.add(runRef);
+                for (const assignment of assignments) if (assignment.status === "waiting") { assignment.status = "cancelled"; this.saveAssignment(assignment); }
                 this.blockDependents(job.id);
                 if (superseded.size) job.supersededRuns = [...superseded];
                 job.executionEvent = event; job.attempt++; job.status = "queued"; this.save(job);

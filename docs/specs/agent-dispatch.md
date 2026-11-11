@@ -424,7 +424,7 @@ It places each part with one of those teams or with none, and writes a summary f
 - each cross-team Team Leader's latest report;
 - the needs that cross-team Team Leaders reported;
 - each cross-team Team Leader's application, frozen when its team first takes a part, as the lead's is at admission. A cross-team Assignment, post or delivery under a replaced application fails instead of going out under another identity (agent-dispatch::REQ-008/AC-04);
-- the workflow runs whose choices a supplement superseded. An Assignment that reruns for the supplement is keyed by the supplement and gets a run of its own, so the superseded run is found only here. A request whose supplement was recorded before these runs were kept has none.
+- the workflow runs whose choices a supplement superseded. An Assignment that reruns for the supplement is keyed by the supplement and gets a run of its own, so the superseded run is found only here. A waiting Assignment stored without a run of its own waits on the request's run, and that run is the one kept. A request whose supplement was recorded before these runs were kept has none.
 
 The existing transition rules carry over to Assignments:
 
@@ -457,7 +457,7 @@ Each request records the definitions version it is first planned under. Assignme
 
 Requests running when several Assignments per request were introduced follow the restart rule above: each running Assignment gets an interruption post, then the Team Leader's closing turn reports the request.
 
-Requests stored before Assignments existed carry no definitions version and keep the handling they were stored under. A proposed or queued one enters planning when it next runs. A running one fails with the interruption report. A waiting one resolves its pending choice through the earlier direct reply, and its cancel closes that choice as a cancel closes an Executor's. A supplement that supersedes its choice keeps no superseded run for it, because that run is no Assignment's, so an answer to that choice is not held when the choice could not be closed. A failed one is planned again on retry. Completed and cancelled ones stay readable. At the first start after the change, the only messages this can post are the interruption report of a request that was running, and notices that the earlier process had queued but not sent.
+Requests stored before Assignments existed carry no definitions version and keep the handling they were stored under. A proposed or queued one enters planning when it next runs. A running one fails with the interruption report. A waiting one resolves its pending choice through the earlier direct reply, and its cancel closes that choice as a cancel closes an Executor's. A supplement that supersedes its choice keeps the request's own run as the superseded run, so an answer to that choice is held as an answer to an Executor's superseded choice is. A failed one is planned again on retry. Completed and cancelled ones stay readable. At the first start after the change, the only messages this can post are the interruption report of a request that was running, and notices that the earlier process had queued but not sent.
 
 **Memory scopes.** Scopes are keyed as follows (ADR-0027):
 

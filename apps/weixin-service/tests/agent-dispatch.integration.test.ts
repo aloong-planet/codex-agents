@@ -611,6 +611,10 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
   ];
   try {
     dispatchConfig(directory, true);
+    // A third member, whose stored file choice a supplement supersedes under the new code.
+    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8")) as { feishu: { groups: Array<{ allowedSenderIds: string[] }> } };
+    configuration.feishu.groups[0]!.allowedSenderIds.push("ou_third");
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
     // The pre-05 code writes one request in each state, then stops without warning.
     const service = preTeamService(checkout);
     try { running = await start(directory, env, { packageRoot: service }); }
@@ -642,13 +646,17 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     await post("om_old_queued", "ou_owner", "再安排周日的晚餐", decision("bill", "安排周日晚餐"));
     // Another member's file choice, left open for the new code to close with a cancel.
     await post("om_old_waiting_other", "ou_colleague", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote });
-    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued" && state.agentDispatch?.jobs[7]?.status === "waiting");
+    // A third member's file choice, left open for the new code to supersede with a supplement whose close fails.
+    await post("om_old_waiting_third", "ou_third", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote });
+    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued" && state.agentDispatch?.jobs[7]?.status === "waiting" &&
+      state.agentDispatch?.jobs[8]?.status === "waiting");
     await running.crash(); running = undefined;
     const storedIds = stored.agentDispatch!.jobs.map(({ id }) => id);
 
     // The new code starts on the same state. Only the running request's interruption report is new before anyone acts.
     // Its seeded definitions differ from the pre-05 commit's (Jack's Executor profile, ticket 06), so this start appends version 2.
-    running = await start(directory, env);
+    // Its first close of a choice fails: that is the close of the third member's supplement below.
+    running = await start(directory, { ...env, WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES: "1" });
     const upgraded = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "completed" && state.agentFixtureOutboxes?.bill?.text.length === 3);
     console.log(JSON.stringify({ kind: "dispatch_pre_team_upgrade", jobs: upgraded.agentDispatch, outboxes: upgraded.agentFixtureOutboxes, coordinator: upgraded.feishuFixtureTextOutbox }));
     expect(upgraded.agentDispatch?.jobs.map(({ id }) => id)).toEqual(storedIds);
@@ -661,6 +669,7 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
       { status: "failed", definitionsVersion: null, assignments: 0 },
       { status: "completed", definitionsVersion: 2, assignments: 1 },
       { status: "waiting", definitionsVersion: null, assignments: 0 },
+      { status: "waiting", definitionsVersion: null, assignments: 0 },
     ]);
     expect(upgraded.agentDispatch?.jobs[0]?.result).toBe("这是 fixture Codex 回复。");
     expect(upgraded.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
@@ -668,11 +677,29 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     expect([upgraded.agentFixtureOutboxes?.alice?.text, upgraded.agentFixtureOutboxes?.jack?.text, upgraded.feishuFixtureTextOutbox]).toEqual([[], [], []]);
     expect(upgraded.fixtureModelRequests).toHaveLength(1);
 
+    // A supplement supersedes the choice of a request stored before Assignments existed, whose run is the request's own, and the
+    // close fails. The request is planned and its Executor held. The third member's answer to the old choice is then held: the
+    // run is not resumed, nothing is sent, and this time the choice is closed.
+    await post("om_new_supplement", "ou_third", "补充：换成最新的版本", { kind: "supplement", agentId: null, requestId: storedIds[8], summary: "", message: "" }, { modelHold: true });
+    const supplemented = await running.until((state) => state.agentDispatch?.jobs[8]?.status === "running" && state.fixtureModelRequests?.length === 2);
+    expect(sendRuns(supplemented).map(({ status }) => status)).toEqual(["needs_input", "needs_input", "needs_input"]);
+    await post("om_new_stale_choice", "ou_third", "2", clarified);
+    // The answer's post, whoever sends it, marks the end of its processing.
+    const posted = supplemented.agentDispatch!.notices!.length;
+    const held = await running.until((state) => state.agentDispatch?.notices?.length === posted + 1 && state.agentDispatch.notices.at(-1)!.state === "accepted");
+    console.log(JSON.stringify({ kind: "dispatch_pre_team_superseded_choice", commands: ["补充：换成最新的版本", "2"], jobs: held.agentDispatch, runs: sendRuns(held),
+      outboxes: held.agentFixtureOutboxes, coordinator: held.feishuFixtureTextOutbox, media: held.feishuFixtureMediaOutbox }));
+    expect(held.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual([SUPERSEDED]);
+    expect(sendRuns(held).map(({ status, effects }) => ({ status, effects })).sort((left, right) => left.status.localeCompare(right.status)))
+      .toEqual([{ status: "cancelled", effects: [] }, { status: "needs_input", effects: [] }, { status: "needs_input", effects: [] }]);
+    expect(held.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    expect(held.agentDispatch?.jobs[8]).toMatchObject({ status: "running", definitionsVersion: 2, assignments: [expect.objectContaining({ teamId: "alice", status: "running" })] });
+
     // A cancel closes the choice of a request stored before Assignments existed, whose workflow run is keyed by its message;
     // the other member's stored choice stays open.
     await post("om_new_cancel", "ou_colleague", "这项请求不用做了", { kind: "cancel", agentId: null, requestId: storedIds[7], summary: "", message: "" });
     const closed = await running.until((state) => state.agentDispatch?.jobs[7]?.status === "cancelled");
-    expect(sendRuns(closed).map(({ status }) => status).sort()).toEqual(["cancelled", "needs_input"]);
+    expect(sendRuns(closed).map(({ status }) => status).sort()).toEqual(["cancelled", "cancelled", "needs_input"]);
 
     // The stored proposal, file choice and failed request still answer their original requester's controls.
     await post("om_new_confirm", "ou_owner", "确认", { kind: "confirm", agentId: null, requestId: storedIds[2], summary: "", message: "" });
@@ -688,8 +715,9 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     expect(controlled.agentFixtureOutboxes?.alice?.media).toEqual([expect.objectContaining({ chatId: "oc_alpha", fileName: "Agent Beta.md" })]);
     expect(controlled.agentDispatch?.jobs[3]).toMatchObject({ definitionsVersion: 2, assignments: [expect.objectContaining({ teamId: "jack", status: "completed" })] });
     expect(readFileSync(join(business, "demo-vault", "sample.txt"), "utf8")).toBe("xx\n");
-    // Plans only for the requests the new code ran: the queued one, the confirmed proposal and the retried failure. The choice ran no Team Leader turn.
-    expect(controlled.fixtureLeaderRequests?.filter(({ phase }) => phase === "plan").map(({ teamId }) => teamId)).toEqual(["bill", "jack", "jack"]);
+    // Plans only for the requests the new code ran: the queued one, the supplemented one, the confirmed proposal and the retried
+    // failure. The answered choice ran no Team Leader turn.
+    expect(controlled.fixtureLeaderRequests?.filter(({ phase }) => phase === "plan").map(({ teamId }) => teamId)).toEqual(["bill", "alice", "jack", "jack"]);
   } finally {
     await running?.close();
     for (const path of [directory, business, checkout]) rmSync(path, { recursive: true, force: true });
