@@ -173,7 +173,7 @@ describe.skipIf(!runsInstalledAppServer)("Runtime home compaction on the install
     return { leader, pool, homesAtCreation, homesAtExit, threads, reports };
   }
   const leaderInput = (memory: string): LeaderTurnInput => ({ requestId: "om_compaction", fixtureMessageId: "om_compaction",
-    leader: { id: "alice", name: "Alice", teamName: "商品团队", responsibility: "商品运营", instructions: "" }, profiles: [{ id: "executor-1", name: "能力档 1" }],
+    leader: { id: "alice", name: "Alice", teamName: "商品团队", responsibility: "商品运营", instructions: "" }, profiles: [{ id: "executor-1", name: "能力档 1", capabilities: [] }],
     brief: { message: "帮我整理闲鱼商品描述", summary: "整理闲鱼商品描述" }, directory: [{ name: "商品团队", responsibility: "商品运营" }], memory,
     session: { accountId: "cli_sam", target: "feishu.group.oc_alpha", bindingHash: "binding-alpha", revision: "revision-1", definitionsVersion: 1 } });
 

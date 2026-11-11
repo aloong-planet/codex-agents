@@ -20,6 +20,8 @@ import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenari
 // Not covered here:
 // - Whether a deliverable's content meets its criterion (missing facts marked, sources named, no claim that tests ran): the
 //   reviewed run record.
+// - Whether a plan's Brief asks its Executor to send the deliverable to the group: the reviewed run record. The delivered file is
+//   asserted, and an Executor can also send it on the original message alone.
 // - Decision posts (agent-dispatch::US-003/AC-03): a plan may hold none, so no scenario checks for one and none lists the item.
 //   A record shows the decisions a plan held and the posts that carried them; a run without any gives no evidence for the item.
 // - A plan that passed only after its correction turn looks like one that passed at once: the correction stays inside the plan turn.
@@ -83,8 +85,8 @@ function decisionOn(state: State, messageId: string): DispatchDecision {
 
 /**
  * A request in one team's domain, from its message to its closing: the Coordinator routes it to `team`, whose Team Leader's plan
- * passes host validation with one Executor per Assignment, a file reaches the group under that Team Leader's identity only, and
- * its closing follows the last Assignment's end.
+ * passes host validation with one Executor per Assignment and asks for no other team's help, a file reaches the group under that
+ * Team Leader's identity only, and its closing follows the last Assignment's end.
  */
 async function deliversUnderItsTeam(run: ScenarioRun, messageId: string, text: string, team: TeamId): Promise<State> {
   await run.send(messageId, text);
@@ -98,6 +100,8 @@ async function deliversUnderItsTeam(run: ScenarioRun, messageId: string, text: s
   expect(plan, "the Team Leader's plan").toBeDefined();
   expect(plan!.assignments.length).toBeGreaterThanOrEqual(1);
   for (const assignment of plan!.assignments) expect(PRESETS).toContain(assignment.profileId);
+  // The team's own Executors can save and send, so the plan asks the Coordinator for no other team's part.
+  expect(plan!.help, "the plan asks another team for a part of its own team's request").toEqual([]);
   expect(request.assignments.map(({ teamId, profileId, title }) => ({ teamId, profileId, title }))).toEqual(plan!.assignments.map(({ profileId, title }) => ({ teamId: team, profileId, title })));
   expect(new Set(request.assignments.map(({ executor }) => executor)).size).toBe(request.assignments.length);
   expect(request.status).toBe("completed");

@@ -31,7 +31,7 @@ const team = (id: string, version = 1) => {
   const agent = agents.find((candidate) => candidate.id === id);
   const name = (index: number) => version === 1 ? `能力档 ${index}` : `新能力档 ${index}`;
   return agent && id !== "sam" ? { leader: { id, name: agent.name, teamName: `${agent.name} 团队`, responsibility: agent.responsibility, instructions: "" },
-    profiles: [{ id: "executor-1", name: name(1) }, { id: "executor-2", name: name(2) }], memoryScope: { kind: "leader", teamId: id } as const } : undefined;
+    profiles: [{ id: "executor-1", name: name(1), capabilities: [] }, { id: "executor-2", name: name(2), capabilities: [] }], memoryScope: { kind: "leader", teamId: id } as const } : undefined;
 };
 const event = (key: string, text: string, extra: Partial<InboundContent> = {}): InboundContent => ({ key, accountId: "cli_sam", target: "feishu.group.oc_alpha", senderId: "ou_owner",
   conversationType: "group", messageId: `om_${key}`, source: "text", text, receivedAt: 1, ...extra });
@@ -70,7 +70,7 @@ function dispatchWith(path: string, leader: TeamLeader, executor: DispatchExecut
   const dispatch = new AgentDispatch(join(path, "agent-dispatch.sqlite"), {
     agents: () => options.agents ?? agents, leader, executor, definitionsVersion: options.definitionsVersion ?? (() => 1), revision: options.revision ?? (() => "r1"),
     teams: options.teams ?? (() => ["alice", "bill", "jack"]),
-    team: (id, version) => { const view = (options.team ?? team)(id, version); return view && options.profile ? { ...view, profiles: [{ id: "executor-1", ...options.profile }] } : view; },
+    team: (id, version) => { const view = (options.team ?? team)(id, version); return view && options.profile ? { ...view, profiles: [{ id: "executor-1", capabilities: [], ...options.profile }] } : view; },
     roster: () => roster.map((id) => ({ id, name: team(id)!.leader.teamName, responsibility: team(id)!.leader.responsibility })),
     classifier: { classify: async ({ event: inbound }) => {
       const [kind, argument] = inbound.text.split(":");

@@ -89,7 +89,7 @@ import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement, withFixtureDependencies } from "./fixture-team-leader.js";
 import { recordDispatchTurns, type DispatchTurnRecord } from "./fixture-dispatch-recorder.js";
 import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
-import { DISPATCH_MEMORY_ACCOUNT_PREFIX, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
+import { DISPATCH_MEMORY_ACCOUNT_PREFIX, executorCapabilities, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { createDemoServer } from "./http-server.js";
 import { ConsoleAudit } from "./console-audit.js";
@@ -237,6 +237,12 @@ let countActiveAssignments: () => Readonly<Record<string, number>> = () => ({});
 let pennyApplicationId: string | undefined;
 // With dispatch, the entry carries the registry's roster, so every reader sees the Coordinator and the teams with an application.
 type FeishuStartupEntry = Omit<Extract<ChannelStartupEntry, { channel: "feishu" }>, "dispatch"> & { dispatch?: Readonly<FeishuDispatchConfiguration> };
+// The saved scopes of the modules whose permissions gate host tools. The profile page's effective tools and a Team Leader's view
+// of its presets both read them (team-management::US-003/AC-02, agent-dispatch::REQ-011/AC-01).
+const moduleScopes = () => ["notes", "local-media"].flatMap((moduleId) => {
+  const state = workflowModulePermissions.get(moduleId);
+  return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
+});
 const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
   const entry = channelConfiguration?.entries.find((candidate) => candidate.channel === "feishu");
   if (!entry) return undefined;
@@ -248,11 +254,7 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
     const management = new TeamManagement({ registry, coordinator: entry.connection,
       platform: onboardingPlatform, ...(groupNames ? { groupNames } : {}),
       announcements: new TeamAnnouncements(path.join(path.dirname(privateStatePath), "team-announcements.sqlite")),
-      audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(),
-      moduleScopes: () => ["notes", "local-media"].flatMap((moduleId) => {
-        const state = workflowModulePermissions.get(moduleId);
-        return state?.saved ? state.scopes.map(({ read, write }) => ({ read, write })) : [];
-      }),
+      audit: consoleAudit, catalogToolIds: workflowToolCatalog.memberIds(), moduleScopes,
       activeAssignments: () => countActiveAssignments(),
       rosterChanged: (roster) => applyRoster(roster),
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
@@ -995,6 +997,10 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Each call is also checked against the profile's current allowlist, so a removed tool is refused at once in running
   // requests, and the refusal is audited (agent-dispatch::REQ-017/AC-02).
   const toolViews = new Map<string, ProfileToolHost>();
+  // A preset's host tools in the current definitions; undefined once the preset is gone.
+  const stillAllowed = (teamId: string, profileId: string) => {
+    try { return resolveAgentProfile(teams.current().definitions, { role: "executor", teamId, profileId }, catalogToolIds).hostTools; } catch { return undefined; }
+  };
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob, assignment: import("./agent-dispatch-types.js").DispatchAssignment) => {
     const agent = { role: "executor", teamId: assignment.teamId, profileId: assignment.profileId } as const;
     const resolved = resolveAgentProfile(definitionsFor(job.definitionsVersion), agent, catalogToolIds);
@@ -1002,7 +1008,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     let tools = toolViews.get(key);
     if (!tools) {
       tools = new ProfileToolHost(workflowToolHost, workflowToolCatalog, resolved.hostTools, {
-        current: () => { try { return resolveAgentProfile(teams.current().definitions, agent, catalogToolIds).hostTools; } catch { return undefined; } },
+        current: () => stillAllowed(assignment.teamId, assignment.profileId),
         refused: (tool) => consoleAudit.tryAppend({ by: "service", event: "host_tool_refused", team: assignment.teamId, profile: assignment.profileId, tool }),
       });
       toolViews.set(key, tools);
@@ -1049,8 +1055,12 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     const versionDefinitions = definitionsFor(version), team = versionDefinitions.teams.find(({ id }) => id === teamId);
     if (!team) return undefined;
     const { instructions, memoryScope } = resolveAgentProfile(versionDefinitions, { role: "leader", teamId }, catalogToolIds);
+    const scopes = moduleScopes();
     return { leader: { id: team.id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions },
-      profiles: team.executorProfiles.map(({ id, name, noun }) => ({ id, name, ...(noun ? { noun } : {}) })), memoryScope };
+      // Each preset with what an Executor created from it can do now, which is all its Team Leader is told of it (agent-dispatch::REQ-011/AC-01).
+      profiles: team.executorProfiles.map(({ id, name, noun }) => ({ id, name, ...(noun ? { noun } : {}),
+        capabilities: executorCapabilities(resolveAgentProfile(versionDefinitions, { role: "executor", teamId, profileId: id }, catalogToolIds).hostTools,
+          stillAllowed(teamId, id), scopes, ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live") })), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
     agents, runtimes, tools: workflowToolControl, authorized: (job) => authorized(job.event), model,

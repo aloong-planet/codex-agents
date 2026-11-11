@@ -11,7 +11,8 @@ const event: InboundContent = { key: "feishu:om_one", accountId: "cli_sam", targ
 const classification = { event, agents: [{ id: "sam", name: "Sam", responsibility: "协调" }, { id: "alice", name: "Alice", responsibility: "商品运营" }], requests: [], memory: "GROUP_MEMORY" };
 const decision = { kind: "dispatch", agentId: "alice", requestId: null, summary: "整理商品文案", message: "" } as const;
 const leaderInput: LeaderTurnInput = { requestId: "feishu:om_one", leader: { id: "alice", name: "Alice", teamName: "运营团队", responsibility: "商品运营", instructions: "LEADER_INSTRUCTIONS" },
-  profiles: [{ id: "executor-1", name: "能力档 1" }], brief: { message: "整理商品文案", summary: "整理商品文案" }, directory: [{ name: "运营团队", responsibility: "商品运营" }], memory: "LEADER_MEMORY",
+  profiles: [{ id: "executor-1", name: "能力档 1", capabilities: ["PRESET_CAPABILITY"] }], brief: { message: "整理商品文案", summary: "整理商品文案" },
+  directory: [{ name: "运营团队", responsibility: "商品运营" }], memory: "LEADER_MEMORY",
   session: { accountId: "cli_sam", target: "feishu.group.oc_alpha", bindingHash: "binding", revision: "r1", definitionsVersion: 1 }, fixtureMessageId: "om_one" };
 const plan = { assignments: [{ profileId: "executor-1", title: "撰写文案", brief: "九成新，128G", dependsOn: [] }], decisions: ["按闲鱼撰写"], help: [] };
 const job: DispatchJob = { id: "feishu:om_one", event, bindingHash: "binding", agentId: "alice", senderAccountId: "cli_alice", summary: "整理商品文案", status: "running", attempt: 0 };
@@ -41,10 +42,10 @@ it("returns each turn's result unchanged and records the turns in the order they
     { role: "coordinator", turn: "classify", messageId: "om_one", startedAt: 1, endedAt: 2, output: decision,
       input: { event: expect.objectContaining({ text: "整理商品文案", mentionedAgentIds: ["alice"], discussion: [expect.objectContaining({ senderId: "ou_colleague", text: "那台 iPad 该挂出去了" })] }),
         agents: [{ id: "sam", name: "Sam", responsibility: "协调" }, { id: "alice", name: "Alice", responsibility: "商品运营" }], requests: [], memory: "GROUP_MEMORY" } },
-    // A Team Leader's whole input: its instructions, its Brief, its presets, the Team Directory and its own memory.
+    // A Team Leader's whole input: its instructions, its Brief, its presets with what their Executors can do, the Team Directory and its own memory.
     { role: "leader", turn: "plan", requestId: "feishu:om_one", teamId: "alice", startedAt: 3, endedAt: 4, output: plan,
       input: { leader: expect.objectContaining({ id: "alice", instructions: "LEADER_INSTRUCTIONS" }), brief: { message: "整理商品文案", summary: "整理商品文案" },
-        profiles: [{ id: "executor-1", name: "能力档 1" }], directory: [{ name: "运营团队", responsibility: "商品运营" }], memory: "LEADER_MEMORY", existing: 0 } },
+        profiles: [{ id: "executor-1", name: "能力档 1", capabilities: ["PRESET_CAPABILITY"] }], directory: [{ name: "运营团队", responsibility: "商品运营" }], memory: "LEADER_MEMORY", existing: 0 } },
     { role: "executor", turn: "run", requestId: "feishu:om_one", teamId: "alice", startedAt: 5, endedAt: 6, output: result,
       input: { assignmentId: assignment.id, executor: "执行者 1", profileId: "executor-1", title: "撰写文案", brief: "九成新，128G", attempt: 0,
         prerequisites: [{ position: 1, title: "调研", executor: "执行者 9", result: "调研结论" }] } },

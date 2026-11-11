@@ -30,7 +30,7 @@ const definitions: TeamDefinitions = {
 const teamView = (id: string) => {
   const team = definitions.teams.find((candidate) => candidate.id === id);
   return team ? { leader: { id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions: "" },
-    profiles: team.executorProfiles.map(({ id: profileId, name, noun }) => ({ id: profileId, name, noun: noun ?? "执行者" })), memoryScope: { kind: "leader", teamId: id } as const } : undefined;
+    profiles: team.executorProfiles.map(({ id: profileId, name, noun }) => ({ id: profileId, name, noun: noun ?? "执行者", capabilities: [] })), memoryScope: { kind: "leader", teamId: id } as const } : undefined;
 };
 const event = (key: string, chatId: string, extra: Partial<InboundContent> = {}): InboundContent => ({ key, accountId: "cli_sam", target: `feishu.group.${chatId}`,
   senderId: "ou_owner", conversationType: "group", messageId: `om_${key}`, source: "text", text: `${key} 的原始消息`, receivedAt: 1_700_000_000_000, ...extra });
