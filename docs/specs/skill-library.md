@@ -1,6 +1,6 @@
 # Skill library
 
-> Status: implemented. The Skill 管理 page imports, re-imports and deletes skills, profiles select them on the team page, and every Executor runtime is created with exactly its profile's skills.
+> Status: implemented. The Skill 管理 page imports, re-imports and deletes skills, profiles select them on the team page, every Executor runtime is created with exactly its profile's skills, and an Executor reads its skills' other files through a read-only tool.
 > Related: [team management](team-management.md), [agent dispatch](agent-dispatch.md), [agent console](agent-console.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0029](../adr/0029-keep-service-state-outside-every-file-grant.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 
 ## Problem Statement
@@ -9,7 +9,7 @@ Executor profiles need skills that fit their domain, while group runtimes must n
 
 ## Solution
 
-A skill management page imports skills from local folders into a Skill Library, as copies. A table lists each skill with its source folder, files, import time, whether the source has changed, and how many profiles use it; each skill opens in a drawer over the page. Profiles on the team page select skills from the library. The console never edits skill content: the owner edits the folder and imports again. A skill in use cannot be deleted until every profile has unbound it. An Executor works by the SKILL.md of each skill its profile selects.
+A skill management page imports skills from local folders into a Skill Library, as copies. A table lists each skill with its source folder, files, import time, whether the source has changed, and how many profiles use it; each skill opens in a drawer over the page. Profiles on the team page select skills from the library. The console never edits skill content: the owner edits the folder and imports again. A skill in use cannot be deleted until every profile has unbound it. An Executor works by the SKILL.md of each skill its profile selects, and reads the skill's other files, read-only, when it needs them.
 
 ## User Stories
 
@@ -18,7 +18,7 @@ A skill management page imports skills from local folders into a Skill Library, 
 As the owner, I want to import a skill folder and see exactly what will be copied, so that I know what agents will load.
 
 - skill-library::US-001/AC-01: "从文件夹导入" opens an import drawer, where the owner enters a folder path and reads the folder.
-- skill-library::US-001/AC-02: An importable folder shows the name and description from its SKILL.md and every file to be copied, with scripts marked. A confirmation card states that the files are copied, so later edits need a new import, and what an Executor reads of them: 「这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。执行者只读取 SKILL.md；其他文件会一并复制，但执行者目前读不到，脚本也不会运行。」 Only confirming it imports the skill.
+- skill-library::US-001/AC-02: An importable folder shows the name and description from its SKILL.md and every file to be copied, with scripts marked. A confirmation card states that the files are copied, so later edits need a new import, and what an Executor does with them: 「这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。执行者按 SKILL.md 工作，需要时可以读取其他文件，但不能修改；脚本不会运行。」 Only confirming it imports the skill.
 - skill-library::US-001/AC-03: A folder without SKILL.md at its root shows an error asking for the skill's root folder: 「这个文件夹里没有 SKILL.md，无法导入。请确认选的是 skill 的根目录。」
 - skill-library::US-001/AC-04: A skill whose name already exists in the library shows an error pointing to re-import from the existing skill's details: 「已有同名 skill「<名称>」。要更新它，请在它的详情里重新导入；或换一个文件夹。」
 - skill-library::US-001/AC-05: A folder that contains symbolic links is refused, and the error lists them, each with its target: 「这个文件夹里有 <n> 个符号链接，无法导入：」, the list, then 「符号链接可能指向文件夹以外的文件。请换成实际文件后重新读取。」 Size and file count are not limited, and binary files are copied like any other file.
@@ -48,6 +48,10 @@ The console never authors, uploads, pastes or edits skill content. Skills enter 
 ### skill-library::REQ-002 Executors load exactly their profile's skills (direct acceptance)
 
 When an Executor is created, the host copies the skills its profile selects, in the versions of the request's snapshot, into that Executor's own runtime home ([agent-dispatch::REQ-016/AC-04](agent-dispatch.md)). It copies them again whenever that Executor's runtime is created for a retry, because a released home keeps only its rollouts ([ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md)). No other skill is visible to it. The host puts every copied skill on each of the Executor's turns, which is how its model reads each SKILL.md.
+
+### skill-library::REQ-003 Executors read their skills' other files (direct acceptance)
+
+An Executor whose profile selects at least one skill has a host tool, `read_skill_file`, that lists the files of one of those skills and reads one of them, in the versions of the request's snapshot. It reads only files of those versions, as they were imported, and never writes, runs or reaches anything else: no other skill, no other version and no other part of its runtime home. A script is read as text and never run. An Executor whose profile selects no skill is offered no such tool.
 
 ## Failure modes and boundaries
 
@@ -83,7 +87,12 @@ When an Executor is created, the host copies the skills its profile selects, in 
 | A stored version is missing, or a stored file no longer matches what was imported, when an Executor is created | No runtime is started and the Assignment fails, rather than running with other content |
 | An Executor's runtime home still holds skills of an earlier run or of an interrupted compaction | Removed when the runtime is created, before the profile's skills are written, under skill-library::REQ-002 |
 | Skill text instructs the agent to use tools its profile lacks | The host refuses them under [agent-dispatch::REQ-016](agent-dispatch.md); a skill grants no capability |
-| A skill keeps instructions in files other than SKILL.md, or ships scripts | The files are copied, but an Executor reads SKILL.md only and runs nothing; the import card says so under skill-library::US-001/AC-02 |
+| A skill keeps instructions in files other than SKILL.md, or ships scripts | The files are copied; an Executor reads them when it needs them and runs nothing under skill-library::REQ-003, and the import card says so under skill-library::US-001/AC-02 |
+| An Executor asks for a path outside its skill, such as one with `..`, an absolute path, or a file of another skill or of its runtime home | Refused as a file the skill does not have, under skill-library::REQ-003: 「skill「<名称>」里没有文件 <路径>。不填 path 可以列出它的文件。」 |
+| An Executor names a skill its profile does not select | Refused, naming the skills it can read: 「本轮没有 skill「<名称>」。可以读取的 skill：<名称>、…。」 |
+| An Executor reads a binary file of its skill | Refused: 「这个文件不是文本文件，无法读取。」 |
+| An Executor reads a file longer than 100,000 characters | It gets the first 100,000 with the offset to continue from, and reads on from there; no part ends inside a character |
+| A stored version no longer holds what was imported when an Executor reads from it: a file or a folder replaced by a link, changed bytes, a removed file | Changed outside the service. The read is refused (「这个文件现在读不了。」), and the service writes `skill_file_integrity_failed:<skill ID>` to its standard error, with no path or content. Neither this nor any other refusal of the tool is audited or counts as a refused tool of the profile |
 
 ## Implementation Decisions
 
@@ -107,7 +116,14 @@ The root SKILL.md is read before anything below the folder, and only when it is 
 
 **Uses.** The profiles that select a skill are those of the current team definitions. A service that runs without dispatch has no team management, while the teams stay stored for when dispatch is enabled again; it reads the stored definitions once at start, since nothing can save a team meanwhile, and counts their profiles as uses. When it cannot read them, the uses are unknown until the next start, and it deletes no skill.
 
-**Runtime home.** Every creation of an Executor's runtime removes the three places its App Server reads the runtime's own skills from: `skills` in its Codex home, and `.agents/skills` in its HOME and in its workspace. It then writes each skill of the profile into `skills/<skill ID>/` of the Codex home and checks every written file against the manifest. The App Server only lists such a skill to the model by name and description, and an Executor has no tool that opens files of its runtime home. Each Executor turn therefore carries every written skill as a skill input item naming its SKILL.md, and the App Server puts that file's text into the turn.
+**Runtime home.** Every creation of an Executor's runtime removes the three places its App Server reads the runtime's own skills from: `skills` in its Codex home, and `.agents/skills` in its HOME and in its workspace. It then writes each skill of the profile into `skills/<skill ID>/` of the Codex home and checks every written file against the manifest. The App Server only lists such a skill to the model by name and description. Each Executor turn therefore carries every written skill as a skill input item naming its SKILL.md, and the App Server puts that file's text into the turn. The Executor reads the skill's other files through its tool, not from its runtime home.
+
+**Reading a skill's files.** `read_skill_file` takes `skill`, a skill's name or ID, an optional `path`, relative to the skill's root as the import listed it, and an optional `offset`.
+- Without a path it lists the version's files, each marked when it is a script. With one it returns the file's text, at most 100,000 characters from `offset`, counted in characters, with the offset to continue from when more remains.
+- It reads from the Skill Library's store, never from the runtime home. A path must be exactly one the version's manifest lists. The file is opened without following a link, the folder it lies in must be the version's own, and its bytes must hash to the manifest's SHA-256. A file that is not valid UTF-8 is not text.
+- A version a request names stays stored while the request can run (Version removal), so its files are there for each of its Executors.
+- It is a function without a namespace beside the Executor's host and MCP proxy tools, which every other call still goes to. A profile that selects a skill has the tool in its tool contract, so a thread started before the tool existed is not resumed for it; a profile that selects none keeps its contract and its sessions.
+- Its refusals are ordinary tool errors, which the model can correct, and are not audited.
 
 **Console API.** The page is served by the local console under [agent-console::CON-001](agent-console.md).
 - `GET /api/skills` lists the skills with their source states and uses. `POST /api/skills/read` reads a folder path, `POST /api/skills/import` imports it with the confirmed fingerprint, and `POST /api/skills/<ID>/reimport` and `POST /api/skills/<ID>/delete` act on one skill.
@@ -118,10 +134,11 @@ The root SKILL.md is read before anything below the folder, and only when it is 
 
 - **Library.** Tested at its public interface with real temporary folders: import, the missing-SKILL.md and duplicate-name errors, symbolic-link refusal, binary files, change detection, an unavailable source, versioning and deletion rules.
 - **Runtime boundary.** Inspecting the files in the created runtime home tests that the profile's skills are there in the snapshot's version, and real main records each Executor turn's input items, so a case asserts that every turn carries each of those skills. That no other skill is visible is tested on the real App Server, because what it lists also depends on the runtime's HOME and on Codex's bundled skills: the runtime's skill listing and the model request it builds, captured by a loopback fake model endpoint (`apps/weixin-service/tests/fixtures/isolated-runtime-probe.ts`), contain only the profile's skills, and naming any other skill injects nothing. The same case shows that a turn that neither names nor carries the profile's skill holds none of its SKILL.md, and that the turn as the host sends it holds it. Another opt-in case there lists the SKILL.md shapes of Implementation Decisions (what a folder holds) on the installed App Server, so a Codex upgrade shows whether the library's two refusals still match what it lists.
+- **Reading files.** The tool is tested at its public interface over a real library: listing, reading in the snapshot's version, paths outside the skill, another skill, a binary file, a long file, and a store changed by a link, by bytes or by a removed file. Real main shows that Executors whose profile selects a skill are offered the tool and read their request's version, a retry after a re-import included, that one whose profile selects none is not offered it, and that a changed store is reported on standard error. The real-model suite has an Executor follow a rule found only in a reference file that its SKILL.md points to.
 - **Console.** HTTP-boundary tests of the library API with an authorized browser, and Playwright end-to-end tests of import, re-import and delete.
 
 ## Out of Scope
 
 - Authoring, uploading or pasting skill content, including text-only skills.
 - Following symbolic links inside a skill folder.
-- An Executor reading a skill's files other than SKILL.md, or running a skill's scripts: an Executor has no host tool that reaches its runtime home, and no shell of its own. Only a tool of an MCP server that the owner attached to its profile can reach further ([mcp-catalog](mcp-catalog.md)).
+- An Executor running a skill's scripts, or changing a skill's files: its tool only reads, and it has no shell of its own. Only a tool of an MCP server that the owner attached to its profile can reach further ([mcp-catalog](mcp-catalog.md)).

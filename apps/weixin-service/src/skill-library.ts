@@ -41,6 +41,11 @@ export class SkillRefusal extends Error {
   constructor(readonly refusal: SkillRefusalKind, cause?: unknown) { super(`skill_library_${refusal.kind}`, cause === undefined ? undefined : { cause }); }
 }
 
+/** Why a stored file cannot be read: the version does not list it, or the store no longer holds what was imported. */
+export class SkillFileUnavailable extends Error {
+  constructor(readonly reason: "not_found" | "integrity") { super(`skill_file_${reason}`); }
+}
+
 export type SkillLibraryOptions = Readonly<{
   /** The library's own directory under the service's state directory; no file grant reaches it (ADR-0029). */
   directory: string;
@@ -286,6 +291,38 @@ export class SkillLibrary {
       written.push({ name: skill.name, path: fs.realpathSync(path.join(directory, ref.id, SKILL_MD)) });
     }
     return written;
+  }
+
+  /**
+   * The bytes of one file of a stored version, as an Executor reads it (skill-library::REQ-003). `file` must be a path the
+   * version's manifest lists, exactly as listed, so no other path of the store is ever opened. The file is opened without
+   * following a link, the folder it lies in must be the version's own, and the bytes must be those that were imported.
+   * Throws `SkillFileUnavailable`: `not_found` for a path the version does not list; `integrity` when the store holds anything
+   * else, which only a change made outside the service can cause.
+   */
+  readFile(ref: SkillRef, file: string): Buffer {
+    const skill = this.version(ref);
+    if (!skill) throw new SkillFileUnavailable("integrity");
+    const listed = skill.files.find(({ path: stored }) => stored === file);
+    if (!listed) throw new SkillFileUnavailable("not_found");
+    const parts = file.split("/");
+    const target = path.join(this.directory, ref.id, String(ref.version), "files", ...parts);
+    let handle: number;
+    try {
+      // The store's own folder may be reached through a link, as a temporary directory is on macOS; nothing below it may be.
+      const own = path.join(fs.realpathSync(this.directory), ref.id, String(ref.version), "files", ...parts.slice(0, -1));
+      if (fs.realpathSync(path.dirname(target)) !== own) throw new SkillFileUnavailable("integrity");
+      handle = fs.openSync(target, SOURCE_OPEN);
+    } catch (error) {
+      if (error instanceof SkillFileUnavailable) throw error;
+      throw new SkillFileUnavailable("integrity");
+    }
+    try {
+      if (!fs.fstatSync(handle).isFile()) throw new SkillFileUnavailable("integrity");
+      const content = fs.readFileSync(handle);
+      if (content.length !== listed.size || createHash("sha256").update(content).digest("hex") !== listed.sha256) throw new SkillFileUnavailable("integrity");
+      return content;
+    } finally { fs.closeSync(handle); }
   }
 
   private latest(id: string): StoredSkill | undefined {

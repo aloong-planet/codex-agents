@@ -16,6 +16,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
+import type { DynamicToolContext } from "../src/dynamic-tool-host.js";
+import { SKILL_FILE_TOOL, SkillFileToolHost } from "../src/skill-file-tool.js";
 import { frontMatter, skillKey, SkillLibrary, type SkillLibraryOptions, SkillRefusal, type SkillUse } from "../src/skill-library.js";
 
 const directories: string[] = [];
@@ -537,5 +539,115 @@ describe("SKILL.md front matter", () => {
     ["keys only in the body", "# trip-check\n\nname: trip-check\ndescription: 核对\n", {}],
   ])("reads %s", (_what, text, found) => {
     expect(frontMatter(text)).toEqual(found);
+  });
+});
+
+// An Executor reading the files of the skills its profile selects (skill-library::REQ-003), through the host tool that wraps its
+// other tools. The inner host stands for the profile's host and MCP tools, whose own rules are tested in agent-profile.test.ts and
+// mcp-proxy-tools.test.ts; here it only shows what reaches it.
+describe("an Executor reading its skills' files", () => {
+  const INNER = { definitions: () => [{ type: "namespace" as const, name: "files", description: "", tools: [{ type: "function" as const, name: "find", description: "", inputSchema: {} }] }],
+    contractHash: () => "inner-contract", grantsMcp: () => true,
+    execute: async (tool: string, _value: unknown, context?: DynamicToolContext) => ({ success: true, contentItems: [{ type: "inputText" as const, text: `inner:${context?.namespace ?? ""}.${tool}` }] }) };
+  const CONTEXT = { threadId: "thread-1", turnId: "turn-1", namespace: null };
+  /** The tool's answer, parsed: the JSON text of its one content item, with whether it succeeded. */
+  const call = async (host: SkillFileToolHost, value: unknown) => {
+    const result = await host.execute(SKILL_FILE_TOOL, value, CONTEXT);
+    return { success: result.success, ...(JSON.parse(result.contentItems[0]!.text) as Record<string, unknown>) };
+  };
+  const failure = (code: string, message: string) => ({ success: false, ok: false, error: { code, message, retryable: false } });
+  /** The library with the sample skill and another one, and a tool host for an Executor that selects the sample's first version. */
+  async function selecting() {
+    const opened = open(), reports: string[] = [];
+    const skill = await imported(opened.library, sample());
+    const other = await imported(opened.library, write(path.join(temporary("skill-source-"), "trip-check"), { "SKILL.md": skillMd("trip-check", "trip"), "references/rules.md": "trip rules\n" }));
+    const host = new SkillFileToolHost(INNER, opened.library, [skill], (code) => reports.push(code));
+    return { ...opened, skill, other, host, reports, stored: (file: string) => path.join(opened.settings.directory, skill.id, "1", "files", ...file.split("/")) };
+  }
+
+  it("is offered only to an Executor whose profile selects a skill, and leaves the contract and every other tool of one that selects none", async () => {
+    const { library, skill } = await selecting();
+    const none = new SkillFileToolHost(INNER, library, [], () => {});
+    expect(none.definitions()).toEqual(INNER.definitions());
+    expect(none.contractHash()).toBe("inner-contract");
+    expect((await none.execute(SKILL_FILE_TOOL, { skill: "patch-writer" }, CONTEXT)).contentItems[0]!.text).toBe("inner:.read_skill_file");
+
+    const some = new SkillFileToolHost(INNER, library, [skill], () => {});
+    expect(some.definitions().map(({ name }) => name)).toEqual(["files", SKILL_FILE_TOOL]);
+    expect(some.contractHash()).not.toBe("inner-contract");
+    expect((await some.execute("find", {}, { ...CONTEXT, namespace: "files" })).contentItems[0]!.text).toBe("inner:files.find");
+    expect(some.grantsMcp()).toBe(true);
+  });
+
+  it("lists and reads the files of the version its request was admitted with, scripts as text, by the skill's name or ID", async () => {
+    const { library, skill, host } = await selecting();
+    fs.writeFileSync(path.join(skill.source, "references", "testing.md"), "# Testing v2\n");
+    const second = await library.reimport(skill.id, ((await library.compare(skill.id)) as { fingerprint: string }).fingerprint, BROWSER);
+
+    const listed = await call(host, { skill: "patch-writer" });
+    expect(listed).toEqual({ success: true, skill: "patch-writer", files: SAMPLE_PATHS.map((file) => ({ path: file, script: ["bin/tool", "check-patch.mjs", "scripts/data.txt", "tools/run"].includes(file) })) });
+    expect(await call(host, { skill: "patch-writer", path: "references/testing.md" })).toEqual({ success: true, skill: "patch-writer", path: "references/testing.md", offset: 0, text: "# Testing\n" });
+    expect(await call(host, { skill: skill.id, path: "check-patch.mjs" })).toMatchObject({ success: true, text: "export const check = () => true;\n" });
+    const later = new SkillFileToolHost(INNER, library, [second], () => {});
+    expect(await call(later, { skill: "patch-writer", path: "references/testing.md" })).toMatchObject({ success: true, text: "# Testing v2\n" });
+  });
+
+  it.each([
+    ["a path that leaves the skill", (other: string) => ({ skill: "patch-writer", path: `../../../${other}/1/files/SKILL.md` }), "skill_file_not_found"],
+    ["another skill's stored file by its full path", (other: string, directory: string) => ({ skill: "patch-writer", path: path.join(directory, other, "1", "files", "SKILL.md") }), "skill_file_not_found"],
+    ["a file the skill does not have", () => ({ skill: "patch-writer", path: "references/missing.md" }), "skill_file_not_found"],
+    ["a skill of the library the profile does not select", () => ({ skill: "trip-check", path: "references/rules.md" }), "skill_unknown"],
+    ["the ID of a skill the profile does not select", (other: string) => ({ skill: other, path: "references/rules.md" }), "skill_unknown"],
+    ["arguments without a skill", () => ({ path: "SKILL.md" }), "skill_file_arguments_invalid"],
+  ])("refuses %s, as an ordinary tool error", async (_what, value, code) => {
+    const { other, host, reports, settings } = await selecting();
+    const result = await call(host, value(other.id, settings.directory));
+    expect(result).toMatchObject({ success: false, error: { code } });
+    expect(result).not.toHaveProperty("text");
+    expect(reports).toEqual([]);
+  });
+
+  it("tells the model which skills it can read when it names another, and how to list a skill's files when the path is wrong", async () => {
+    const { host } = await selecting();
+    expect(await call(host, { skill: "trip-check" })).toEqual(failure("skill_unknown", "本轮没有 skill「trip-check」。可以读取的 skill：patch-writer。"));
+    expect(await call(host, { skill: "patch-writer", path: "references/missing.md" })).toEqual(failure("skill_file_not_found", "skill「patch-writer」里没有文件 references/missing.md。不填 path 可以列出它的文件。"));
+  });
+
+  it.each([
+    ["a stored file replaced by a link to an outside file with the same content", (stored: (file: string) => string, outside: string) => {
+      fs.writeFileSync(path.join(outside, "testing.md"), "# Testing\n");
+      fs.rmSync(stored("references/testing.md"));
+      fs.symlinkSync(path.join(outside, "testing.md"), stored("references/testing.md"));
+    }],
+    ["a stored folder replaced by a link to an outside folder with the same file", (stored: (file: string) => string, outside: string) => {
+      fs.writeFileSync(path.join(outside, "testing.md"), "# Testing\n");
+      fs.rmSync(stored("references"), { recursive: true });
+      fs.symlinkSync(outside, stored("references"));
+    }],
+    ["a stored file whose bytes changed", (stored: (file: string) => string) => fs.writeFileSync(stored("references/testing.md"), "# Tampered\n")],
+    ["a stored file that was removed", (stored: (file: string) => string) => fs.rmSync(stored("references/testing.md"))],
+  ])("refuses %s and reports the skill's store as changed outside the service, without the path", async (_what, change) => {
+    const { skill, host, reports, stored } = await selecting();
+    change(stored, temporary("skill-outside-"));
+    expect(await call(host, { skill: "patch-writer", path: "references/testing.md" })).toEqual(failure("skill_file_unavailable", "这个文件现在读不了。"));
+    expect(reports).toEqual([`skill_file_integrity_failed:${skill.id}`]);
+  });
+
+  it("refuses a file that is not text", async () => {
+    const { host, reports } = await selecting();
+    expect(await call(host, { skill: "patch-writer", path: "vendor/blob.bin" })).toEqual(failure("skill_file_not_text", "这个文件不是文本文件，无法读取。"));
+    expect(reports).toEqual([]);
+  });
+
+  it("returns a long file 100,000 characters at a time, never splitting one, and says where to go on", async () => {
+    const { library } = open();
+    const long = `${"a".repeat(99_999)}𝄞bcdef`;
+    const skill = await imported(library, write(path.join(temporary("skill-source-"), "long-read"), { "SKILL.md": skillMd("long-read", "long"), "references/long.md": long }));
+    const host = new SkillFileToolHost(INNER, library, [skill], () => {});
+    const first = await call(host, { skill: "long-read", path: "references/long.md" });
+    expect(first).toEqual({ success: true, skill: "long-read", path: "references/long.md", offset: 0, text: `${"a".repeat(99_999)}𝄞`, nextOffset: 100_000,
+      note: "文件还有 5 个字符没有读，用 offset=100000 继续读取。" });
+    expect(await call(host, { skill: "long-read", path: "references/long.md", offset: 100_000 })).toEqual({ success: true, skill: "long-read", path: "references/long.md", offset: 100_000, text: "bcdef" });
+    expect(await call(host, { skill: "long-read", path: "references/long.md", offset: 100_006 })).toEqual(failure("skill_file_offset_invalid", "offset 超出了文件长度（共 100005 个字符）。"));
   });
 });
