@@ -23,6 +23,9 @@ import { conversation } from "./support/dispatch-runtime.js";
 // Gap: a storage failure inside a cross-team closing that runs while other Executors still run is reported, and the request's own
 // close closes that team again, instead of failing the attempt. No case shows it, for the same lack of a storage seam; a failed
 // closing turn is covered, because the closing turn's own fallback catches it. Code review covers it (ticket 08, R-3).
+// Not driven, by decision: the cancel of a queued or proposed request, and a cancel recovered at a start, are recorded before the
+// request's choices are closed, so a stop between the two leaves them open and no later start closes them (agent-dispatch
+// Implementation Decisions). No case pins that outcome.
 const agents: DispatchAgent[] = [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
   { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" },
   { id: "bill", name: "Bill", responsibility: "衣食住行", senderAccountId: "cli_bill" }, { id: "jack", name: "Jack", responsibility: "技术", senderAccountId: "cli_jack" }];
@@ -894,8 +897,39 @@ it("takes a waiting request's cancel again at the next start when a stop fell be
     await vi.waitFor(() => expect(messages(after)).toEqual(["已停止继续处理。已经完成的操作不会自动撤销。"]), { timeout: 2000, interval: 10 });
     expect(closed).toEqual(["one"]);
     expect(second.getState().jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
-  // The abandoned first instance is released whatever the outcome, so that closing it cannot hang.
-  } finally { hung.reject(new Error("abandoned")); }
+  // The abandoned first instance is closed and released whatever the outcome, so it writes nothing more and its close cannot hang.
+  } finally { const stopped = first.close(); hung.reject(new Error("abandoned")); await stopped; }
+});
+
+it("takes a waiting request's supplement again at the next start when a stop fell between closing its choice and recording the supplement", async () => {
+  const state = directory();
+  const hung = deferred<never>();
+  let runs = 0;
+  const executor: DispatchExecutor = { run: async () => {
+    runs += 1;
+    return runs === 1 ? { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" } : { status: "completed", message: "已按补充处理。" };
+  }, close: () => {} };
+  let closing = false;
+  const first = dispatchWith(state, closingLeader(), executor, [], { closeChoices: () => { closing = true; return hung.promise; } });
+  try {
+    await first.start();
+    first.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(first.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    first.admit(event("two", "supplement:one"));
+    // The process stops while the host is still closing the choice: the supplement is not recorded yet.
+    await vi.waitFor(() => expect(closing).toBe(true), { timeout: 2000, interval: 10 });
+    expect(first.getState().jobs[0]).toMatchObject({ status: "waiting", attempt: 0, assignments: [{ status: "waiting" }] });
+
+    const closed: string[] = [];
+    const after: Array<{ sender: string; message: string; id: string }> = [];
+    const second = dispatchWith(state, closingLeader(), executor, after, { closeChoices: async (job) => { closed.push(job.id); } });
+    await second.start();
+    await vi.waitFor(() => expect(second.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+    expect(closed).toEqual(["one"]);
+    expect(second.getState().jobs[0]).toMatchObject({ attempt: 1, assignments: [{ status: "completed", attempt: 1 }] });
+    expect(messages(after)).toEqual([start(1), "LEADER_CLOSING_1"]);
+  // The abandoned first instance is closed and released whatever the outcome, so it writes nothing more and its close cannot hang.
+  } finally { const stopped = first.close(); hung.reject(new Error("abandoned")); await stopped; }
 });
 
 it("has a request's choices closed at the next start when a stop cut off its cancel", async () => {
@@ -920,8 +954,8 @@ it("has a request's choices closed at the next start when a stop cut off its can
     expect(asked).toEqual(["one"]);
     await vi.waitFor(() => expect(messages(after)).toEqual([STOPPED_TWO]), { timeout: 2000, interval: 10 });
     expect(second.getState().jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }, { status: "cancelled" }] });
-  // The abandoned first instance is released whatever the outcome, so that closing it cannot hang.
-  } finally { hung.reject(new Error("abandoned")); }
+  // The abandoned first instance is closed and released whatever the outcome, so it writes nothing more and its close cannot hang.
+  } finally { const stopped = first.close(); hung.reject(new Error("abandoned")); await stopped; }
 });
 
 // Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-02, US-003/AC-04, REQ-007/AC-03, AC-04, REQ-008/AC-01).

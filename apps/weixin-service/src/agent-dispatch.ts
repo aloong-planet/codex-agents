@@ -980,7 +980,8 @@ export class AgentDispatch {
   /**
    * Has the host close the choices the request's Executors left open (agent-dispatch::REQ-007/AC-03). A choice that cannot be
    * closed stops nothing: the failure is reported. The host then still acts on an answer to that choice before it hands the
-   * result over; where pending answers are taken in, only the request and its Assignments are kept as they are.
+   * result over. Where pending answers are taken in, a request that is cancelled, or is being cancelled, and its Assignments
+   * are kept as they are; a request that goes on after a supplement is not, and takes the choice's result.
    */
   private async closeChoices(job: DispatchJob): Promise<void> {
     try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
