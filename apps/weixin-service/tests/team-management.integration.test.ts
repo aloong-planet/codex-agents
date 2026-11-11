@@ -442,9 +442,9 @@ it("counts each team's active Assignments in the team view", async () => {
 
 // Dispatcher decision R5 (2026-11-08): a failed credentials check never moves an accepting team out of accepting, because a check
 // outcome must not change routing by itself. While the team's application cannot post, the owner sees 需处理 on the page; the
-// request fails, and its failure report goes through the same application (agent-dispatch::REQ-008/AC-04: no other identity),
-// so nothing reaches the requester in the group.
-it("keeps a team accepting work when its replaced secret fails the check, and reports nothing through another identity", async () => {
+// request fails, and its failure report goes through the same application, which refuses it too. The requester sees Sam's one
+// sentence for a rejected start message, the only post another identity makes for a team (agent-dispatch::REQ-008/AC-04).
+it("keeps a team accepting work when its replaced secret fails the check, and only Sam's sentence that the attempt has not started reaches the group", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-secret-failed-"));
   let running: Running | undefined;
   try {
@@ -460,7 +460,8 @@ it("keeps a team accepting work when its replaced secret fails the check, and re
     const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
     console.log(JSON.stringify({ kind: "team_secret_failed", command: "请帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
     expect(failed.agentDispatch?.jobs[0]?.result).toBe("接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。");
-    expect([failed.agentFixtureOutboxes?.bill?.text, failed.fixtureTextOutbox, failed.fixtureModelRequests ?? []]).toEqual([[], [], []]);
+    expect([failed.agentFixtureOutboxes?.bill?.text, failed.fixtureTextOutbox?.map(({ message }) => message), failed.fixtureModelRequests ?? []])
+      .toEqual([[], ["Bill 队的接单通知未能发出，本次尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。"], []]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 

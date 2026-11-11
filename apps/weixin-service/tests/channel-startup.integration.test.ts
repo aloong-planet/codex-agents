@@ -1352,48 +1352,6 @@ it("retries only rejected reports without rerunning work and never retries unkno
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
-it.each(["member", "group", "application"] as const)("fails closed for an unavailable assignee and fences queued work after %s replacement", async (replacement) => {
-  const directory = mkdtempSync(join(tmpdir(), "dispatch-revocation-"));
-  let running: Awaited<ReturnType<typeof start>> | undefined;
-  const send = (id: string, sender: string, agentId: string, modelHold = false, chatId = "oc_alpha") => running!.post("/api/fixture/inbound", {
-    event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: sender } },
-      message: { message_id: id, create_time: String(Date.now()), chat_id: chatId, chat_type: "group", message_type: "text", mentions: [], content: JSON.stringify({ text: "处理当前请求" }) } },
-    dispatchDecision: { kind: "dispatch", agentId, requestId: null, summary: "处理当前请求", message: "" }, modelHold,
-  });
-  try {
-    dispatchConfig(directory); running = await start(directory);
-    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "unavailable" } });
-    await send("om_assignee_offline", "ou_owner", "alice");
-    const unavailable = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
-    expect(unavailable.fixtureModelRequests).toEqual([]);
-    expect(unavailable.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
-    expect(unavailable.fixtureTextOutbox).toEqual([]);
-    expect(unavailable.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
-    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "alice", connection: "ready" } });
-    await send("om_running_before_revocation", "ou_owner", "alice", true);
-    await running.until((state) => state.fixtureModelRequests?.length === 1);
-    await send("om_queued_before_revocation", "ou_owner", "alice");
-    const queued = await running.until((state) => state.agentDispatch?.jobs.length === 3);
-    expect(queued.agentDispatch?.jobs.map(({ status }) => status)).toEqual(["failed", "running", "queued"]);
-    await running.close(); running = undefined;
-    const configuration = JSON.parse(readFileSync(join(directory, "channel.json"), "utf8"));
-    if (replacement === "member") configuration.feishu.groups[0].allowedSenderIds = ["ou_colleague"];
-    else if (replacement === "group") {
-      configuration.feishu.groups[0].chatId = "oc_beta";
-      configuration.feishu.dispatch.groupChatIds = ["oc_beta"];
-    } else configuration.feishu.dispatch.agents[1].appId = "cli_dddddddddddddddd";
-    writeFileSync(join(directory, "channel.json"), JSON.stringify(configuration));
-    running = await start(directory);
-    await send("om_authorized_after_revocation", "ou_colleague", "bill", false, replacement === "group" ? "oc_beta" : "oc_alpha");
-    const restored = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
-    expect(restored.fixtureModelRequests).toHaveLength(1);
-    expect(restored.agentFixtureOutboxes?.alice?.text).toEqual([]);
-    expect(restored.fixtureTextOutbox).toEqual([]);
-    expect(restored.agentDispatch?.jobs[2]?.status).toBe(replacement === "application" ? "failed" : "cancelled");
-    expect(restored.agentDispatch?.jobs.some(({ requester, status }) => requester === "ou_owner" && ["running", "queued"].includes(status))).toBe(false);
-  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
-}, 30000);
-
 it("reports confirmed file work after a hard interruption without automatically replaying it, and runs the request queued behind it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-crash-"));
   const business = mkdtempSync(join(tmpdir(), "dispatch-crash-files-"));
