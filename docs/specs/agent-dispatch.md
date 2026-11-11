@@ -6,6 +6,7 @@
 > - Each agent sees only its own scope and, for Team Leaders, the group's Team Directory (ticket 06).
 > - Teams are edited from the console's team management page and apply without a restart (ticket 11).
 > - Each Executor's runtime loads the skills its profile selects from the [Skill Library](skill-library.md), in its request's versions, and its Team Leader is told them.
+> - Each Executor is offered the proxy tools of the [MCP Catalog](mcp-catalog.md) servers its profile attaches, every call is checked again, and its Team Leader is told what those servers give.
 > - Cross-team work goes through the Coordinator (ticket 08).
 > - Dispatch groups are chosen on the console's team management page and apply at the next start; a configuration that lists only groups takes the teams from the registry, and starts with the Coordinator alone when there is none. The Coordinator follows `feishu.appId`, so a re-paired application becomes Sam's at the next start (ticket 32).
 > - The console's team overview shows each dispatch group's organization, its requests' records and the group memory, read-only ([agent console](agent-console.md); ticket 10).
@@ -364,7 +365,7 @@ Assignments that are already stored keep running, and their own Team Leader clos
 
 - the instructions;
 - the host-tool view (the profile allowlist intersected with module permissions);
-- the MCP proxy tools;
+- the MCP servers whose proxy tools an Executor is offered;
 - the skills;
 - the memory scope.
 
@@ -403,7 +404,7 @@ It places each part with one of those teams or with none, and writes a summary f
 - **What its Executors can do.** A plan turn and a supplement turn list, for each preset, what an Executor created from it can do when the turn starts (agent-dispatch::REQ-011/AC-01):
   - One phrase names each host tool that the preset allows in the request's definitions version and still allows in the current definitions, and whose module-permission gate is granted. The gates are those of the team page's effective tools ([team management](team-management.md) Implementation Decisions). A phrase says what the tool does and, for a file tool or a send, where, such as 「在授权目录里保存新文件或覆盖已有文件」 and 「把授权目录里的文件发到本群」.
   - A preset that the current definitions no longer hold keeps no host tool.
-  - One phrase names each MCP server that the preset attaches in the request's definitions version and still attaches in the current definitions, and that provides a tool at that turn ([mcp-catalog::REQ-003/AC-02](mcp-catalog.md)): 「通过 MCP 服务器「<server>」：<tool>（<description>）、…」. It names each provided tool by its own name with the first 80 characters of its description, at most 20 tools, and then ends with 「 等 <n> 个工具」 for the server's n provided tools. These phrases follow the host tools.
+  - One phrase names each MCP server that the preset attaches in the request's definitions version and still attaches in the current definitions, and that provides a tool at that turn ([mcp-catalog::REQ-003/AC-02](mcp-catalog.md)): 「通过 MCP 服务器「<server>」：<tool>（<description>）、…」. It names each provided tool by its own name, followed by its description with each run of white space as one space; a description longer than 80 characters is cut to 80 and ends with 「…」, and a tool without one is named alone. It names at most 20 tools; the phrase of a server that provides more ends with 「 等 <n> 个工具」 for its n provided tools. These phrases follow the host tools.
   - 「联网搜索」 follows the host tools and the MCP servers, because every Executor's runtime searches the web.
   - Each skill the preset selects in the request's definitions version comes last, as 「技能「<name>」：<description>」, with the name and description of that version; a description longer than 200 characters is cut to 200 and ends with 「…」.
 

@@ -57,6 +57,8 @@ Threads saved before this change keep the old tool list in their history and sen
 
 This closing of the tool surface applies to isolated runtimes. The private App Servers that run in the owner's own Codex home keep the owner's Codex tool surface by design: the main conversation, the pending responder and the private memory curator.
 
+2026-11-11 follow-up: an Executor's runtime is also offered the proxy tools of the MCP servers its profile attaches, as [ADR-0027](0027-bind-host-enforced-agent-profiles.md) provides; the [MCP catalog](../specs/mcp-catalog.md) spec says how they are offered and checked.
+
 ## Private-target extension
 
 [ADR-0029](0029-keep-service-state-outside-every-file-grant.md) applies the protected internal-state set of this decision to the owner's private chats as well. File grants in a private chat no longer reach service state, configuration, the private Codex home or the files isolated runtimes load. The other private semantics above are unchanged.

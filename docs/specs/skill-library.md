@@ -124,4 +124,4 @@ The root SKILL.md is read before anything below the folder, and only when it is 
 
 - Authoring, uploading or pasting skill content, including text-only skills.
 - Following symbolic links inside a skill folder.
-- An Executor reading a skill's files other than SKILL.md, or running a skill's scripts: an Executor has no tool that reaches its runtime home, and runs no command.
+- An Executor reading a skill's files other than SKILL.md, or running a skill's scripts: an Executor has no host tool that reaches its runtime home, and no shell of its own. Only a tool of an MCP server that the owner attached to its profile can reach further ([mcp-catalog](mcp-catalog.md)).
