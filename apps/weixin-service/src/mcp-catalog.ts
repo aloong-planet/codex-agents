@@ -23,7 +23,7 @@ import {
   normalizeHttp,
   normalizeStdio,
   normalizeTimeout,
-  offeredToolNames,
+  offeredToolName,
   pinDiff,
   pinOf,
   redactDeep,
@@ -188,9 +188,9 @@ export type McpActor = { browser?: ConsoleBrowser };
  */
 export type McpRefusal = "server_unknown" | "server_disabled" | "tool_disabled" | "tool_unknown" | "needs_user" | "pending_review" | "unavailable";
 
-/** A tool call the catalog refuses; the message is the reason in the owner's words. */
+/** A tool call the catalog refuses; the message is the reason in the owner's words. `tool` is the tool's own name when the call named a listed tool, else the name as called. */
 export class McpCallRefused extends Error {
-  constructor(message: string, readonly reason: McpRefusal) { super(message); }
+  constructor(message: string, readonly reason: McpRefusal, readonly tool: string) { super(message); }
 }
 
 /** A forwarded call that got no result: no answer within the server's timeout (`timedOut`), or a failed request. The message holds none of the server's saved secrets. */
@@ -536,18 +536,20 @@ export class McpCatalog {
 
   /**
    * The proxy tools that may be provided now: enabled servers' enabled, reviewed tools that need no person; with
-   * `only`, those of that server.
+   * `only`, those of that server. `offered` is the name a runtime is offered the tool under (`offeredToolName`). When two
+   * tools of a server would be offered under one name, only the one that `call` reaches by that name is provided.
    */
-  toolsFor(only?: string): Array<{ name: string; server: string; tool: string; description: string; inputSchema: unknown }> {
-    return this.servers.filter((server) => server.enabled && (only === undefined || server.name === only)).flatMap((server) =>
-      (this.connections.get(server.name)?.tools ?? [])
-        .filter((tool) => this.statusOf(server, tool).usable)
-        .map((tool) => ({ name: proxyName(server.name, tool.name), server: server.name, tool: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema ?? { type: "object" } })));
+  toolsFor(only?: string): Array<{ name: string; server: string; tool: string; offered: string; description: string; inputSchema: unknown }> {
+    return this.servers.filter((server) => server.enabled && (only === undefined || server.name === only)).flatMap((server) => {
+      const listed = this.connections.get(server.name)?.tools ?? [];
+      return listed.filter((tool) => this.statusOf(server, tool).usable && this.resolve(listed, offeredToolName(tool.name)) === tool)
+        .map((tool) => ({ name: proxyName(server.name, tool.name), server: server.name, tool: tool.name, offered: offeredToolName(tool.name), description: tool.description ?? "", inputSchema: tool.inputSchema ?? { type: "object" } }));
+    });
   }
 
-  /** The name a runtime is offered for each tool the server lists now, usable or not, by the tool's own name (`offeredToolNames`). */
-  offeredNames(name: string): Map<string, string> {
-    return offeredToolNames((this.connections.get(name)?.tools ?? []).map((tool) => tool.name));
+  /** The listed tool a call's name stands for: the tool of that name, else the first one offered under it. */
+  private resolve(listed: ToolDefinition[], name: string): ToolDefinition | undefined {
+    return listed.find((tool) => tool.name === name) ?? listed.find((tool) => offeredToolName(tool.name) === name);
   }
 
   /**
@@ -555,22 +557,29 @@ export class McpCatalog {
    * an unreviewed definition or a tool that needs a person is refused (mcp-catalog::US-004/AC-01, AC-03, AC-04). The
    * call is bounded by the server's timeout. Every string it returns, and the message of a failure, has the server's
    * saved secrets of 6 characters or more replaced by `***`, so that no agent sees them (mcp-catalog::REQ-003/AC-01).
+   *
+   * `called` is the tool's own name or the name a runtime was offered it under. The tool it stands for is looked up
+   * once the server is connected, among the tools the server lists then: a thread may call a name it was offered
+   * before the server's program, or the service, started again.
    */
-  async call(name: string, toolName: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean; structuredContent?: unknown }> {
+  async call(name: string, called: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean; structuredContent?: unknown }> {
     const server = this.find(name);
-    if (!server) throw new McpCallRefused(`没有名为 ${name} 的 MCP 服务器`, "server_unknown");
-    if (!server.enabled) throw new McpCallRefused(`MCP 服务器 ${server.name} 已停用`, "server_disabled");
-    if (server.disabledTools.includes(toolName)) throw new McpCallRefused("该工具已停用", "tool_disabled");
+    if (!server) throw new McpCallRefused(`没有名为 ${name} 的 MCP 服务器`, "server_unknown", called);
+    if (!server.enabled) throw new McpCallRefused(`MCP 服务器 ${server.name} 已停用`, "server_disabled", called);
+    // A disabled tool called by its own name is refused without starting the server's program for it.
+    if (server.disabledTools.includes(called)) throw new McpCallRefused("该工具已停用", "tool_disabled", called);
     let connection = this.connections.get(server.name);
     if (connection?.state === "connecting" && connection.pending) await connection.pending.catch(() => {});
     else if (!connection?.client) await this.connect(server.name).catch(() => {});
     connection = this.connections.get(server.name);
-    if (!connection?.client) throw new McpCallRefused(`MCP 服务器 ${server.name} 无法连接：${connection?.error ?? "未连接"}`, "unavailable");
-    const tool = connection.tools.find((item) => item.name === toolName);
-    if (!tool) throw new McpCallRefused("服务器当前的工具列表中没有它", "tool_unknown");
+    if (!connection?.client) throw new McpCallRefused(`MCP 服务器 ${server.name} 无法连接：${connection?.error ?? "未连接"}`, "unavailable", called);
+    const tool = this.resolve(connection.tools, called);
+    if (!tool) throw new McpCallRefused("服务器当前的工具列表中没有它", "tool_unknown", called);
+    const toolName = tool.name;
+    if (server.disabledTools.includes(toolName)) throw new McpCallRefused("该工具已停用", "tool_disabled", toolName);
     const status = this.statusOf(server, tool);
-    if (status.needsUser) throw new McpCallRefused("服务器要求每次调用都由人确认，不提供这类工具", "needs_user");
-    if (status.pending) throw new McpCallRefused(`该工具${status.pending === "new" ? "是新增的" : "的定义有变化"}，等待复核`, "pending_review");
+    if (status.needsUser) throw new McpCallRefused("服务器要求每次调用都由人确认，不提供这类工具", "needs_user", toolName);
+    if (status.pending) throw new McpCallRefused(`该工具${status.pending === "new" ? "是新增的" : "的定义有变化"}，等待复核`, "pending_review", toolName);
     const generation = connection.generation;
     const secrets = this.secretValues(server.name);
     const result = await connection.client.callTool({ name: toolName, arguments: args }, { timeout: server.timeout * 1000 }).catch((error: unknown) => {

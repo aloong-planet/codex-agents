@@ -14,7 +14,7 @@
 // `write_file` (for the sandbox case).
 //
 // An extra tool answers `called <name>`, unless its `_meta` asks for more: `test/answer` is the text it answers instead;
-// `test/delayMs` waits that long first;
+// `test/delayMs` waits that long first; `test/image` answers with an image block before the text;
 // `test/structuredToken` also returns the SECRET_TOKEN in structured content, as a value, inside a list and as a key;
 // `test/failWithToken` fails the request with a message that holds the SECRET_TOKEN.
 import fs from "node:fs";
@@ -84,6 +84,7 @@ server.setRequestHandler("tools/call", async (request) => {
         if (meta["test/delayMs"]) await delay(meta["test/delayMs"]);
         if (meta["test/failWithToken"]) throw Object.assign(new Error(`upstream refused the token ${token}`), { rpc: true });
         if (meta["test/structuredToken"]) return { ...text(`token ${token}`), structuredContent: { token, nested: { headers: [`Bearer ${token}`], count: 2 }, [token]: "by key" } };
+        if (meta["test/image"]) return { content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }, { type: "text", text: `called ${name}` }] };
         return text(typeof meta["test/answer"] === "string" ? meta["test/answer"] : `called ${name}`);
       }
     }

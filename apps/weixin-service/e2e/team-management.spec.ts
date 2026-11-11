@@ -5,6 +5,7 @@ import { expect, type Locator, type Page, type TestInfo } from "@playwright/test
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
+import { post, read, registerMcpServer } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // 团队管理 (docs/specs/team-management.md) in a real browser, against the fixture service with Feishu dispatch and the fake
@@ -32,12 +33,6 @@ const dispatchChannel = { channel: "feishu", owner, taskScope: { accountId: "fix
 const GROUP_NAMES = { chats: { oc_alpha: { name: "银河护卫队" }, oc_beta: { name: "产品讨论组" } } };
 
 type Server = { url: string; cookie: string; directory: string };
-async function post(server: Server, pathname: string, body: unknown) {
-  const response = await fetch(`${server.url}${pathname}`, { method: "POST", headers: { cookie: server.cookie, origin: server.url, "content-type": "application/json" }, body: JSON.stringify(body) });
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${pathname} ${response.status}: ${text}`);
-  return JSON.parse(text) as Record<string, unknown>;
-}
 /** Sets the fake onboarding platform's answers, as Feishu would give them. A group's answers replace its whole entry, name included. */
 const onboarding = (server: Server, control: unknown) => post(server, "/api/fixture/inbound", { onboardingControl: control });
 const editor = (page: Page) => page.locator("[data-editor]");
@@ -51,7 +46,6 @@ type TeamsView = { version: number; teams: Array<{ id: string; teamName: string;
   profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string; removal?: Removal }> }> };
 type ServiceState = { agentDispatch?: { jobs: Array<{ id: string; status: string; assignments: Array<{ teamId: string; status: string }> }> }; fixtureModelRequests?: unknown[]; channels?: { feishu?: { ready?: boolean } };
   workflowModulePermissions?: { modules: Array<{ moduleId: string; revision: number; scopes: Array<{ scopeId: string }> }> } };
-const read = async <T>(server: Server, pathname: string) => await (await fetch(`${server.url}${pathname}`, { headers: { cookie: server.cookie } })).json() as T;
 const serviceState = (server: Server) => read<ServiceState>(server, "/api/state");
 const jobStatuses = async (server: Server) => (await serviceState(server)).agentDispatch?.jobs.map(({ status }) => status);
 /** The fixture Coordinator's decision to dispatch a request to `agentId`. */
@@ -251,13 +245,10 @@ test.describe("with Feishu dispatch", () => {
   // team-management::US-003/AC-03, AC-04. The catalog holds an enabled server and a disabled one; only the card's confirmation
   // puts the server into the team's draft, and only the save attaches or unbinds it.
   test("lists the enabled servers a profile does not attach under 绑定 MCP, attaches one only from its confirmation card and the save, and unbinds it", async ({ page, fixtureServer }, testInfo) => {
-    const register = async (name: string, extra: Record<string, unknown> = {}) => {
+    const register = (name: string, extra: Record<string, unknown> = {}) => {
       const files = testServerFiles(fixtureServer.directory, name);
       writeTools(files.tools, [{ name: "route_plan", description: "Plans a route.", inputSchema: { type: "object" } }]);
-      const server = { name, command: process.execPath, args: testServerArgs(files), ...extra };
-      const { launchLine } = await post(fixtureServer, "/api/mcp/preview", { server });
-      await post(fixtureServer, "/api/mcp/servers", { server, confirmed: launchLine });
-      return launchLine as string;
+      return registerMcpServer(fixtureServer, { name, command: process.execPath, args: testServerArgs(files), ...extra });
     };
     const line = await register("amap");
     await register("spare", { enabled: false });

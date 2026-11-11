@@ -261,8 +261,11 @@ export function needsConfirmation(previous: ServerTarget | undefined, next: Serv
 /** Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors and logs. */
 export function redactSecrets(text: string, secrets: Iterable<string>): string {
   let out = text;
-  const longestFirst = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH).sort((a, b) => b.length - a.length);
-  for (const secret of longestFirst) out = out.split(secret).join("***");
+  // A secret is also masked as JSON writes it, with its quotes, backslashes and control characters escaped: a program
+  // or a tool often returns its values inside JSON text.
+  const forms = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH).flatMap((secret) => [secret, JSON.stringify(secret).slice(1, -1)]);
+  const longestFirst = [...new Set(forms)].sort((a, b) => b.length - a.length);
+  for (const form of longestFirst) out = out.split(form).join("***");
   return out;
 }
 
@@ -308,25 +311,19 @@ export function pinDiff(pinned: Pin, tool: ToolDefinition): { changed: PinPart[]
 }
 
 /** Delay before automatic retry number `failures + 1`: from 30 s, doubling, at most 10 minutes. */
-/** A function name the Responses API takes: letters, digits, `_` and `-`, at most 64 characters. */
+/** A function name the model provider takes: letters, digits, `_` and `-`, at most 64 characters. */
 const OFFERED_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * The name a runtime is offered for each tool of one server, by the tool's own name. A name the Responses API takes is
- * offered as it is. In any other name, every other character becomes `_`; when the result repeats another tool's offered
- * name, or the name is longer than 64 characters, it is cut to 55 characters and ends with `_` and the first 8 hex
- * characters of the name's SHA-256. The App Server refuses a thread that is offered a tool with any other kind of name.
+ * The name a runtime is offered for a tool, from the tool's own name alone. A name the model provider takes is offered as
+ * it is. Any other name is offered with every other character as `_`, cut to 55 characters, followed by `_` and the first 8
+ * hex characters of the name's SHA-256. The App Server refuses a thread that is offered a tool with any other kind of
+ * name. A thread keeps the names it was offered when it started, also across a restart of the server's program or of the
+ * service, so the offered name must not depend on what else the server lists.
  */
-export function offeredToolNames(tools: readonly string[]): Map<string, string> {
-  const plain = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, "_");
-  const uses = new Map<string, number>();
-  for (const tool of new Set(tools)) uses.set(plain(tool), (uses.get(plain(tool)) ?? 0) + 1);
-  return new Map(tools.map((tool) => {
-    if (OFFERED_NAME.test(tool)) return [tool, tool];
-    const candidate = plain(tool);
-    return [tool, OFFERED_NAME.test(candidate) && uses.get(candidate) === 1 ? candidate
-      : `${candidate.slice(0, 55)}_${createHash("sha256").update(tool).digest("hex").slice(0, 8)}`];
-  }));
+export function offeredToolName(tool: string): string {
+  if (OFFERED_NAME.test(tool)) return tool;
+  return `${tool.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 55)}_${createHash("sha256").update(tool).digest("hex").slice(0, 8)}`;
 }
 
 const SCHEMA_MAPS = ["properties", "$defs", "definitions", "patternProperties"];

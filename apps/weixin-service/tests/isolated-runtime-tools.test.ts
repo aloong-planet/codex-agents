@@ -256,8 +256,11 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
     try {
       const files = testServerFiles(state, "amap");
       // A dotted name and a tuple written as a list in `items`: forms real servers use and the App Server refuses as they are.
+      // `optional` holds forms that are offered as the server gave them: an optional value as a union with null (as Python
+      // servers write it), a property whose only type is null, and a type name that JSON Schema does not have.
       writeTools(files.tools, [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
-        { name: "drag", description: "Drags.", inputSchema: { type: "object", properties: { from: { type: "array", items: [{ type: "number" }, { type: "number" }] } } } }]);
+        { name: "drag", description: "Drags.", inputSchema: { type: "object", properties: { from: { type: "array", items: [{ type: "number" }, { type: "number" }] } } } },
+        { name: "optional", description: "Takes optional values.", inputSchema: { type: "object", properties: { a: { anyOf: [{ type: "string" }, { type: "null" }] }, b: { type: "null" }, c: { type: "any" } } } }]);
       const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
       catalog.register(server, { confirmed: catalog.preview(server).launchLine, actor: {} });
       await vi.waitFor(() => expect(catalog.viewServer("amap").state).toBe("connected"), { timeout: processWaitLimitMs, interval: 50 });
@@ -273,12 +276,12 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
         if (served) return [assistantMessage("fake-model-reply")];
         served = true;
         return [{ type: "function_call", call_id: "mcp-write", name: "write_file", namespace: "mcp-amap", arguments: JSON.stringify({ path: written, text: "from the runtime" }) },
-          { type: "function_call", call_id: "mcp-dotted", name: "admin_tools_list", namespace: "mcp-amap", arguments: "{}" }];
+          { type: "function_call", call_id: "mcp-dotted", name: "admin_tools_list_ce33de31", namespace: "mcp-amap", arguments: "{}" }];
       });
       const from = model.requests.length;
       await conversation.reply(threadId, "use the server");
       const requests = model.modelRequestsSince(from);
-      expect(toolSurface(requests[0]!).additional.at(-1)).toEqual([...granted(), "mcp-amap.env", "mcp-amap.whoami", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.admin_tools_list", "mcp-amap.drag"].sort());
+      expect(toolSurface(requests[0]!).additional.at(-1)).toEqual([...granted(), "mcp-amap.env", "mcp-amap.whoami", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.admin_tools_list_ce33de31", "mcp-amap.drag", "mcp-amap.optional"].sort());
       expect(fs.readFileSync(written, "utf8")).toBe("from the runtime");
       const answered = outputs(requests.find((request) => "mcp-write" in outputs(request))!);
       expect([JSON.parse(answered["mcp-write"]!), JSON.parse(answered["mcp-dotted"]!)]).toEqual([{ text: "written" }, { text: "called admin.tools.list" }]);

@@ -6,6 +6,7 @@ import { expect, type Page } from "@playwright/test";
 
 import { startAuthorizationServer, startHttpTestServer } from "../tests/fixtures/mcp-http-test-server.js";
 import { CLIENT_SECRET_SENTINEL, HEADER_SENTINEL, SECRET_SENTINEL, isAlive, starts, testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
+import { post, read, registerMcpServer } from "./console-api.js";
 import { authorizeLocalService } from "./console-session.js";
 import { startFixtureServer } from "./fixture-server.js";
 import { test } from "./fixtures.js";
@@ -22,18 +23,6 @@ const LOOKUP = { name: "lookup", description: "Finds an item.", inputSchema: { t
 
 function workDirectory(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "mcp-e2e-"));
-}
-
-/** Registers a server through the API, as setup for journeys that are not about registration. */
-async function registerViaApi(fixtureServer: { url: string; cookie: string }, server: Record<string, unknown>) {
-  const post = (pathname: string, body: unknown) => fetch(`${fixtureServer.url}${pathname}`, {
-    method: "POST",
-    headers: { cookie: fixtureServer.cookie, origin: fixtureServer.url, "content-type": "application/json" },
-    body: JSON.stringify(body),
-  }).then((response) => response.json());
-  const { launchLine } = await post("/api/mcp/preview", { server });
-  const result = await post("/api/mcp/servers", { server, confirmed: launchLine });
-  if (!result.server) throw new Error(`registration failed: ${JSON.stringify(result)}`);
 }
 
 async function fillLocalProgram(page: Page, name: string, args: string[], env: string) {
@@ -146,7 +135,7 @@ test("reviews new and changed tools and switches tools off", async ({ page, fixt
   const files = testServerFiles(work, "review");
   const markedUp = '<a href="https://example.com/old">old</a>';
   writeTools(files.tools, [{ ...LOOKUP, description: markedUp }]);
-  await registerViaApi(fixtureServer, { name: "review", command: process.execPath, args: testServerArgs(files) });
+  await registerMcpServer(fixtureServer, { name: "review", command: process.execPath, args: testServerArgs(files) });
   await page.goto(`${fixtureServer.url}/console/mcp`);
   await expect(row(page, "review")).toContainText("已连接", LONG);
   await page.locator('[data-open="review"]').click();
@@ -192,7 +181,7 @@ test("changes a confirmed command and deletes an unattached server", async ({ pa
   const second = testServerFiles(work, "second");
   writeTools(first.tools, [LOOKUP]);
   writeTools(second.tools, [{ ...LOOKUP, inputSchema: { type: "object", properties: { query: { type: "string" } } } }]);
-  await registerViaApi(fixtureServer, { name: "moving", command: process.execPath, args: testServerArgs(first), env: { SECRET_TOKEN: SECRET_SENTINEL } });
+  await registerMcpServer(fixtureServer, { name: "moving", command: process.execPath, args: testServerArgs(first), env: { SECRET_TOKEN: SECRET_SENTINEL } });
   await page.goto(`${fixtureServer.url}/console/mcp`);
   await expect(row(page, "moving")).toContainText("已连接", LONG);
   await page.locator('[data-open="moving"]').click();
@@ -240,14 +229,14 @@ test.describe("with a profile that attaches the server", () => {
     const work = workDirectory();
     const first = testServerFiles(work, "first"), second = testServerFiles(work, "second");
     const server = { name: "amap", command: process.execPath, args: testServerArgs(first) };
-    await registerViaApi(fixtureServer, server);
-    const api = async (pathname: string, body?: unknown) => (await fetch(`${fixtureServer.url}${pathname}`, body === undefined ? { headers: { cookie: fixtureServer.cookie } }
-      : { method: "POST", headers: { cookie: fixtureServer.cookie, origin: fixtureServer.url, "content-type": "application/json" }, body: JSON.stringify(body) })).json();
-    const view = await api("/api/teams");
-    const bill = view.teams.find(({ id }: { id: string }) => id === "bill");
-    const saved = await api("/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader, groups: ["oc_alpha"],
-      executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }: Record<string, unknown>) => ({ id, name, noun, instructions, hostTools,
-        mcpServers: [{ name: "amap", confirmed: view.mcpServers[0].launchLine }] })) } });
+    await registerMcpServer(fixtureServer, server);
+    type TeamsView = { version: number; mcpServers: Array<{ launchLine: string }>;
+      teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; profiles: Array<Record<string, unknown>> }> };
+    const view = await read<TeamsView>(fixtureServer, "/api/teams");
+    const bill = view.teams.find(({ id }) => id === "bill")!;
+    const saved = await post(fixtureServer, "/api/teams/save", { basedOn: view.version, team: { id: "bill", teamName: bill.teamName, responsibility: bill.responsibility, leader: bill.leader, groups: ["oc_alpha"],
+      executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools,
+        mcpServers: [{ name: "amap", confirmed: view.mcpServers[0]!.launchLine }] })) } });
     expect(saved.teamId).toBe("bill");
 
     await page.goto(`${fixtureServer.url}/console/mcp`);
@@ -290,7 +279,7 @@ test("reconnects enabled servers when the service restarts", async () => {
   const first = await startFixtureServer("fixture", "fixture", undefined, { stateDirectory });
   const port = Number(new URL(first.url).port);
   try {
-    await registerViaApi(first, { name: "kept", command: process.execPath, args: testServerArgs(files) });
+    await registerMcpServer(first, { name: "kept", command: process.execPath, args: testServerArgs(files) });
     await expect.poll(() => starts(files).length, LONG).toBe(1);
   } finally {
     await first.close();
@@ -354,7 +343,7 @@ test("imports servers from JSON after confirming their commands and addresses", 
   const local = testServerFiles(work, "local");
   const remote = await startHttpTestServer();
   try {
-    await registerViaApi(fixtureServer, { name: "taken", command: process.execPath, args: testServerArgs(testServerFiles(work, "taken")) });
+    await registerMcpServer(fixtureServer, { name: "taken", command: process.execPath, args: testServerArgs(testServerFiles(work, "taken")) });
     await page.goto(`${fixtureServer.url}/console/mcp`);
     await page.getByRole("button", { name: "导入 JSON" }).click();
     await expect(page.locator("#amc-title")).toHaveText("导入 MCP 服务器");

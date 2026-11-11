@@ -608,9 +608,63 @@ it("gives a registered MCP server's tools only to Executors of the profile that 
       { ...billExecutor(1), reason: "unbound" }]);
     expect(["请帮我规划周末一日行程", "再帮我规划周日行程", "再帮我规划下周行程"].map(planNamesServer)).toEqual([false, true, false]);
     expect(turns.find((input) => input.includes("生活团队的负责人") && input.includes("再帮我规划周日行程"))).toContain("route_plan（Plans a route between two places.）");
+    // Only the Executor that is offered the server's tools is told that what its tools do may be done (agent-dispatch::CON-003):
+    // of the six Executor turns, the third, which is the first of the request admitted while the server was attached.
+    expect(result.fixtureModelRequests!.map(({ input }) => JSON.stringify(input).includes("提供给你的工具能完成的操作可以执行"))).toEqual([false, false, true, false, false, false]);
     await running.close(); running = undefined;
     // Stopping the service stops the server it started.
     expect(runningPrograms(directory)).toEqual([]);
+  } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
+}, 90000);
+
+// agent-dispatch::REQ-011/AC-01 with REQ-017/AC-01 and AC-02: a Team Leader is told of a server only when its preset attached it
+// in the request's definitions version and still attaches it. A request whose plan stays invalid fails before it is divided and
+// is planned again on retry, under the version it was admitted with, so its retried plan turn meets other current definitions.
+it("tells a Team Leader of a preset's MCP server neither when it was attached after the request was admitted nor once it is unbound", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-mcp-leader-told-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
+    const files = testServerFiles(directory, "amap");
+    const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
+    const { launchLine } = await running.post<{ launchLine: string }>("/api/mcp/preview", { server });
+    await running.post("/api/mcp/servers", { server, confirmed: launchLine });
+    await vi.waitFor(async () => expect((await running!.get<{ mcpServers: Array<{ state: string }> }>("/api/teams")).mcpServers).toMatchObject([{ state: "connected" }]), { timeout: processWaitLimitMs, interval: 50 });
+    const attach = async (mcpServers: unknown[]) => {
+      const view = await running!.get<View>("/api/teams");
+      await running!.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, executorProfiles: bill.executorProfiles.map((profile) => ({ ...profile, mcpServers })) })) });
+    };
+    const undivided = { leaderPlan: [{ kind: "x" }, { kind: "x" }] };
+    const retry = (messageId: string, requestId: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" }, { modelReply: completedReply("规划行程") });
+
+    await running.post("/api/fixture/inbound", groupMessage("om_told_before", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), undivided));
+    const before = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
+    await attach([{ name: "amap", confirmed: launchLine }]);
+    await running.post("/api/fixture/inbound", groupMessage("om_told_attached", "再帮我规划周日行程", decision("bill", "规划周日行程"), undivided));
+    const attached = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "failed");
+    // Planned again while the server is attached, but admitted before it was.
+    await running.post("/api/fixture/inbound", retry("om_told_before_retry", before.agentDispatch!.jobs[0]!.id));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    await attach([]);
+    // Planned again once the server is unbound, but admitted while it was attached.
+    await running.post("/api/fixture/inbound", retry("om_told_attached_retry", attached.agentDispatch!.jobs[1]!.id));
+    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+
+    const jobs = result.agentDispatch!.jobs;
+    const turns = result.fixtureCoordinationRequests!.map(({ input }) => JSON.stringify(input));
+    // Bill's plan turns of a request, in order: whether each names what the server gives the preset's Executors.
+    const told = (brief: string) => turns.filter((input) => input.includes("生活团队的负责人") && input.includes(brief) && input.includes("capabilities")).map((input) => input.includes("通过 MCP 服务器「amap」："));
+    console.log(JSON.stringify({ kind: "team_mcp_leader_told", commands: ["请帮我规划周末一日行程", "attach amap", "再帮我规划周日行程", "重试", "unbind amap", "重试"],
+      jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, told: { before: told("请帮我规划周末一日行程"), attached: told("再帮我规划周日行程") } }));
+    expect(jobs.map(({ definitionsVersion, status, assignments }) => [definitionsVersion, status, assignments.length])).toEqual([[1, "completed", 1], [2, "completed", 1]]);
+    const first = told("请帮我规划周末一日行程"), second = told("再帮我规划周日行程");
+    // The request admitted before the attachment: never told, also in its plan turn after the attachment.
+    expect(first.length).toBeGreaterThanOrEqual(2);
+    expect(first).not.toContain(true);
+    // The request admitted while the server was attached: told then, and not in its plan turn after the unbinding.
+    expect([second[0], second.at(-1)]).toEqual([true, false]);
+    expect(second.length).toBeGreaterThanOrEqual(2);
   } finally { await running?.close(); stopRunningPrograms(directory); rmSync(directory, { recursive: true, force: true }); }
 }, 90000);
 

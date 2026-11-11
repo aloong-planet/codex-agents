@@ -20,7 +20,7 @@ import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import type { DynamicToolDefinition, DynamicToolHost } from "../src/dynamic-tool-host.js";
 import { McpCatalog, type McpServerInput } from "../src/mcp-catalog.js";
 import { McpProxyToolHost } from "../src/mcp-proxy-tools.js";
-import { SECRET_SENTINEL, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
+import { SECRET_SENTINEL, starts, testServerArgs, testServerFiles, writeTools, type TestServerFiles } from "./fixtures/mcp-test-server-control.js";
 import { processWaitLimitMs } from "./support/process-wait.js";
 
 const actor = { browser: { id: "b1", label: "Chrome · macOS", authorizedAt: "2026-11-11T00:00:00.000Z", lastUsedAt: "2026-11-11T00:00:00.000Z" } };
@@ -81,7 +81,7 @@ describe("the tools an Executor is offered", () => {
     await server("spare");    // never attached
     catalog.setToolEnabled("amap", "whoami", false, actor);
     const tools = proxy(["amap", "docs"], () => ["amap", "github"]);
-    expect(offered(tools.definitions())).toEqual(["files.read", "mcp-amap.env", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.lookup", "mcp-amap.admin_tools_list"]);
+    expect(offered(tools.definitions())).toEqual(["files.read", "mcp-amap.env", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.lookup", "mcp-amap.admin_tools_list_ce33de31"]);
 
     // A new tool and a changed one wait for the owner's review; once confirmed, they are in the next listing, also for this request.
     writeTools(amap.tools, [{ ...LOOKUP, description: "Finds an item by name." }, NEEDS_PERSON, { name: "fresh", description: "New.", inputSchema: { type: "object" } }]);
@@ -105,6 +105,15 @@ describe("the tools an Executor is offered", () => {
       description: `Drags.\n\n参数按这份 JSON Schema 填写：${JSON.stringify({ type: "object", properties: { from: point } })}` });
   });
 
+  // The derived name of `a.b` is `a_b_2e7336dc`; a server may also list a tool of exactly that name.
+  it("offers once a name that two tools of a server would share, and a call of it reaches the tool of that name", async () => {
+    const { server, proxy } = setup();
+    await server("twins", [{ name: "a.b", description: "Dotted.", inputSchema: { type: "object" } }, { name: "a_b_2e7336dc", description: "Plain.", inputSchema: { type: "object" } }]);
+    const tools = proxy(["twins"]);
+    expect(offered(tools.definitions()).filter((name) => name.startsWith("mcp-twins.a"))).toEqual(["mcp-twins.a_b_2e7336dc"]);
+    expect(await call(tools, "mcp-twins", "a_b_2e7336dc")).toEqual({ success: true, body: { text: "called a_b_2e7336dc" } });
+  });
+
   it("keeps the host tools' contract when the profile attached no server, and its own whatever the attached servers list", async () => {
     const { catalog, server, proxy } = setup();
     await server("amap", [LOOKUP]);
@@ -121,12 +130,15 @@ describe("a call to a proxy tool", () => {
   // mcp-catalog::REQ-003/AC-05: nothing confirms a single call. The server's own effect shows that the call arrived.
   it("reaches the attached server at once and returns its answer, by the tool's own name when it was offered under another", async () => {
     const { work, server, proxy, refusals, reached } = setup();
-    await server("amap", [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } }]);
+    await server("amap", [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
+      { name: "screenshot", description: "Shoots.", inputSchema: { type: "object" }, _meta: { "test/image": true } }]);
     const tools = proxy(["amap"]);
     const written = path.join(work, "written.txt");
     expect(await call(tools, "mcp-amap", "write_file", { path: written, text: "from the Executor" })).toEqual({ success: true, body: { text: "written" } });
     expect(fs.readFileSync(written, "utf8")).toBe("from the Executor");
-    expect(await call(tools, "mcp-amap", "admin_tools_list")).toEqual({ success: true, body: { text: "called admin.tools.list" } });
+    expect(await call(tools, "mcp-amap", "admin_tools_list_ce33de31")).toEqual({ success: true, body: { text: "called admin.tools.list" } });
+    // A block that is not text reaches the Executor as its type only, never as its content.
+    expect(await call(tools, "mcp-amap", "screenshot")).toEqual({ success: true, body: { text: "[image]\ncalled screenshot" } });
     // A tool's own failure is its result, and a host tool's call goes to the host tools unchanged.
     expect(await call(tools, "mcp-amap", "read_file", { path: path.join(work, "absent.txt") })).toMatchObject({ success: false, body: { ok: false, error: { code: "mcp_tool_error" } } });
     await call(tools, "files", "read");
@@ -146,6 +158,10 @@ describe("a call to a proxy tool", () => {
     }, "mcp__amap__write_file", "server_disabled"],
     ["a tool the owner has disabled since", ({ catalog }) => { catalog.setToolEnabled("amap", "write_file", false, actor); return { snapshot: ["amap"], current: ["amap"] }; },
       "mcp__amap__write_file", "tool_disabled"],
+    ["a tool the owner has disabled since, called by the derived name it was offered under", ({ catalog }) => {
+      catalog.setToolEnabled("amap", "admin.tools.list", false, actor);
+      return { snapshot: ["amap"], current: ["amap"], tool: "admin_tools_list_ce33de31" };
+    }, "mcp__amap__admin.tools.list", "tool_disabled"],
     ["a tool whose definition changed and waits for review", async ({ catalog }, files) => {
       writeTools(files.tools, [{ ...LOOKUP, description: "Finds an item by name." }, NEEDS_PERSON]);
       await vi.waitFor(() => expect(catalog.viewServer("amap").counts.pending).toBe(1), WAIT);
@@ -157,7 +173,7 @@ describe("a call to a proxy tool", () => {
   ];
   it.each(refused)("refuses and audits a call to %s, and the server gets nothing", async (_case, arrange, tool, reason) => {
     const context = setup();
-    const files = await context.server("amap", [LOOKUP, NEEDS_PERSON]);
+    const files = await context.server("amap", [LOOKUP, NEEDS_PERSON, { name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } }]);
     const arranged = await arrange(context, files);
     const written = path.join(context.work, "written.txt");
     const result = await call(context.proxy(arranged.snapshot, () => arranged.current), arranged.namespace ?? "mcp-amap", arranged.tool ?? "write_file", { path: written, text: "x", q: "x" });
@@ -184,16 +200,50 @@ describe("a call to a proxy tool", () => {
     expect(refusals()).toEqual([]);
   });
 
-  // mcp-catalog::REQ-003/AC-01 with REQ-001's rule: no agent sees a server's saved secrets, whatever the server returns.
-  it("masks the server's saved secret in a result's text, in its structured content at any depth and in a failure's message", async () => {
+  // An attached server that is not connected (mcp-catalog failure rows on a failed and on a dropped connection). The tool is one
+  // whose name the runtime is offered in a derived form, so the call has to find it again once the server lists its tools.
+  it("offers nothing of a server that failed to connect, answers a call it cannot forward without auditing it, and reaches the tool again once the program runs", async () => {
+    const { catalog, server, proxy, refusals } = setup();
+    const files = await server("amap", [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } }]);
+    const tools = proxy(["amap"]);
+    const derived = offered(tools.definitions()).at(-1)!.slice("mcp-amap.".length);
+    expect(derived).toBe("admin_tools_list_ce33de31");
+
+    // The program fails to start: the server lists nothing, so nothing of it is offered, and a call gets a failure.
+    fs.writeFileSync(files.failFlag, "");
+    catalog.reconnect("amap");
+    await vi.waitFor(() => expect(catalog.viewServer("amap").state).toBe("failed"), WAIT);
+    expect(offered(tools.definitions())).toEqual(["files.read"]);
+    expect(await call(tools, "mcp-amap", derived)).toMatchObject({ success: false, body: { ok: false, error: { code: "mcp_server_unavailable", retryable: false } } });
+    // It starts again: the next call connects it and reaches the tool by its own name.
+    fs.rmSync(files.failFlag);
+    expect(await call(tools, "mcp-amap", derived)).toEqual({ success: true, body: { text: "called admin.tools.list" } });
+
+    // The connection drops: the tools stay on offer, and the next call starts the program again.
+    const before = starts(files).length;
+    process.kill(starts(files).at(-1)!.pid);
+    await vi.waitFor(() => expect(catalog.viewServer("amap").state).toBe("disconnected"), WAIT);
+    expect(offered(tools.definitions())).toContain(`mcp-amap.${derived}`);
+    expect(await call(tools, "mcp-amap", derived)).toEqual({ success: true, body: { text: "called admin.tools.list" } });
+    expect(starts(files).length).toBe(before + 1);
+    expect(refusals()).toEqual([]);
+  });
+
+  // mcp-catalog::REQ-003/AC-01 with REQ-001's rule: no agent sees a server's saved secrets, whatever the server returns. The
+  // second and third secrets hold characters that JSON text writes escaped: a quote and a backslash, and line breaks.
+  it("masks the server's saved secrets in a result's text, in its structured content at any depth and in a failure's message", async () => {
     const { server, proxy } = setup();
+    const password = 'pa"ss\\word-123456', key = "-----BEGIN KEY-----\nMIIEvQIBADANBgkq\n-----END KEY-----";
     await server("vault", [{ name: "leak", description: "Leaks.", inputSchema: { type: "object" }, _meta: { "test/structuredToken": true } },
-      { name: "deny", description: "Fails.", inputSchema: { type: "object" }, _meta: { "test/failWithToken": true } }]);
+      { name: "deny", description: "Fails.", inputSchema: { type: "object" }, _meta: { "test/failWithToken": true } }],
+    { env: { SECRET_TOKEN: SECRET_SENTINEL, DB_PASSWORD: password, PRIVATE_KEY: key } });
     const tools = proxy(["vault"]);
     const leaked = await call(tools, "mcp-vault", "leak");
     expect(leaked).toEqual({ success: true, body: { text: "token ***", structuredContent: { token: "***", nested: { headers: ["Bearer ***"], count: 2 }, "***": "by key" } } });
     const environment = await call(tools, "mcp-vault", "env");
-    expect(JSON.parse(environment.body.text).env.SECRET_TOKEN).toBe("***");
+    // The tool returns its environment as JSON text, in which the second and third values are written escaped.
+    const returned = JSON.parse(environment.body.text).env;
+    expect({ SECRET_TOKEN: returned.SECRET_TOKEN, DB_PASSWORD: returned.DB_PASSWORD, PRIVATE_KEY: returned.PRIVATE_KEY }).toEqual({ SECRET_TOKEN: "***", DB_PASSWORD: "***", PRIVATE_KEY: "***" });
     const denied = await call(tools, "mcp-vault", "deny");
     expect(denied).toMatchObject({ success: false, body: { ok: false, error: { code: "mcp_call_failed", message: expect.stringContaining("upstream refused the token ***") } } });
     expect(JSON.stringify([leaked, environment, denied])).not.toContain(SECRET_SENTINEL);
