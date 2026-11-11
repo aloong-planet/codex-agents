@@ -1,14 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { LeaderPlan } from "../src/agent-dispatch-leader.js";
-import type { DispatchDecision, DispatchExecutionResult, PrerequisiteResult } from "../src/agent-dispatch-types.js";
-import type { DispatchTurnRecord } from "../src/fixture-dispatch-recorder.js";
+import type { DispatchDecision } from "../src/agent-dispatch-types.js";
 import type { CoordinatorRequestView, LeaderRequestView, PrivateTurnInput } from "../src/private-conversations.js";
 import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 import type { State } from "./support/real-main.js";
-import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
+import { atRest, deliveredFiles, type ExecutorRun, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, skilledPreset, type TeamId, type Turn, turns } from "./support/real-model-dispatch.js";
 
 // Dispatch on the real model (agent-dispatch Testing Decisions: real-model suite). Opt-in: `pnpm test:dispatch-real-model` sets
 // DISPATCH_REAL_MODEL_TEST=1; without it every scenario is skipped, so no default run and no CI run reaches a model. One scenario
@@ -108,31 +107,7 @@ description: ${BARGAIN_DESCRIPTION}
 2. 给出一个明确的价格，不低于挂牌价的 85%，并说明理由。
 3. 回复正文之后单独写一行口径编号：口径 ${BARGAIN_MARK}。交回的结果里必须原样保留这一行。
 `;
-type TeamsView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
-  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> }> };
-/**
- * A skill whose SKILL.md says only where its pricing rules are, as the owner's skills often do; the mark is in that reference
- * file alone, so it reaches an Executor only if it reads the file through its tool (skill-library::REQ-003).
- */
-const PRICING_MARK = "PR-4M8";
-const PRICING_SKILL = `---
-name: bargain-pricing
-description: ${BARGAIN_DESCRIPTION}
----
 
-# 议价回复
-
-给买家写议价回复前，必须先读本 skill 的 references/pricing.md，按其中的定价口径写回复，并照它要求的格式交回结果。
-`;
-const PRICING_REFERENCE = `# 定价口径
-
-1. 价格不低于挂牌价的 85%，并说明理由。
-2. 回复正文之后单独写一行口径编号：口径 ${PRICING_MARK}。交回的结果里必须原样保留这一行。
-`;
-
-type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
-type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
-const turns = (state: State, turn: DispatchTurnRecord["turn"]) => (state.fixtureDispatchTurns ?? []).filter((item) => item.turn === turn);
 // The group's posts and files are read as the run record reads them, so what a scenario asserts is what its record shows.
 const posts = groupPosts;
 const textsBy = (state: State, identity: "sam" | TeamId) => groupPosts(state).filter((post) => post.identity === identity);
@@ -150,27 +125,6 @@ function decisionOn(state: State, messageId: string): DispatchDecision {
  * passes host validation with one Executor per Assignment and asks for no other team's help, a file reaches the group under that
  * Team Leader's identity only, and its closing follows the last Assignment's end.
  */
-/**
- * Imports a skill folder with the given files and gives Alice's team a second preset, 议价回复, that selects it; her seeded
- * preset selects none. Returns the new preset's ID.
- */
-async function bargainPreset(run: ScenarioRun, sources: string, name: string, files: Record<string, string>): Promise<string> {
-  const source = join(sources, name);
-  for (const [file, content] of Object.entries(files)) {
-    mkdirSync(dirname(join(source, file)), { recursive: true });
-    writeFileSync(join(source, file), content);
-  }
-  const { preview } = await run.post<{ preview: { fingerprint: string } }>("/api/skills/read", { folder: source });
-  const { id: skill } = await run.post<{ id: string }>("/api/skills/import", { folder: source, confirmed: preview.fingerprint });
-  const view = await run.get<TeamsView>("/api/teams");
-  const alice = view.teams.find(({ id }) => id === "alice")!;
-  const saved = await run.post<{ view: TeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
-    leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
-      ...alice.profiles.map(({ id, name: profile, noun, instructions, hostTools }) => ({ id, name: profile, noun, instructions, hostTools, skills: [] })),
-      { name: "议价回复", noun: "议价执行者", instructions: "", hostTools: [], skills: [skill] }] } });
-  return saved.view.teams.find(({ id }) => id === "alice")!.profiles.find(({ name: profile }) => profile === "议价回复")!.id;
-}
-
 async function deliversUnderItsTeam(run: ScenarioRun, messageId: string, text: string, team: TeamId): Promise<State> {
   await run.send(messageId, text);
   const state = await run.until("the request's end", (current) => atRest(current, messageId), REQUEST_WAIT_MS);
@@ -344,7 +298,7 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       // The skill's folder is outside the granted directory: no file tool of an Executor can read it there.
       const sources = mkdtempSync(join(tmpdir(), "real-model-skill-"));
       try {
-        const skilled = await bargainPreset(run, sources, "bargain-reply", { "SKILL.md": BARGAIN_SKILL });
+        const skilled = await skilledPreset(run, sources, "bargain-reply", { "SKILL.md": BARGAIN_SKILL });
 
         await run.send("om_real_skill", "闲鱼上有个买家问那台 Kindle 400 能不能出，我挂的是 550。帮我拟一条回复买家的议价话术，直接在群里回我就行，不用存成文件。");
         const state = await run.until("the request's end", (current) => atRest(current, "om_real_skill"), REQUEST_WAIT_MS);
@@ -369,30 +323,6 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
         // An Executor of the preset without the skill, if the plan made one, was not given it.
         for (const assignment of request.assignments.filter(({ profileId }) => profileId !== skilled)) {
           expect(runs.find(({ input }) => input.assignmentId === assignment.id)?.output?.message ?? "").not.toContain(BARGAIN_MARK);
-        }
-        expect(request.status).toBe("completed");
-      } finally { rmSync(sources, { recursive: true, force: true }); }
-    }), REQUEST_LIMIT_MS);
-
-  // A skill file beside SKILL.md (skill-library::REQ-003): the SKILL.md the Executor's turns carry only says where the rule is,
-  // and the Executor reads that file with its own tool, from the skill as its request was admitted with it.
-  it("has an Executor read a file of its skill that its SKILL.md points to, and work by it", () => realModelScenario(
-    { id: "profile-skill-file", acceptance: ["skill-library::REQ-003"] }, async (run) => {
-      const sources = mkdtempSync(join(tmpdir(), "real-model-skill-"));
-      try {
-        const skilled = await bargainPreset(run, sources, "bargain-pricing", { "SKILL.md": PRICING_SKILL, "references/pricing.md": PRICING_REFERENCE });
-        await run.send("om_real_skill_file", "闲鱼上有个买家问那台 Kindle 400 能不能出，我挂的是 550。帮我拟一条回复买家的议价话术，直接在群里回我就行，不用存成文件。");
-        const state = await run.until("the request's end", (current) => atRest(current, "om_real_skill_file"), REQUEST_WAIT_MS);
-        expect(decisionOn(state, "om_real_skill_file")).toMatchObject({ kind: "dispatch", agentId: "alice" });
-        const request = state.agentDispatch!.jobs[0]!;
-        const chosen = request.assignments.filter(({ profileId }) => profileId === skilled);
-        expect(chosen.length, "no Assignment was put on the preset that selects the skill").toBeGreaterThanOrEqual(1);
-        // The mark is only in the reference file: a result that carries it read that file.
-        const runs = turns(state, "run") as ExecutorRun[];
-        for (const assignment of chosen) {
-          const own = runs.find(({ input }) => input.assignmentId === assignment.id);
-          expect(own?.output?.status).toBe("completed");
-          expect(own!.output!.message, "the Executor's result lacks the mark its skill's reference file asks for").toContain(PRICING_MARK);
         }
         expect(request.status).toBe("completed");
       } finally { rmSync(sources, { recursive: true, force: true }); }

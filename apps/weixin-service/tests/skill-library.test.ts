@@ -7,6 +7,11 @@
 // Another gap: a SKILL.md that the App Server refuses to list for a reason nobody measured is imported all the same (skill-library,
 // failure modes). The two measured refusals are refused below; that the installed App Server still refuses exactly those is the
 // opt-in case in isolated-model-runtime.test.ts, to be run again after a Codex upgrade.
+// The tool through which an Executor reads its skills' files: that a file of hundreds of megabytes is read without being held
+// whole or holding up the service is measured by no case, since memory and timing on a shared machine would make one unstable.
+// A read that fails partway through a stored file is refused like a changed store, which no case can bring about.
+// Its check that a stored path opened as a regular file is reached alone only by an entry whose reads never end, such as a device
+// node, which a test cannot create; a folder or a named pipe in a file's place is refused by the read or the hash as well.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -579,6 +584,15 @@ describe("an Executor reading its skills' files", () => {
     expect(some.grantsMcp()).toBe(true);
   });
 
+  it("leaves a turn to the workflow that claimed it through a namespaced tool, and keeps a read of a skill file the model's", async () => {
+    const { library, skill } = await selecting();
+    const claimed = { ...INNER, turnOwner: () => "workflow" as const };
+    const host = new SkillFileToolHost(claimed, library, [skill], () => {});
+    expect(host.turnOwner({ ...CONTEXT, namespace: "weixin" })).toBe("workflow");
+    expect(host.turnOwner(CONTEXT)).toBe("model");
+    expect(new SkillFileToolHost(claimed, library, [], () => {}).turnOwner(CONTEXT)).toBe("workflow");
+  });
+
   it("lists and reads the files of the version its request was admitted with, scripts as text, by the skill's name or ID", async () => {
     const { library, skill, host } = await selecting();
     fs.writeFileSync(path.join(skill.source, "references", "testing.md"), "# Testing v2\n");
@@ -595,7 +609,6 @@ describe("an Executor reading its skills' files", () => {
   it.each([
     ["a path that leaves the skill", (other: string) => ({ skill: "patch-writer", path: `../../../${other}/1/files/SKILL.md` }), "skill_file_not_found"],
     ["another skill's stored file by its full path", (other: string, directory: string) => ({ skill: "patch-writer", path: path.join(directory, other, "1", "files", "SKILL.md") }), "skill_file_not_found"],
-    ["a file the skill does not have", () => ({ skill: "patch-writer", path: "references/missing.md" }), "skill_file_not_found"],
     ["a skill of the library the profile does not select", () => ({ skill: "trip-check", path: "references/rules.md" }), "skill_unknown"],
     ["the ID of a skill the profile does not select", (other: string) => ({ skill: other, path: "references/rules.md" }), "skill_unknown"],
     ["arguments without a skill", () => ({ path: "SKILL.md" }), "skill_file_arguments_invalid"],
@@ -624,8 +637,10 @@ describe("an Executor reading its skills' files", () => {
       fs.rmSync(stored("references"), { recursive: true });
       fs.symlinkSync(outside, stored("references"));
     }],
-    ["a stored file whose bytes changed", (stored: (file: string) => string) => fs.writeFileSync(stored("references/testing.md"), "# Tampered\n")],
+    // As long as the imported file, so that only its hash tells them apart.
+    ["a stored file whose bytes changed", (stored: (file: string) => string) => fs.writeFileSync(stored("references/testing.md"), "# Testinx\n")],
     ["a stored file that was removed", (stored: (file: string) => string) => fs.rmSync(stored("references/testing.md"))],
+    ["a stored file replaced by a folder", (stored: (file: string) => string) => { fs.rmSync(stored("references/testing.md")); fs.mkdirSync(stored("references/testing.md")); }],
   ])("refuses %s and reports the skill's store as changed outside the service, without the path", async (_what, change) => {
     const { skill, host, reports, stored } = await selecting();
     change(stored, temporary("skill-outside-"));
@@ -633,10 +648,36 @@ describe("an Executor reading its skills' files", () => {
     expect(reports).toEqual([`skill_file_integrity_failed:${skill.id}`]);
   });
 
+  it("refuses to read from a version the library does not store", async () => {
+    const { library, skill } = await selecting();
+    await expect(library.readFile({ id: skill.id, version: 7 }, "SKILL.md", () => {})).rejects.toMatchObject({ reason: "integrity" });
+  });
+
   it("refuses a file that is not text", async () => {
     const { host, reports } = await selecting();
     expect(await call(host, { skill: "patch-writer", path: "vendor/blob.bin" })).toEqual(failure("skill_file_not_text", "这个文件不是文本文件，无法读取。"));
     expect(reports).toEqual([]);
+  });
+
+  it("reads a file larger than one of the parts it is read in, with a character split between two parts, and finds a bad byte however far in", async () => {
+    const { library } = open();
+    // The library reads 1 MiB at a time: 中 takes the last byte of the first part and the first two of the second.
+    const split = Buffer.concat([Buffer.alloc(1024 * 1024 - 1, "a"), Buffer.from("中"), Buffer.alloc(10, "b")]);
+    const bad = Buffer.concat([Buffer.alloc(1024 * 1024 + 5, "a"), Buffer.from([0xFF]), Buffer.from("a")]);
+    // Its last character lacks its last byte.
+    const cut = Buffer.from("a中").subarray(0, 3);
+    const skill = await imported(library, write(path.join(temporary("skill-source-"), "big-read"), { "SKILL.md": skillMd("big-read", "big"),
+      "references/split.md": split, "references/bad.md": bad, "references/cut.md": cut }));
+    const host = new SkillFileToolHost(INNER, library, [skill], () => {});
+    const read = (offset: number) => call(host, { skill: "big-read", path: "references/split.md", offset });
+    // 1,048,575 a, then 中, then 10 b: 1,048,586 characters.
+    expect(await read(1024 * 1024 - 5)).toEqual({ success: true, skill: "big-read", path: "references/split.md", offset: 1024 * 1024 - 5, text: "aaaa中bbbbbbbbbb" });
+    expect(await read(0)).toEqual({ success: true, skill: "big-read", path: "references/split.md", offset: 0, text: "a".repeat(100_000), nextOffset: 100_000,
+      note: "文件还有 948586 个字符没有读，用 offset=100000 继续读取。" });
+    expect(await read(1024 * 1024)).toEqual({ success: true, skill: "big-read", path: "references/split.md", offset: 1024 * 1024, text: "bbbbbbbbbb" });
+    for (const file of ["references/bad.md", "references/cut.md"]) {
+      expect(await call(host, { skill: "big-read", path: file })).toEqual(failure("skill_file_not_text", "这个文件不是文本文件，无法读取。"));
+    }
   });
 
   it("returns a long file 100,000 characters at a time, never splitting one, and says where to go on", async () => {

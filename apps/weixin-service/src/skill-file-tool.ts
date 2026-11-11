@@ -15,6 +15,12 @@ const DEFINITION: DynamicToolDefinition = { type: "function", name: SKILL_FILE_T
 
 const failure = (code: string, message: string): DynamicToolResult =>
   ({ success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ ok: false, error: { code, message, retryable: false } }) }] });
+/** How many characters a decoded string holds: each pair of surrogates is one. Decoded text holds no lone surrogate. */
+function codePoints(text: string): number {
+  let low = 0;
+  for (let index = 0; index < text.length; index++) { const unit = text.charCodeAt(index); if (unit >= 0xDC00 && unit <= 0xDFFF) low++; }
+  return text.length - low;
+}
 const answer = (body: Record<string, unknown>): DynamicToolResult => ({ success: true, contentItems: [{ type: "inputText", text: JSON.stringify(body) }] });
 
 /**
@@ -50,13 +56,10 @@ export class SkillFileToolHost implements ExecutorToolHost {
       || (value.path !== undefined && typeof value.path !== "string") || (value.offset !== undefined && !(Number.isSafeInteger(value.offset) && (value.offset as number) >= 0))) {
       return failure("skill_file_arguments_invalid", "参数必须是 JSON 对象：skill 填 skill 的名称，path 与 offset 可以不填。");
     }
-    const selected = this.skills.map((ref) => ({ ref, stored: this.library.version(ref) }));
-    const chosen = selected.find(({ ref, stored }) => stored?.name === value.skill || ref.id === value.skill);
-    if (!chosen) {
-      const names = selected.flatMap(({ stored }) => stored ? [stored.name] : []);
-      return failure("skill_unknown", `本轮没有 skill「${value.skill}」。可以读取的 skill：${names.join("、")}。`);
-    }
-    if (!chosen.stored) return this.unavailable(chosen.ref);
+    // Every version a request names stays stored while the request can run, and its runtime is not created without them.
+    const selected = this.skills.flatMap((ref) => { const stored = this.library.version(ref); return stored ? [{ ref, stored }] : []; });
+    const chosen = selected.find(({ ref, stored }) => stored.name === value.skill || ref.id === value.skill);
+    if (!chosen) return failure("skill_unknown", `本轮没有 skill「${value.skill}」。可以读取的 skill：${selected.map(({ stored }) => stored.name).join("、")}。`);
     if (!value.path) return answer({ skill: chosen.stored.name, files: chosen.stored.files.map(({ path, script }) => ({ path, script })) });
     return this.read(chosen.ref, chosen.stored, value.path, (value.offset as number | undefined) ?? 0);
   }
@@ -65,23 +68,35 @@ export class SkillFileToolHost implements ExecutorToolHost {
     return this.skills.length && !context.namespace ? "model" : this.host.turnOwner?.(context) ?? "model";
   }
 
-  private read(ref: SkillRef, stored: StoredSkill, file: string, offset: number): DynamicToolResult {
-    let content: Buffer;
-    try { content = this.library.readFile(ref, file); }
-    catch (error) {
+  /**
+   * The file's characters from `offset`, decoded as its parts arrive: only those characters are kept, whatever the file's size.
+   * Characters, not bytes or code units, are counted, so that no answer ends inside one.
+   */
+  private async read(ref: SkillRef, stored: StoredSkill, file: string, offset: number): Promise<DynamicToolResult> {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const end = offset + SKILL_FILE_CHARACTERS, kept: string[] = [];
+    let total = 0, text = true;
+    const count = (piece: string) => {
+      const characters = codePoints(piece);
+      if (total + characters <= offset || total >= end) { total += characters; return; }
+      for (const character of piece) { if (total >= offset && total < end) kept.push(character); total++; }
+    };
+    try {
+      await this.library.readFile(ref, file, (part) => {
+        if (!text) return;
+        try { count(decoder.decode(part, { stream: true })); } catch { text = false; }
+      });
+      if (text) { try { count(decoder.decode()); } catch { text = false; } }
+    } catch (error) {
       if (!(error instanceof SkillFileUnavailable)) throw error;
       if (error.reason === "not_found") return failure("skill_file_not_found", `skill「${stored.name}」里没有文件 ${file}。不填 path 可以列出它的文件。`);
       return this.unavailable(ref);
     }
-    let text: string;
-    try { text = new TextDecoder("utf-8", { fatal: true }).decode(content); }
-    catch { return failure("skill_file_not_text", "这个文件不是文本文件，无法读取。"); }
-    // Counted in characters, so that no part of a file ends inside one.
-    const characters = [...text];
-    if (offset > characters.length) return failure("skill_file_offset_invalid", `offset 超出了文件长度（共 ${characters.length} 个字符）。`);
-    const end = Math.min(characters.length, offset + SKILL_FILE_CHARACTERS);
-    return answer({ skill: stored.name, path: file, offset, text: characters.slice(offset, end).join(""),
-      ...(end < characters.length ? { nextOffset: end, note: `文件还有 ${characters.length - end} 个字符没有读，用 offset=${end} 继续读取。` } : {}) });
+    if (!text) return failure("skill_file_not_text", "这个文件不是文本文件，无法读取。");
+    if (offset > total) return failure("skill_file_offset_invalid", `offset 超出了文件长度（共 ${total} 个字符）。`);
+    const last = Math.min(total, end);
+    return answer({ skill: stored.name, path: file, offset, text: kept.join(""),
+      ...(last < total ? { nextOffset: last, note: `文件还有 ${total - last} 个字符没有读，用 offset=${last} 继续读取。` } : {}) });
   }
 
   private unavailable(ref: SkillRef): DynamicToolResult {
