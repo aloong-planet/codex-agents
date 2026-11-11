@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -88,6 +88,28 @@ const STOCK_BIN = "B-12-04";
 type McpTeamsView = { version: number; mcpServers: Array<{ name: string; state: string; launchLine: string }>;
   teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
     profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; mcpServers: string[] }> }> };
+
+/**
+ * A skill for answering a second-hand buyer's bargaining. Its description says what it is for, which is all a Team Leader is told
+ * of it. The reference mark is asked for in the body alone, so it reaches an Executor only through the SKILL.md its turns carry.
+ */
+const BARGAIN_DESCRIPTION = "回复二手交易买家的议价：先确认成色与配件，再给出可接受的价格和理由。";
+const BARGAIN_MARK = "BR-7Q2";
+const BARGAIN_SKILL = `---
+name: bargain-reply
+description: ${BARGAIN_DESCRIPTION}
+---
+
+# 议价回复
+
+给买家写议价回复时：
+
+1. 先感谢买家，并用一句话确认商品的成色与配件。
+2. 给出一个明确的价格，不低于挂牌价的 85%，并说明理由。
+3. 回复正文之后单独写一行口径编号：口径 ${BARGAIN_MARK}。交回的结果里必须原样保留这一行。
+`;
+type TeamsView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
+  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> }> };
 
 type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
 type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
@@ -272,6 +294,57 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       expect(runningPrograms(servers)).toEqual([]);
     } finally { stopRunningPrograms(servers); rmSync(servers, { recursive: true, force: true }); }
   }, REQUEST_LIMIT_MS);
+
+  // What a profile's skill gives its Executors. The Team Leader is told the skill of a preset by name and description, and puts
+  // work the skill is for on that preset (agent-dispatch::REQ-011/AC-01). The Executor created from it works by the skill's
+  // SKILL.md, which only its own turns carry (agent-dispatch::REQ-016/AC-04, skill-library::REQ-002): the mark its result must
+  // show is in neither the request nor anything its Team Leader was told.
+  it("has a Team Leader put the work a skill is for on the preset that selects it, and its Executor work by that skill", () => realModelScenario(
+    { id: "profile-skill", acceptance: ["agent-dispatch::REQ-011/AC-01", "agent-dispatch::REQ-016/AC-04", "skill-library::REQ-002"] }, async (run) => {
+      // The skill's folder is outside the granted directory: no file tool of an Executor can read it there.
+      const sources = mkdtempSync(join(tmpdir(), "real-model-skill-"));
+      try {
+        const source = join(sources, "bargain-reply");
+        mkdirSync(source);
+        writeFileSync(join(source, "SKILL.md"), BARGAIN_SKILL);
+        const { preview } = await run.post<{ preview: { fingerprint: string } }>("/api/skills/read", { folder: source });
+        const { id: skill } = await run.post<{ id: string }>("/api/skills/import", { folder: source, confirmed: preview.fingerprint });
+        // Alice's team gets a second preset, which selects the skill; her seeded preset selects none.
+        const view = await run.get<TeamsView>("/api/teams");
+        const alice = view.teams.find(({ id }) => id === "alice")!;
+        const saved = await run.post<{ view: TeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
+          leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
+            ...alice.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, skills: [] })),
+            { name: "议价回复", noun: "议价执行者", instructions: "", hostTools: [], skills: [skill] }] } });
+        const skilled = saved.view.teams.find(({ id }) => id === "alice")!.profiles.find(({ name }) => name === "议价回复")!.id;
+
+        await run.send("om_real_skill", "闲鱼上有个买家问那台 Kindle 400 能不能出，我挂的是 550。帮我拟一条回复买家的议价话术，直接在群里回我就行，不用存成文件。");
+        const state = await run.until("the request's end", (current) => atRest(current, "om_real_skill"), REQUEST_WAIT_MS);
+        expect(decisionOn(state, "om_real_skill")).toMatchObject({ kind: "dispatch", agentId: "alice" });
+        expect(state.agentDispatch?.jobs).toHaveLength(1);
+        const request = state.agentDispatch!.jobs[0]!;
+        // The Team Leader was told the preset's skill, by its name and what its SKILL.md says it is for, and nothing of its body.
+        const plan = turns(state, "plan").find((item) => item.teamId === "alice") as Turn<{ profiles: Array<{ id: string; capabilities: string[] }> }, LeaderPlan> | undefined;
+        expect(plan?.output, "the Team Leader's plan").toBeDefined();
+        expect(plan!.input.profiles.find(({ id }) => id === skilled)?.capabilities).toContain(`技能「bargain-reply」：${BARGAIN_DESCRIPTION}`);
+        expect(JSON.stringify(plan!.input)).not.toContain(BARGAIN_MARK);
+        // It put the bargaining reply on that preset.
+        const chosen = request.assignments.filter(({ profileId }) => profileId === skilled);
+        expect(chosen.length, "no Assignment was put on the preset that selects the skill").toBeGreaterThanOrEqual(1);
+        // That preset's Executor worked by the SKILL.md: its result carries the mark only the SKILL.md asks for.
+        const runs = turns(state, "run") as ExecutorRun[];
+        for (const assignment of chosen) {
+          const own = runs.find(({ input }) => input.assignmentId === assignment.id);
+          expect(own?.output?.status).toBe("completed");
+          expect(own!.output!.message, "the Executor's result lacks the mark its skill asks for").toContain(BARGAIN_MARK);
+        }
+        // An Executor of the preset without the skill, if the plan made one, was not given it.
+        for (const assignment of request.assignments.filter(({ profileId }) => profileId !== skilled)) {
+          expect(runs.find(({ input }) => input.assignmentId === assignment.id)?.output?.message ?? "").not.toContain(BARGAIN_MARK);
+        }
+        expect(request.status).toBe("completed");
+      } finally { rmSync(sources, { recursive: true, force: true }); }
+    }), REQUEST_LIMIT_MS);
 
   it("starts an Assignment that depends on another after it, with that Assignment's result", () => realModelScenario(
     { id: "dependency", acceptance: ["agent-dispatch::REQ-011/AC-05"], files: DISCOUNT_PROJECT }, async (run) => {

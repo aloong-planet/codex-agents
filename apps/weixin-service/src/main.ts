@@ -78,8 +78,8 @@ import { CodexDispatchClassifier, parseCrossTeamDecision, parseDispatchDecision 
 import { assignmentSender, closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent, type DispatchRuntime } from "./agent-dispatch-executor.js";
 import { compactRuntimeHome } from "./runtime-home-compaction.js";
 import { RuntimePool } from "./runtime-pool.js";
-import { acceptingTeams, COORDINATOR_ID, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
-import { TeamManagement, type TeamManagementOptions } from "./team-management.js";
+import { acceptingTeams, COORDINATOR_ID, storedDefinitions, TeamRegistry, type TeamDefinitions } from "./team-registry.js";
+import { skillUsesIn, TeamManagement, type TeamManagementOptions } from "./team-management.js";
 import { TeamAnnouncements } from "./team-announcements.js";
 import { FeishuHttpOnboardingPlatform, FixtureOnboardingPlatform } from "./team-onboarding.js";
 import { DispatchGroupSettings, unfinishedRequestsByGroup } from "./dispatch-group-settings.js";
@@ -99,6 +99,7 @@ import { ConsoleOverview, displayId } from "./console-overview.js";
 import { createConsoleRoutes } from "./console-routes.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpProxyToolHost } from "./mcp-proxy-tools.js";
+import { skillKey, SkillLibrary } from "./skill-library.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
 import { PrivateStateStore } from "./private-state-store.js";
@@ -232,6 +233,20 @@ const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
 // The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01). A
 // server that a profile of the current team definitions attaches is not deleted (mcp-catalog::US-005/AC-01).
 const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit, attachments: (server) => teamManagement?.mcpAttachments(server) ?? [] });
+// The Skill Library: skills imported from local folders as copies, which Executor profiles select (skill-library spec). Its
+// directory is service state, outside every file grant (ADR-0029). Which versions requests can still run with is known once
+// the dispatch records can be read; until then, and whenever the service runs without dispatch, the library removes none.
+// `dormantTeams` are the stored team definitions of a service without dispatch: its profiles still select skills. When they
+// could not be read, `dormantUnreadable` is set and no skill's uses can be told.
+const skillSnapshots: { needed?: () => ReadonlySet<string> | undefined; dormantTeams?: TeamDefinitions; dormantUnreadable?: true } = {};
+const skillLibrary = new SkillLibrary({ directory: path.join(consoleStateDirectory, "skill-library"), audit: consoleAudit,
+  usedBy: (id) => {
+    if (skillSnapshots.dormantUnreadable) return undefined;
+    const definitions = teamManagement?.current().definitions ?? skillSnapshots.dormantTeams;
+    return definitions ? skillUsesIn(definitions, id) : [];
+  },
+  reimported: ({ id, version }) => teamManagement?.followSkills({ [id]: version }),
+  needed: () => skillSnapshots.needed?.() });
 // In fixture mode the onboarding platform is the fake; WORKFLOW_FIXTURE_FEISHU_ONBOARDING sets its answers before startup resumes onboarding.
 const fixtureOnboarding = fixtureMode ? new FixtureOnboardingPlatform() : undefined;
 if (fixtureOnboarding && process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING) fixtureOnboarding.configure(JSON.parse(process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING));
@@ -274,11 +289,27 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
       rosterChanged: (roster) => applyRoster(roster),
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
       mcpCatalog,
+      skills: () => skillLibrary.list(),
       report: (code) => process.stderr.write(`${code}\n`) });
+    // A re-import that stopped after storing its version left the profiles on the earlier one: they follow now.
+    management.followSkills(Object.fromEntries(skillLibrary.list().map(({ id, version }) => [id, version])));
     teamManagement = management;
     return Object.freeze({ ...rest, dispatch: management.roster() });
   } catch (error) { registry.close(); throw error; }
 })();
+// Without dispatch nothing can save a team, so the stored definitions are read once: a skill one of their profiles selects stays
+// in use, and cannot be deleted, until dispatch is enabled again and the profile unchecks it (agent-console::US-009).
+// Nothing else of a service without dispatch needs the registry, so one that cannot be opened does not stop the start: the
+// library then cannot tell which skills are in use, and deletes none (skill-library, failure modes).
+if (!teamManagement) {
+  try {
+    const stored = storedDefinitions(path.join(path.dirname(privateStatePath), "team-registry.sqlite"));
+    if (stored) skillSnapshots.dormantTeams = stored;
+  } catch (error) {
+    skillSnapshots.dormantUnreadable = true;
+    process.stderr.write(`skill_library_stored_teams_unreadable: ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+}
 const directChannel = fixtureMode || !weixinConfiguration
   ? undefined
   : new DirectIlinkChannel({
@@ -765,9 +796,17 @@ const workflowToolControl = new WorkflowToolProductionControl(
   workflowMediaRequests,
   localFileTools,
 );
-const fixtureModelRequests: Array<{ threadId: string; input: unknown }> = [];
+const fixtureModelRequests: Array<{ threadId: string; input: unknown; skills?: ReturnType<typeof fixtureHomeSkills> }> = [];
+/** The skills in a runtime's Codex home, by folder: each with its files and its SKILL.md. */
+const fixtureHomeSkills = (codexHome: string) => {
+  const root = path.join(codexHome, "skills");
+  return (fs.existsSync(root) ? fs.readdirSync(root).sort() : []).map((folder) => ({ folder,
+    files: (fs.readdirSync(path.join(root, folder), { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile())
+      .map((entry) => path.relative(path.join(root, folder), path.join(entry.parentPath, entry.name))).sort(),
+    skillMd: fs.readFileSync(path.join(root, folder, "SKILL.md"), "utf8") }));
+};
 // Coordinator and Team Leader turns run over the fixture App Server only under the coordination seam; they are kept apart from Executor turns.
-const fixtureCoordinationRequests: Array<{ threadId: string; input: unknown }> = [];
+const fixtureCoordinationRequests: typeof fixtureModelRequests = [];
 const fixtureThreadStarts: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }> = [];
 const observeThreadStart = (start: (typeof fixtureThreadStarts)[number]) => { fixtureThreadStarts.push(start); if (fixtureThreadStarts.length > 40) fixtureThreadStarts.shift(); };
 const fixtureThreadQueues = new Map<string, FixtureModelToolCallQueue>();
@@ -789,7 +828,7 @@ const codexAgent: CodexAgent = new CodexConversation(
     onConnectionFailure: (error) => diagnostics?.checkpoint("app_server.connection", { status: "closed", errorCode: error.message }),
   },
 );
-const isolatedConversation = (kind: IsolatedConversationKind, placement: { instance?: string; mediaRoot?: string; agentId?: string } = {},
+const isolatedConversation = (kind: IsolatedConversationKind, placement: { instance?: string; mediaRoot?: string; agentId?: string; skills?: (directory: string) => void } = {},
   tools: DynamicToolHost | undefined = ISOLATED_RUNTIME_KINDS[kind].hostTools ? workflowToolHost : undefined) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
   const { hostTools } = ISOLATED_RUNTIME_KINDS[kind];
@@ -803,6 +842,7 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
   const runtime = createIsolatedRuntime(kind, { stateDirectory,
     ...(placement.instance !== undefined ? { instance: placement.instance } : {}),
     ...(placement.mediaRoot !== undefined ? { mediaRoot: placement.mediaRoot } : {}),
+    ...(placement.skills !== undefined ? { skills: placement.skills } : {}),
     ...(fixtureMode && !fixtureLiveMainModel && !fixtureLiveWorkflowAgents && !realModel ? { authHome: path.join(groupRuntimeRoot, "fixture-no-auth") } : {}) });
   // Every process the conversation starts, so a closed runtime can wait for them to exit before its home is compacted.
   const exits: Array<Promise<void>> = [];
@@ -811,7 +851,8 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
       if (fixtureRuntime) {
         return new FixtureAppServerTransport({ takeFixtureModelToolCall: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelToolCall(),
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
-          requests.push(request); if (requests.length > 20) requests.shift();
+          // An Executor's request also records the skills its runtime home holds at that turn, as its App Server would load them.
+          requests.push(kind === "dispatchAgent" ? { ...request, skills: fixtureHomeSkills(runtime.env.CODEX_HOME!) } : request); if (requests.length > 20) requests.shift();
         }, undefined, observeThreadStart, kind === "dispatchAgent" || kind === "dispatchLeader" ? runtime.env.CODEX_HOME : undefined);
       }
       const transport = spawnIsolatedAppServer(codexExecutable, runtime);
@@ -1064,7 +1105,7 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     // admitted and still attaches; every call is checked again, and a refused one is audited (agent-dispatch::REQ-016/AC-03, REQ-017).
     const granted = new McpProxyToolHost(tools, mcpCatalog, { snapshot: resolved.mcpServers, current: () => currentProfile(assignment.teamId, assignment.profileId)?.mcpServers,
       agent: { team: assignment.teamId, profile: assignment.profileId, executor: assignment.executor, request: job.id }, audit: consoleAudit });
-    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: granted };
+    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: granted, skills: resolved.skills };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: closeDispatchRuntime });
@@ -1114,8 +1155,9 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
         // What the preset's attached MCP servers give its Executors now: those of the request's version that it still attaches.
         const mcp = resolved.mcpServers.filter((server) => attachedNow.includes(server))
           .map((server) => ({ server, tools: mcpCatalog.toolsFor(server).map(({ tool, description }) => ({ name: tool, description })) }));
-        return { id, name, ...(noun ? { noun } : {}),
-          capabilities: executorCapabilities(resolved.hostTools, stillAllowed(teamId, id), scopes, ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live", mcp) };
+        // Its skills are the request's own versions, with the names and descriptions those versions were imported with.
+        return { id, name, ...(noun ? { noun } : {}), capabilities: executorCapabilities(resolved.hostTools, stillAllowed(teamId, id), scopes,
+          ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live", resolved.skills.flatMap((ref) => skillLibrary.version(ref) ?? []), mcp) };
       }), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
@@ -1134,12 +1176,16 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return { status: rendered.outcome === "succeeded" ? "completed" : rendered.outcome === "needs_input" ? "waiting" : "failed",
         message: rendered.reply, runRef: run.runId };
     },
-    createRuntime: (job, scope, tools, agentId) => {
+    createRuntime: (job, scope, tools, agentId, skills) => {
       const chatId = configuration.owner.deliveryTarget(job.event.accountId, job.event.target);
       if (!chatId) throw new Error("dispatch_group_unbound");
       const mediaRoot = feishuInboundMedia!.readableRoot(chatId);
       fs.mkdirSync(mediaRoot, { recursive: true, mode: 0o700 });
-      return isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId }, tools);
+      // The home gets exactly its profile's skills in the request's versions, at every creation (skill-library::REQ-002), and
+      // every turn of the runtime carries them, which is how its model comes to read them.
+      let written: ReturnType<SkillLibrary["materialize"]> = [];
+      const runtime = isolatedConversation("dispatchAgent", { instance: scope, mediaRoot, agentId, skills: (directory) => { written = skillLibrary.materialize(skills, directory); } }, tools);
+      return { ...runtime, skills: written };
     },
     prepareThread: (job, assignment, threadId) => { if (fixtureFeishu) fixtureThreadQueues.set(threadId, fixtureFeishu.dispatchToolQueue(job.fixtureMessageId ?? executorEvent(job, assignment).messageId, assignment.title)); },
     capture: (job, assignment, scope, { brief, reply }) => memory.capture(scope, { event: job.executionEvent ?? job.event,
@@ -1176,7 +1222,8 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       return chatId ? acceptingTeams(teams.current().definitions, chatId) : [];
     },
     // A removal completes once nothing of the team's is left in its group (team-management::US-004/AC-02).
-    workChanged: () => teams.settle(),
+    // Work that ended may also have been the last to need a superseded or deleted skill version.
+    workChanged: () => { try { teams.settle(); } finally { skillLibrary.prune(); } },
     bindingHash: (event) => configuration.owner.contextHash(event.accountId, event.target), memory, memoryScope: coordinatorProfile.memoryScope,
     completedWork: (job, assignments) => {
       const files = localFileTools.dispatchEvidence(job.id);
@@ -1394,6 +1441,24 @@ const channelState = () => ({ ...dispatchState(), penny: { configured: pennyConf
   weixin: { enabled: Boolean(channelPort), ready: startedChannels.has("weixin") && channelPort!.getSnapshot().accounts.some((account) => account.credentialStatus === "usable") },
   feishu: { enabled: Boolean(feishuChannel), ready: Boolean(feishuChannel && startedChannels.has("feishu") && feishuChannel.state({ channel: "feishu", ...feishuConfiguration!.owner.conversationAddress() }).enabled) },
 }, ...(fixtureFeishu ? { feishuFixtureTextOutbox: fixtureFeishu.getTextOutbox(), feishuFixtureMediaOutbox: fixtureFeishu.getMediaOutbox() } : {}) });
+// A skill version stays stored while a profile of the current definitions selects it, or a request that can still run or be
+// retried was admitted with it: such a request creates Executor runtimes from its own definitions version. A service without
+// dispatch reads neither the definitions' history nor the stored requests, so it cannot tell, and removes nothing.
+skillSnapshots.needed = () => {
+  if (!teamManagement || !agentDispatch) return undefined;
+  const needed = new Set<string>(), seen = new Set<number>();
+  const add = (definitions: TeamDefinitions | undefined) => {
+    for (const team of definitions?.teams ?? []) for (const profile of team.executorProfiles) for (const ref of profile.skills ?? []) needed.add(skillKey(ref));
+  };
+  add(teamManagement.current().definitions);
+  for (const { job } of agentDispatch.records()) {
+    if (job.definitionsVersion === undefined || job.status === "completed" || job.status === "cancelled" || seen.has(job.definitionsVersion)) continue;
+    seen.add(job.definitionsVersion);
+    add(teamManagement.version(job.definitionsVersion)?.definitions);
+  }
+  return needed;
+};
+skillLibrary.prune();
 // Every page and API of the local service requires an owner-authorized browser (agent-console::CON-001).
 const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
 // The dispatch-group form writes the channel configuration file this service loaded; a save applies at the next start (agent-console::US-009).
@@ -1414,7 +1479,7 @@ const consoleOverview = new ConsoleOverview({ storageRoot: consoleStateDirectory
   } } : {}),
 });
 const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings,
-  overview: consoleOverview, access: consoleAccess, ...(privateConversations ? { chats: privateConversations } : {}) });
+  overview: consoleOverview, access: consoleAccess, skills: skillLibrary, ...(privateConversations ? { chats: privateConversations } : {}) });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),

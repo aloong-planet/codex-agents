@@ -12,10 +12,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { CodexConversation } from "../src/codex-conversation.js";
+import { ConsoleAudit } from "../src/console-audit.js";
 import { createIsolatedModelRuntime, installDirectModelCatalog, type IsolatedModelRuntime, spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
 import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, type IsolatedRuntimeKind } from "../src/isolated-runtime-kinds.js";
 import { LocalFileTools } from "../src/local-file-tools.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
+import { SkillLibrary, SkillRefusal } from "../src/skill-library.js";
 import { resolveCodexExecutable } from "../src/stdio-app-server-transport.js";
 import type { TrustedWorkflowTurn } from "../src/workflow-tool-host.js";
 import { AppServerSession, assistantMessage, type BundledSkillSample, FakeResponsesEndpoint, isolatedConversationPlacements, type IsolatedPlacement,
@@ -210,6 +212,86 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
       expectOnlyOwnSkills(modelInputText(request));
       expect(request.authorization).toBe(`Bearer ${syntheticKey}`);
     } finally { await conversation.close(); }
+  }, 60_000);
+
+  // skill-library::REQ-002 on the real App Server: an Executor's runtime created as main.ts creates it, with the skills of its
+  // profile, lists and loads exactly those. Not another skill of the library, and nothing an earlier run left in its home.
+  it("an Executor runtime created with its profile's skills offers exactly those", async () => {
+    const state = path.join(work, "library-state");
+    const library = new SkillLibrary({ directory: path.join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }) });
+    const source = (name: string, body: string) => { plantSkill(path.join(work, "library-sources"), name, body); return path.join(work, "library-sources", name); };
+    const selectedSource = source("profile-probe", "PROFILE-SKILL-BODY-4F2B");
+    fs.mkdirSync(path.join(selectedSource, "references"));
+    fs.writeFileSync(path.join(selectedSource, "references", "rules.md"), "rules\n");
+    const selected = await library.import(selectedSource, (await library.read(selectedSource)).fingerprint, {});
+    const otherSource = source("unselected-probe", "UNSELECTED-SKILL-BODY-9C7D");
+    const unselected = await library.import(otherSource, (await library.read(otherSource)).fingerprint, {});
+
+    const placement = { instance: `dispatch-${"e".repeat(64)}`, mediaRoot: media("profile-skills") };
+    // The home's earlier run: skills of its own in both places, and the bundled skills installed as before the fix.
+    const earlier = runtimeWithOwnSkills("dispatchAgent", placement);
+    await runAsBeforeTheFix(earlier.runtime, earlier.runtimeRoot);
+    let written: ReturnType<SkillLibrary["materialize"]> = [];
+    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, ...placement, environment, skills: (directory) => { written = library.materialize([selected], directory); } });
+    expect(written).toEqual([{ name: "profile-probe", path: path.join(fs.realpathSync(earlier.runtimeRoot), "codex-home", "skills", selected.id, "SKILL.md") }]);
+    const session = await AppServerSession.open(model.route(runtime));
+    try {
+      // The App Server lists the skill under the very path the host hands to each turn.
+      expect((await session.listSkills(runtime.cwd)).map(({ name, path: file }) => ({ name, path: file }))).toEqual(written);
+    } finally { session.close(); }
+
+    model.respondWith(() => [assistantMessage("fake-model-reply")]);
+    const conversation = new CodexConversation(() => spawnIsolatedAppServer(resolveCodexExecutable(process.env), model.route(runtime)),
+      60_000, undefined, undefined, 60_000, isolatedConversationOptions("dispatchAgent", runtime, { structuredOutputSupported: true, agentId: "alice" }));
+    try {
+      const threadId = await conversation.startOrResume(undefined, runtime.cwd);
+      let from = model.requests.length;
+      // A turn that neither names the skill nor carries it shows the model only its catalog line: the copy alone is not read.
+      await conversation.reply(threadId, "please");
+      const plain = model.modelRequestsSince(from).at(-1)!;
+      expect(skillCatalog(plain)).toEqual(["profile-probe"]);
+      expect(modelInputText(plain)).not.toContain("PROFILE-SKILL-BODY-4F2B");
+      // The turn as the host sends an Executor's: it carries the profile's skill, and the App Server puts its SKILL.md in. A skill
+      // the profile does not select is not loaded, by its name or by an item naming the library's own copy of it.
+      from = model.requests.length;
+      await conversation.reply(threadId, [{ type: "text", text: `$unselected-probe $own-probe $own-home-probe $host-probe $${bundled.name} please` },
+        ...written.map((skill) => ({ type: "skill" as const, ...skill })),
+        { type: "skill", name: "unselected-probe", path: fs.realpathSync(path.join(state, "skill-library", unselected.id, "1", "files", "SKILL.md")) }]);
+      const request = model.modelRequestsSince(from).at(-1)!;
+      expect(skillCatalog(request)).toEqual(["profile-probe"]);
+      const input = modelInputText(request);
+      expect(input).toContain("PROFILE-SKILL-BODY-4F2B");
+      for (const absent of ["UNSELECTED-SKILL-BODY-9C7D", marker.own, marker.ownHome, marker.host, bundled.bodyLine]) expect(input, absent).not.toContain(absent);
+    } finally { await conversation.close(); }
+  }, 60_000);
+
+  // The library refuses at import what the App Server would not list, and accepts what it lists: a skill it accepted and the
+  // App Server did not list would reach an Executor and never be read (skill-library, failure modes). These are the shapes
+  // measured on 2026-11-11; after a Codex upgrade this case says whether the library's two refusals still match.
+  it("lists exactly the SKILL.md shapes the Skill Library accepts", async () => {
+    const shapes: Array<[folder: string, skillMd: string, listedAs: string | undefined]> = [
+      ["name-64", `---\nname: ${"n".repeat(64)}\ndescription: d\n---\nbody\n`, "n".repeat(64)],
+      ["name-65", `---\nname: ${"m".repeat(65)}\ndescription: d\n---\nbody\n`, undefined],
+      ["byte-order-mark", "\u{FEFF}---\nname: marked\ndescription: d\n---\nbody\n", undefined],
+      ["crlf", "---\r\nname: crlf\r\ndescription: d\r\n---\r\nbody\r\n", "crlf"],
+      ["description-5000", `---\nname: long-description\ndescription: ${"d".repeat(5000)}\n---\nbody\n`, "long-description"],
+      ["spaced-name", "---\nname: trip check\ndescription: d\n---\nbody\n", "trip check"],
+      ["chinese-name", "---\nname: 行程核对\ndescription: 逐段核对站名与换乘\n---\nbody\n", "行程核对"],
+      ["colon", "---\nname: colon\ndescription: Use when: checking a trip\n---\nbody\n", "colon"],
+    ];
+    const plant = (directory: string) => { for (const [folder, skillMd] of shapes) { fs.mkdirSync(path.join(directory, folder), { recursive: true }); fs.writeFileSync(path.join(directory, folder, "SKILL.md"), skillMd); } };
+    const state = path.join(work, "shape-state"), sources = path.join(work, "shape-sources");
+    plant(sources);
+    const library = new SkillLibrary({ directory: path.join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }) });
+    const accepted = await Promise.all(shapes.map(([folder]) => library.read(path.join(sources, folder)).then(({ name }) => name,
+      (error: unknown) => { if (error instanceof SkillRefusal) return undefined; throw error; })));
+    expect(accepted).toEqual(shapes.map(([, , listedAs]) => listedAs));
+
+    const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: work, instance: `dispatch-${"d".repeat(64)}`, mediaRoot: media("skill-shapes"), environment, skills: plant });
+    const session = await AppServerSession.open(model.route(runtime));
+    try {
+      expect((await session.listSkills(runtime.cwd)).map(({ name }) => name).sort()).toEqual(shapes.flatMap(([, , listedAs]) => listedAs ?? []).sort());
+    } finally { session.close(); }
   }, 60_000);
 
   it("a skill input item cannot load a host or bundled skill", async () => {

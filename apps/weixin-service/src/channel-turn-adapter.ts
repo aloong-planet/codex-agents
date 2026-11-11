@@ -29,6 +29,8 @@ export class ChannelTurnAdapter implements AppServerTurnAdapter {
       memoryLabel?: string;
       /** The reply contract; private and legacy group turns use `MAIN_REPLY_INSTRUCTIONS`. */
       replyInstructions?: string;
+      /** Skills of the runtime's own home that the turn carries, so that the model reads each SKILL.md (a dispatch Executor's profile skills). */
+      skills?: ReadonlyArray<Readonly<{ name: string; path: string }>>;
     },
   ) {}
 
@@ -135,6 +137,7 @@ export class ChannelTurnAdapter implements AppServerTurnAdapter {
     for (const item of media) {
       if (item.kind === "image") input.push({ type: "localImage", path: item.path });
     }
+    for (const { name, path } of this.options.skills ?? []) input.push({ type: "skill", name, path });
     return input;
   }
 

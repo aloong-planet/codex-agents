@@ -40,7 +40,7 @@ test("registers a local program only after confirming its exact command", async 
   writeTools(files.tools, [LOOKUP]);
   await page.goto(`${fixtureServer.url}/console/mcp`);
 
-  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveText(["团队总览", "团队管理", "MCP 管理"]);
+  await expect(page.locator(".acv-side-nav .acv-nav-item")).toHaveText(["团队总览", "团队管理", "MCP 管理", "Skill 管理"]);
   await expect(page.locator('.acv-nav-item[aria-current="page"]')).toHaveText("MCP 管理");
   await expect(page.getByRole("button", { name: "添加服务器" })).toBeVisible();
   await expect(page.locator(".amc-actions").getByRole("link", { name: "返回团队管理" })).toHaveAttribute("href", "/console/teams");

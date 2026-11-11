@@ -1,11 +1,12 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
 import { testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
-import { post, read, registerMcpServer } from "./console-api.js";
+import { importSkill, post, read, registerMcpServer } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // 团队管理 (docs/specs/team-management.md) in a real browser, against the fixture service with Feishu dispatch and the fake
@@ -16,7 +17,6 @@ import { test } from "./fixtures.js";
 // and whether Feishu accepts the automatic configuration and release of a QR-created application stays live acceptance.
 // MCP binding runs against real local MCP programs, registered through the catalog's API; what an attached server's tools then
 // do for an Executor is driven in tests/team-management.integration.test.ts and tests/mcp-proxy-tools.test.ts.
-// Not built yet (decision D1), so not driven here: skills.
 const SAM_APP = "cli_0123456789abcdef";
 const SECRET_SENTINEL = "page-secret-SENTINEL-7d21";
 const LONG = { timeout: 15_000 };
@@ -297,6 +297,51 @@ test.describe("with Feishu dispatch", () => {
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await expect(page.locator("#atm-savebar")).toHaveText(/已保存/);
     expect(await attached()).toEqual([]);
+  });
+
+  // team-management::US-003/AC-05 and US-001/AC-04: a profile's skills are checked from the Skill Library, and the page leads
+  // to Skill 管理. The library's own page is driven in skill-library.spec.ts.
+  test("checks a profile's skills from the Skill Library, keeps them with the save, and links to Skill 管理", async ({ page, fixtureServer }, testInfo) => {
+    const sources = mkdtempSync(path.join(tmpdir(), "team-skills-e2e-"));
+    try {
+      await page.goto("/console/teams");
+      await listItem(page, "Bill · 生活团队").click();
+      const profile = editor(page).locator(".atm-profile").first();
+      await expect(profile.locator(".acf-sub").last()).toHaveText("skills从 Skill 管理里已导入的 skill 勾选");
+      await expect(profile.getByText("Skill 库里还没有 skill。")).toBeVisible();
+      await expect(profile.getByRole("link", { name: "去 Skill 管理导入" })).toHaveAttribute("href", "/console/skills");
+      await page.locator(".atm-heading-actions").getByRole("link", { name: "Skill 管理" }).click();
+      await expect(page).toHaveURL(/\/console\/skills$/);
+
+      // Three skills imported as the Skill 管理 page imports them. The third's name and description, which its folder supplies,
+      // look like markup: the page shows them as the text they are (agent-console::REQ-005/AC-04).
+      const MARKUP_NAME = '<b data-markup="name">粗体</b>', MARKUP_DESCRIPTION = '<img src=x onerror="window.__skillMarkup=1"> 描述';
+      const imported: Record<string, string> = {};
+      for (const [folder, name, description] of [["trip-check", "trip-check", "逐段核对站名与换乘"], ["meal-plan", "meal-plan", "按预算安排菜单"],
+        ["markup", `'${MARKUP_NAME}'`, `'${MARKUP_DESCRIPTION}'`]] as const) {
+        mkdirSync(path.join(sources, folder));
+        writeFileSync(path.join(sources, folder, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n`);
+        imported[folder] = await importSkill(fixtureServer, path.join(sources, folder));
+      }
+      await page.goto("/console/teams");
+      await listItem(page, "Bill · 生活团队").click();
+      await expect(profile.locator(".atm-skill-list .acf-check")).toHaveText([`${MARKUP_NAME}${MARKUP_DESCRIPTION}`, "meal-plan按预算安排菜单", "trip-check逐段核对站名与换乘"]);
+      await expect(profile.locator(".atm-skill-list").locator("b, img")).toHaveCount(0);
+      expect(await page.evaluate(() => (window as unknown as { __skillMarkup?: number }).__skillMarkup)).toBeUndefined();
+      await expect(profile.locator(".atm-skill-list").getByRole("checkbox", { checked: true })).toHaveCount(0);
+      await profile.getByRole("checkbox", { name: /^trip-check/ }).check();
+      await expect(page.locator("#atm-savebar")).toHaveText(/有未保存的修改/);
+      await testInfo.attach("profile-skills", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+      await editor(page).getByRole("button", { name: "保存", exact: true }).click();
+      await expect(page.locator("#atm-savebar")).toHaveText(/已保存/, LONG);
+
+      await page.reload();
+      await listItem(page, "Bill · 生活团队").click();
+      await expect(profile.getByRole("checkbox", { name: /^trip-check/ })).toBeChecked();
+      await expect(profile.getByRole("checkbox", { name: /^meal-plan/ })).not.toBeChecked();
+      const { teams } = await read<{ teams: Array<{ id: string; profiles: Array<{ skills: string[] }> }> }>(fixtureServer, "/api/teams");
+      expect(teams.find(({ id }) => id === "bill")!.profiles[0]!.skills).toEqual([imported["trip-check"]]);
+    } finally { rmSync(sources, { recursive: true, force: true }); }
   });
 
   // team-management::US-004/AC-01, AC-05: with nothing to wait for, the removal completes with the save.

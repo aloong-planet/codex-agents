@@ -2,8 +2,6 @@
 
 > Status: the team registry and the team management page are implemented locally. Teams are edited, bound to groups, onboarded by QR creation or with an existing application, announced, removed from groups and deleted from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
-> Pending: parts of the page are not built.
-> - Not built yet: skills, with the link to skill management for importing one (US-003/AC-05; its link to MCP management is built); and the link to skill management (US-001/AC-04).
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. These points are open:
 > - whether Feishu's application-management APIs accept an application created by QR code, and whether the permissions asked for at creation let it change its own configuration; team-management::US-002/AC-08 says what the owner sees and does when they do not;
 > - whether a created application is already released when the scan ends, or only by step 3;
@@ -130,6 +128,8 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 | Owner enters the Coordinator's or another team's application | Save refused under team-management::REQ-002 |
 | Owner removes the last Executor profile, or gives two profiles one name | Save refused under team-management::REQ-002 |
 | Two browser tabs edit the same team; the second saves later | Second save refused; owner reloads under team-management::REQ-002 |
+| A skill is re-imported while the team's page is open, and the page then saves | The save is not stale, and stores each checked skill in the library's current version (Implementation Decisions: profile skills) |
+| Owner checks a skill that another page deleted from the Skill Library before the save | Save refused under team-management::REQ-002's 「无法保存」 with 「所选的 skill 已不在 Skill 库，请重新载入页面。」 |
 | Owner edits responsibility or instructions while a request runs | The running request keeps its definitions under [agent-dispatch::REQ-017/AC-01](agent-dispatch.md) |
 | Owner attaches an MCP server, closes the card without confirming | Nothing is attached under team-management::US-003/AC-03 |
 | Owner unbinds an MCP server while an Executor uses it | The next call after the save is refused under team-management::US-003/AC-04 |
@@ -245,7 +245,10 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 - **On the page**, each attached server shows its name, 本机程序 or 网址, its state (已连接, 连接中, 已断开, 连接失败 or 已停用), 「可用 <n> 个工具」 when it has usable tools, 「工具名 mcp__<server>__…」 and its exact command or address, with 解绑; a profile without one says 「还没有 MCP。」 The 绑定 MCP list shows the same of each server it offers, and says 「MCP 管理里已启用的服务器都已绑定到这个能力档。」 when none is left. The card of a server that has failed to connect adds 「它目前连接失败，连上后工具才会提供。」 「去 MCP 管理登记」 leads to the MCP management page.
 - **Binding and unbinding are part of the team's edit.** Confirming a card, or 解绑, changes the page's copy of the team and marks it unsaved; the save attaches or unbinds. A save that names no server for a profile attaches none.
 - **The service holds the confirmation.** The save carries, for each server a profile did not attach before, the command or address its card showed. The service attaches it only when the server is registered and enabled and that line is its current one, so a skipped or outdated card attaches nothing. A server the profile already attached is kept without one, also once it is disabled or its command has changed ([mcp-catalog::REQ-002](mcp-catalog.md)).
-- **A link** `/console/teams?team=<team ID>` opens the page on that team; the MCP management page links each attaching profile this way.
+
+**Profile skills.** Under 「skills」, with 「从 Skill 管理里已导入的 skill 勾选」, each profile lists every skill of the [Skill Library](skill-library.md) as a checkbox with its name and description, and 「去 Skill 管理导入」 leads to the skill page; an empty library shows 「Skill 库里还没有 skill。」 The checked skills are among the team's editable fields. A save stores each of them in the library's current version, and versions are not compared when a save is judged stale, so a re-import while the page is open does not refuse its save. Unchecking a skill applies to requests admitted afterwards ([agent-dispatch::REQ-017/AC-01](agent-dispatch.md)).
+
+**Links into the page.** `/console/teams?team=<team ID>` opens the page on that team; the MCP management page links each profile that attaches a server this way, and the skill page each profile that uses a skill.
 
 **Group names** come from the Coordinator's application, with the chat ID as the fallback. A lookup that gives no name is not repeated for 10 minutes, unless a team in that group is saved or rechecked. Concurrent page views share one lookup.
 
