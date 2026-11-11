@@ -23,8 +23,6 @@ import { conversation } from "./support/dispatch-runtime.js";
 // Gap: a storage failure inside a cross-team closing that runs while other Executors still run is reported, and the request's own
 // close closes that team again, instead of failing the attempt. No case shows it, for the same lack of a storage seam; a failed
 // closing turn is covered, because the closing turn's own fallback catches it. Code review covers it (ticket 08, R-3).
-// Gap: a waiting request's choice is closed before its cancel is recorded, so that a stop between the two leaves the cancel to be
-// taken in again. No case stops the service there: only a process kill could fall between the two, as above. Code review covers it.
 const agents: DispatchAgent[] = [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
   { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" },
   { id: "bill", name: "Bill", responsibility: "衣食住行", senderAccountId: "cli_bill" }, { id: "jack", name: "Jack", responsibility: "技术", senderAccountId: "cli_jack" }];
@@ -657,9 +655,12 @@ it("captures an attempt with its decision and failure posts into the group memor
 // A pending choice of one of several Assignments (agent-dispatch failure mode "One of several Assignments raises a pending choice
 // while the others run"): it goes out at once, and only its own resolution ends it.
 function choosing(answer: DispatchExecutionResult["status"]) {
-  return async (inbound: InboundContent): Promise<DispatchPendingResult> => inbound.text === "choose:1"
-    ? { handled: true, senderAccountId: "cli_alice", runRef: "run-1", result: { status: answer, message: answer === "cancelled" ? "已取消这次选择。" : "已发送所选文件。" } }
-    : { handled: false };
+  return async (inbound: InboundContent): Promise<DispatchPendingResult> => {
+    // `choose:<n>` answers the choice of run-<n>.
+    const run = /^choose:(\d+)$/u.exec(inbound.text)?.[1];
+    return run ? { handled: true, senderAccountId: "cli_alice", runRef: `run-${run}`,
+      result: { status: answer, message: answer === "cancelled" ? "已取消这次选择。" : "已发送所选文件。" } } : { handled: false };
+  };
 }
 const two = { assignments: three.assignments.slice(0, 2), decisions: [] as string[], help: [] };
 const startTwo = "我安排：\n执行者 1（能力档 1）处理：整理文案\n执行者 2（能力档 2）处理：核对价格\n完成后会在本群汇报。";
@@ -738,54 +739,163 @@ it.each(["completed", "failed", "waiting", "cancelled"] as const)("keeps a cance
 });
 
 const STOPPED_TWO = "已停止继续处理：\n执行者 1「整理文案」已停止\n执行者 2「核对价格」已停止\n已经完成的操作不会自动撤销。";
-/** Two Executors: the first raises a choice at once; the second ends with `late` only once `stopped` resolves, however early it is cancelled. */
-function choiceThenSlow(stopped: Promise<void>, late: () => DispatchExecutionResult): DispatchExecutor {
+const STOPPED_THREE = "已停止继续处理：\n执行者 1「整理文案」已停止\n执行者 2「核对价格」已停止\n执行者 3「准备问答」已停止\n已经完成的操作不会自动撤销。";
+/**
+ * The Executors of `three`: the first raises the choice of run-1 at once; the second raises that of run-2 only once `late`
+ * resolves; the third ends, cancelled, only once `stopped` resolves, however early it is cancelled. `raised` sees each choice.
+ */
+function choosingExecutors(late: Promise<void>, stopped: Promise<void>, raised: (runRef: string) => void = () => {}): DispatchExecutor {
   return { run: async (_job, assignment) => {
-    if (assignment.title === "整理文案") return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
-    await stopped;
-    return late();
+    if (assignment.title === "准备问答") { await stopped; return { status: "cancelled", message: "已取消" }; }
+    const runRef = assignment.title === "整理文案" ? "run-1" : "run-2";
+    if (runRef === "run-2") await late;
+    raised(runRef);
+    return { status: "waiting", message: `请选择（${runRef}）。`, runRef };
   }, close: () => {} };
 }
 
-it("holds an answer to a cancelled request's choice while another of its Executors is still stopping", async () => {
-  const stopped = deferred();
+it("holds the answers to a cancelled request's choices while another of its Executors is still stopping", async () => {
+  const late = deferred(), stopped = deferred();
+  let asked = 0;
   const deliveries: Array<{ sender: string; message: string; id: string }> = [];
-  const dispatch = dispatchWith(directory(), dividingLeader(two), choiceThenSlow(stopped.promise, () => ({ status: "cancelled", message: "已取消" })), deliveries,
-    { pending: choosing("completed"), closeChoices: unclosable });
+  const dispatch = dispatchWith(directory(), dividingLeader(three), choosingExecutors(late.promise, stopped.promise), deliveries,
+    { pending: choosing("completed"), closeChoices: async () => { asked += 1; return unclosable(); } });
   try {
     await dispatch.start();
     dispatch.admit(event("one", "alice"));
-    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]), { timeout: 2000, interval: 10 });
+    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startThree, "请选择（run-1）。"]), { timeout: 2000, interval: 10 });
     dispatch.admit(event("two", "cancel:one"));
+    // The host is asked once when the cancel is taken in. Only then does the second Executor raise its choice, while it stops,
+    // and the host is asked again.
+    await vi.waitFor(() => expect(asked).toBe(1), { timeout: 2000, interval: 10 });
+    late.resolve();
+    await vi.waitFor(() => expect(asked).toBe(2), { timeout: 2000, interval: 10 });
     dispatch.admit(event("three", "choose:1"));
-    await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(`cli_sam: ${ENDED}`), { timeout: 2000, interval: 10 });
-    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "waiting" }, { status: "running" }] });
-  } finally { stopped.resolve(); }
+    dispatch.admit(event("four", "choose:2"));
+    await vi.waitFor(() => expect(posts(deliveries).slice(2)).toEqual([`cli_sam: ${ENDED}`, `cli_sam: ${ENDED}`]), { timeout: 2000, interval: 10 });
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "waiting" }, { status: "running" }, { status: "running" }] });
+  } finally { late.resolve(); stopped.resolve(); }
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "cancelled"]);
-  expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", ENDED, STOPPED_TWO]);
+  expect(dispatch.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["cancelled", "cancelled", "cancelled"]);
+  expect(messages(deliveries)).toEqual([startThree, "请选择（run-1）。", ENDED, ENDED, STOPPED_THREE]);
 });
 
-it("has an open choice closed as soon as the requester cancels, and one an Executor raises while it stops once the last has stopped", async () => {
-  const stopped = deferred();
-  // The host's open choices, by run: an Executor that ends waiting opens one, and closing a request's choices closes them all.
-  const openChoices = new Set(["run-1"]);
-  const executor = choiceThenSlow(stopped.promise, () => { openChoices.add("run-2"); return { status: "waiting", message: "请选择要发送的图片。", runRef: "run-2" }; });
+it("has an open choice closed as soon as the requester cancels, and one an Executor raises while it stops as soon as that Executor has ended", async () => {
+  const late = deferred(), stopped = deferred();
+  // The host's choices, by run: `raised` holds every one an Executor raised, `openChoices` those not closed yet. The host closes
+  // the choices of the runs that the Assignments it is given name.
+  const raised: string[] = [], openChoices = new Set<string>();
+  const executor = choosingExecutors(late.promise, stopped.promise, (runRef) => { raised.push(runRef); openChoices.add(runRef); });
   const deliveries: Array<{ sender: string; message: string; id: string }> = [];
-  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, deliveries, { closeChoices: async () => { openChoices.clear(); } });
+  const dispatch = dispatchWith(directory(), dividingLeader(three), executor, deliveries,
+    { closeChoices: async (_job, assignments) => { for (const { runRef } of assignments) if (runRef) openChoices.delete(runRef); } });
   try {
     await dispatch.start();
     dispatch.admit(event("one", "alice"));
-    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。"]), { timeout: 2000, interval: 10 });
+    await vi.waitFor(() => expect(messages(deliveries)).toEqual([startThree, "请选择（run-1）。"]), { timeout: 2000, interval: 10 });
+    expect([...openChoices]).toEqual(["run-1"]);
     dispatch.admit(event("two", "cancel:one"));
     await vi.waitFor(() => expect([...openChoices]).toEqual([]), { timeout: 2000, interval: 10 });
-    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "waiting" }, { status: "running" }] });
-  } finally { stopped.resolve(); }
+    late.resolve();
+    await vi.waitFor(() => { expect(raised).toEqual(["run-1", "run-2"]); expect([...openChoices]).toEqual([]); }, { timeout: 2000, interval: 10 });
+    // Both are closed while the third Executor still runs.
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "waiting" }, { status: "running" }, { status: "running" }] });
+  } finally { late.resolve(); stopped.resolve(); }
   await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("cancelled"), { timeout: 2000, interval: 10 });
   await new Promise((resolve) => setTimeout(resolve, 20));
-  expect([...openChoices]).toEqual([]);
-  expect(messages(deliveries)).toEqual([startTwo, "请选择要发送的文件。", STOPPED_TWO]);
+  expect(messages(deliveries)).toEqual([startThree, "请选择（run-1）。", STOPPED_THREE]);
+});
+
+it("has a waiting Assignment's choice closed when a supplement supersedes it, so a later answer goes to the Coordinator and leaves the request alone", async () => {
+  // The host's choice of run-1 takes an answer only while it is open. Once it is closed the answer is a message for the
+  // Coordinator; the substitute Coordinator cannot classify it, so the engine posts the reply for a message it cannot place.
+  let choiceOpen = true;
+  const UNPLACED = "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。";
+  const rerun = deferred();
+  let runs = 0;
+  const executor: DispatchExecutor = { run: async () => {
+    runs += 1;
+    if (runs === 1) return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    await rerun.promise;
+    return { status: "completed", message: "已按补充处理。" };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, deliveries, { closeChoices: async () => { choiceOpen = false; },
+    pending: async (inbound) => inbound.text === "choose:1" && choiceOpen
+      ? { handled: true, senderAccountId: "cli_alice", runRef: "run-1", result: { status: "completed", message: "已发送所选文件。" } } : { handled: false } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("two", "supplement:one"));
+    await vi.waitFor(() => expect(runs).toBe(2), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "choose:1"));
+    await vi.waitFor(() => expect(posts(deliveries).at(-1)).toBe(`cli_sam: ${UNPLACED}`), { timeout: 2000, interval: 10 });
+    expect(dispatch.getState().jobs[0]).toMatchObject({ status: "running", assignments: [{ status: "running" }] });
+  } finally { rerun.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(messages(deliveries)).toEqual([start(1), "请选择要发送的文件。", start(1), UNPLACED, "LEADER_CLOSING_1"]);
+});
+
+it("has a choice that a failed close left open closed when its request is cancelled while it is queued", async () => {
+  // The host's close fails once, when the supplement supersedes the choice, and works afterwards.
+  const openChoices = new Set(["run-1"]);
+  let failing = true;
+  const other = deferred();
+  const executor: DispatchExecutor = { run: async (job) => {
+    if (job.id === "one") return { status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" };
+    await other.promise;
+    return { status: "completed", message: "EXECUTOR_RESULT" };
+  }, close: () => {} };
+  const deliveries: Array<{ sender: string; message: string; id: string }> = [];
+  const dispatch = dispatchWith(directory(), closingLeader(), executor, deliveries, { closeChoices: async () => {
+    if (failing) { failing = false; return unclosable(); }
+    openChoices.clear();
+  } });
+  try {
+    await dispatch.start();
+    dispatch.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    // Another request of the same team runs, so the supplemented request stays queued behind it.
+    dispatch.admit(event("two", "alice"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.assignments.map(({ status }) => status)).toEqual(["running"]), { timeout: 2000, interval: 10 });
+    dispatch.admit(event("three", "supplement:one"));
+    await vi.waitFor(() => expect(dispatch.getState().jobs[0]?.status).toBe("queued"), { timeout: 2000, interval: 10 });
+    expect([...openChoices]).toEqual(["run-1"]);
+    dispatch.admit(event("four", "cancel:one"));
+    await vi.waitFor(() => expect(messages(deliveries).at(-1)).toBe("已停止继续处理。已经完成的操作不会自动撤销。"), { timeout: 2000, interval: 10 });
+    expect([...openChoices]).toEqual([]);
+    expect(dispatch.getState().jobs.map(({ status }) => status)).toEqual(["cancelled", "running"]);
+  } finally { other.resolve(); }
+  await vi.waitFor(() => expect(dispatch.getState().jobs[1]?.status).toBe("completed"), { timeout: 2000, interval: 10 });
+});
+
+it("takes a waiting request's cancel again at the next start when a stop fell between closing its choice and recording the cancel", async () => {
+  const state = directory();
+  const hung = deferred<never>();
+  const executor: DispatchExecutor = { run: async () => ({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }), close: () => {} };
+  let closing = false;
+  const first = dispatchWith(state, closingLeader(), executor, [], { closeChoices: () => { closing = true; return hung.promise; } });
+  try {
+    await first.start();
+    first.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(first.getState().jobs[0]?.status).toBe("waiting"), { timeout: 2000, interval: 10 });
+    first.admit(event("two", "cancel:one"));
+    // The process stops while the host is still closing the choice: the cancel is not recorded yet.
+    await vi.waitFor(() => expect(closing).toBe(true), { timeout: 2000, interval: 10 });
+    expect(first.getState().jobs[0]).toMatchObject({ status: "waiting", assignments: [{ status: "waiting" }] });
+
+    const closed: string[] = [];
+    const after: Array<{ sender: string; message: string; id: string }> = [];
+    const second = dispatchWith(state, closingLeader(), executor, after, { closeChoices: async (job) => { closed.push(job.id); } });
+    await second.start();
+    await vi.waitFor(() => expect(messages(after)).toEqual(["已停止继续处理。已经完成的操作不会自动撤销。"]), { timeout: 2000, interval: 10 });
+    expect(closed).toEqual(["one"]);
+    expect(second.getState().jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
+  // The abandoned first instance is released whatever the outcome, so that closing it cannot hang.
+  } finally { hung.reject(new Error("abandoned")); }
 });
 
 it("has a request's choices closed at the next start when a stop cut off its cancel", async () => {
@@ -794,23 +904,24 @@ it("has a request's choices closed at the next start when a stop cut off its can
   const executor: DispatchExecutor = { run: (_job, assignment) => assignment.title === "整理文案"
     ? Promise.resolve({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }) : hung.promise, close: () => {} };
   const first = dispatchWith(state, dividingLeader(two), executor, [], { closeChoices: unclosable });
-  await first.start();
-  first.admit(event("one", "alice"));
-  await vi.waitFor(() => expect(first.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["waiting", "running"]), { timeout: 2000, interval: 10 });
-  // The requester cancels while the second Executor still runs; the process then stops before it has stopped.
-  first.admit(event("two", "cancel:one"));
-  await vi.waitFor(() => expect(classified).toContain("cancel"), { timeout: 2000, interval: 10 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  open.splice(open.indexOf(first), 1);
+  try {
+    await first.start();
+    first.admit(event("one", "alice"));
+    await vi.waitFor(() => expect(first.getState().jobs[0]?.assignments.map(({ status }) => status)).toEqual(["waiting", "running"]), { timeout: 2000, interval: 10 });
+    // The requester cancels while the second Executor still runs; the process then stops before it has stopped.
+    first.admit(event("two", "cancel:one"));
+    await vi.waitFor(() => expect(classified).toContain("cancel"), { timeout: 2000, interval: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-  const asked: string[] = [];
-  const after: Array<{ sender: string; message: string; id: string }> = [];
-  const second = dispatchWith(state, dividingLeader(two), executor, after, { closeChoices: async (job) => { asked.push(job.id); } });
-  await second.start();
-  expect(asked).toEqual(["one"]);
-  await vi.waitFor(() => expect(messages(after)).toEqual([STOPPED_TWO]), { timeout: 2000, interval: 10 });
-  expect(second.getState().jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }, { status: "cancelled" }] });
-  hung.reject(new Error("abandoned")); await first.close();
+    const asked: string[] = [];
+    const after: Array<{ sender: string; message: string; id: string }> = [];
+    const second = dispatchWith(state, dividingLeader(two), executor, after, { closeChoices: async (job) => { asked.push(job.id); } });
+    await second.start();
+    expect(asked).toEqual(["one"]);
+    await vi.waitFor(() => expect(messages(after)).toEqual([STOPPED_TWO]), { timeout: 2000, interval: 10 });
+    expect(second.getState().jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }, { status: "cancelled" }] });
+  // The abandoned first instance is released whatever the outcome, so that closing it cannot hang.
+  } finally { hung.reject(new Error("abandoned")); }
 });
 
 // Cross-team work through the Coordinator (agent-dispatch::REQ-013, US-003/AC-02, US-003/AC-04, REQ-007/AC-03, AC-04, REQ-008/AC-01).

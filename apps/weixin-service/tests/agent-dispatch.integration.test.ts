@@ -44,11 +44,12 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Whether the real Coordinator places a cross-team part with a sensible team needs a live run; the fixture injects its decision.
 //   Under WORKFLOW_FIXTURE_COORDINATION_RUNTIME the fixture App Server answers the Coordinator's cross-team turn too; no case drives
 //   that seam's answer, which is fixture-only code.
-// - Main closes a cancelled request's open choice for an Assignment's workflow run. For a request stored before Assignments existed,
-//   whose run is keyed by its message, it is not driven: the upgrade case leaves its waiting request alone. Retest condition: that
-//   case cancels its waiting request and reads the run's status.
-// - Which messages the real pending-choice router passes on to the Coordinator while a choice is open, so that it can cancel the
-//   request, is model behavior; the fixture router passes on every text that names no candidate.
+// - Which messages the real pending-choice router passes on to the Coordinator while a choice is open, so that it can cancel or
+//   supplement the request, is model behavior; the fixture router passes on every text that names no candidate.
+// - Main cannot be made to fail closing a choice in fixture mode, so what follows a failed close (the cancel still goes through, and
+//   an answer still handed over leaves the request cancelled) is driven only at the dispatch engine.
+// - Main leaves an expired choice alone when a cancel or supplement closes a request's choices. No case shows it: a choice expires
+//   after 24 hours and main gives the workflow engine no clock to move. Retest condition: a fixture clock for the workflow engine.
 // - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
 //   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
 //   closing is unit-tested.
@@ -635,7 +636,9 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
     await post("om_old_running", "ou_owner", "安排周末出行", decision("bill", "安排周末出行"), { modelHold: true });
     await running.until((state) => state.agentDispatch?.jobs[5]?.status === "running" && (state.fixtureModelRequests?.length ?? 0) === 4);
     await post("om_old_queued", "ou_owner", "再安排周日的晚餐", decision("bill", "安排周日晚餐"));
-    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued");
+    // Another member's file choice, left open for the new code to close with a cancel.
+    await post("om_old_waiting_other", "ou_colleague", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote });
+    const stored = await running.until((state) => state.agentDispatch?.jobs[6]?.status === "queued" && state.agentDispatch?.jobs[7]?.status === "waiting");
     await running.crash(); running = undefined;
     const storedIds = stored.agentDispatch!.jobs.map(({ id }) => id);
 
@@ -653,12 +656,19 @@ it("upgrades a dispatch database written by the pre-05 code without losing a req
       { status: "waiting", definitionsVersion: null, assignments: 0 },
       { status: "failed", definitionsVersion: null, assignments: 0 },
       { status: "completed", definitionsVersion: 2, assignments: 1 },
+      { status: "waiting", definitionsVersion: null, assignments: 0 },
     ]);
     expect(upgraded.agentDispatch?.jobs[0]?.result).toBe("这是 fixture Codex 回复。");
     expect(upgraded.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual([
       expect.stringContaining("服务中断，本次处理已停止。"), "我安排执行者 1（能力档 1）处理：安排周日晚餐。完成后会在本群汇报。", "这是 fixture Codex 回复。"]);
     expect([upgraded.agentFixtureOutboxes?.alice?.text, upgraded.agentFixtureOutboxes?.jack?.text, upgraded.feishuFixtureTextOutbox]).toEqual([[], [], []]);
     expect(upgraded.fixtureModelRequests).toHaveLength(1);
+
+    // A cancel closes the choice of a request stored before Assignments existed, whose workflow run is keyed by its message;
+    // the other member's stored choice stays open.
+    await post("om_new_cancel", "ou_colleague", "这项请求不用做了", { kind: "cancel", agentId: null, requestId: storedIds[7], summary: "", message: "" });
+    const closed = await running.until((state) => state.agentDispatch?.jobs[7]?.status === "cancelled");
+    expect(sendRuns(closed).map(({ status }) => status).sort()).toEqual(["cancelled", "needs_input"]);
 
     // The stored proposal, file choice and failed request still answer their original requester's controls.
     await post("om_new_confirm", "ou_owner", "确认", { kind: "confirm", agentId: null, requestId: storedIds[2], summary: "", message: "" });
@@ -889,40 +899,119 @@ it("cancels the unfinished Assignments of a request and reports the completed on
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 
+// A choice that a cancel or a supplement closes (agent-dispatch failure modes "Requester cancels a request while one of its
+// Assignments waits on a choice, then answers that choice" and "Requester supplements a request that waits on a choice, then
+// answers that choice"). In each case the requester's later answer is an ordinary message, which the fixture Coordinator clarifies.
+const chooseNote = [
+  { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+  { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+    candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }];
+const aliceTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.alice?.text.map(({ message }) => message) ?? [];
+const clarified = { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明你的需求。" };
+const CANCELLED_ONE = "已停止继续处理。已经完成的操作不会自动撤销。";
+/** Sends the requester's answer `2` and returns the state once the Coordinator's reply to it is out. */
+async function answerTwo(running: Running, messageId: string) {
+  await running.post("/api/fixture/feishu/inbound", groupMessage(messageId, "2", clarified));
+  return running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
+}
+/** After the answer: no file went out, no send run went on, and the Coordinator's clarification is the only reply. */
+function expectNothingSent(answered: Awaited<ReturnType<Running["state"]>>) {
+  expect(sendRuns(answered).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+  expect(answered.agentFixtureOutboxes?.alice?.media).toEqual([]);
+  expect(answered.feishuFixtureMediaOutbox).toEqual([]);
+  expect(answered.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual(["请说明你的需求。"]);
+}
+
 it("closes a cancelled request's open file choice, so answering it afterwards sends nothing and the request stays cancelled", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-cancelled-choice-files-"));
   let running: Running | undefined;
-  const aliceTexts = (state: Awaited<ReturnType<Running["state"]>>) => state.agentFixtureOutboxes?.alice?.text.map(({ message }) => message) ?? [];
   try {
     dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
     await allowNotes(running);
-    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: [
-      { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
-      { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
-        candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }] }));
+    // The second of two Assignments raises the choice; the first has completed.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice", "整理要点，再列出 Agent 笔记让我选发哪个", decision("alice", "整理要点并发送运营笔记"), {
+      leaderPlan: divided(["整理要点", "发送笔记"]), executorTurns: { 整理要点: { modelReply: executorReply("要点已整理。", "要点") }, 发送笔记: { modelToolCalls: chooseNote } } }));
     const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
-    const choice = waiting.workflows!.runs.find(({ status }) => status === "needs_input")!;
     // The fixture pending-choice router passes this text on as an ordinary message, so the Coordinator takes it as the request's cancel.
     await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_stop", "这项请求不用做了", control(waiting.agentDispatch!.jobs[0]!.id, "cancel")));
     const cancelled = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 3);
-    // The answer, then a message the Coordinator answers: once that reply is out, the answer before it has been processed.
-    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_answer", "2", { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" }));
-    await running.post("/api/fixture/feishu/inbound", groupMessage("om_choice_barrier", "另一个问题", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明另一个问题。" }));
-    const answered = await running.until((state) => state.feishuFixtureTextOutbox?.length === 1);
-    const runOf = (state: Awaited<ReturnType<Running["state"]>>) => state.workflows?.runs.find(({ runRef }) => runRef === choice.runRef);
-    console.log(JSON.stringify({ kind: "dispatch_cancelled_choice", commands: ["列出 Agent 笔记让我选发哪个", "这项请求不用做了", "2", "另一个问题"],
-      afterCancel: { jobs: cancelled.agentDispatch, run: runOf(cancelled) }, afterAnswer: { jobs: answered.agentDispatch, run: runOf(answered), outboxes: answered.agentFixtureOutboxes,
+    const answered = await answerTwo(running, "om_choice_answer");
+    console.log(JSON.stringify({ kind: "dispatch_cancelled_choice", commands: ["整理要点，再列出 Agent 笔记让我选发哪个", "这项请求不用做了", "2"],
+      afterCancel: { jobs: cancelled.agentDispatch, runs: sendRuns(cancelled) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered), outboxes: answered.agentFixtureOutboxes,
         coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase), executorTurns: answered.fixtureModelRequests?.length } }));
-    expect(runOf(cancelled)).toMatchObject({ status: "cancelled", effects: [] });
-    expect(runOf(answered)).toMatchObject({ status: "cancelled", effects: [] });
-    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
-    // One cancel report after the start message and the choice; no file, no reply to the answer, no further turn.
-    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"), "已停止继续处理。已经完成的操作不会自动撤销。"]);
-    expect(answered.agentFixtureOutboxes?.alice?.media).toEqual([]);
-    expect(answered.feishuFixtureMediaOutbox).toEqual([]);
-    expect(answered.feishuFixtureTextOutbox?.map(({ message }) => message)).toEqual(["请说明另一个问题。"]);
+    expect(sendRuns(cancelled).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "completed" }, { status: "cancelled" }] });
+    // One cancel report after the start message and the choice; no post, Team Leader turn or Executor run follows the cancel.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      `已停止继续处理：\n执行者 1「整理要点」已完成\n执行者 2「发送笔记」已停止\n已经完成的操作不会自动撤销。`]);
     expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
-    expect(answered.fixtureModelRequests).toHaveLength(1);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("closes the choice a supplement supersedes, so answering it after the rerun was cancelled sends nothing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-superseded-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-superseded-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    const requestId = waiting.agentDispatch!.jobs[0]!.id;
+    // The supplement reruns the Assignment under the supplement's key; its Executor is held, so the request still runs when it is cancelled.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_more", "补充：换成最新的版本", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1], assignments: [], decisions: [] }, modelHold: true }));
+    const rerunning = await running.until((state) => state.fixtureModelRequests?.length === 2 && aliceTexts(state).length === 3);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_rerun_stop", "都停下", control(requestId, "cancel")));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 4);
+    const answered = await answerTwo(running, "om_rerun_answer");
+    console.log(JSON.stringify({ kind: "dispatch_superseded_choice_cancelled", commands: ["列出 Agent 笔记让我选发哪个", "补充：换成最新的版本", "都停下", "2"],
+      afterSupplement: { jobs: rerunning.agentDispatch, runs: sendRuns(rerunning) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered),
+        outboxes: answered.agentFixtureOutboxes, coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase),
+        executorTurns: answered.fixtureModelRequests?.length } }));
+    // The supplement itself closed the choice, before the rerun.
+    expect(sendRuns(rerunning).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs[0]).toMatchObject({ status: "cancelled", assignments: [{ status: "cancelled" }] });
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      expect.stringContaining("完成后会在本群汇报。"), CANCELLED_ONE]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "supplement"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+it("closes the choice of a request that a supplement left queued behind another, so answering it after its cancel sends nothing", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-queued-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-queued-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), { modelToolCalls: chooseNote }));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    const requestId = waiting.agentDispatch!.jobs[0]!.id;
+    // Another request of the same team runs, held, so the supplemented request stays queued behind it.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_other", "帮我整理商品", decision("alice", "整理商品"), { modelHold: true }));
+    await running.until((state) => state.fixtureModelRequests?.length === 2 && aliceTexts(state).length === 3);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_more", "补充：换成最新的版本", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1], assignments: [], decisions: [] } }));
+    const queued = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "queued");
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_queued_stop", "前面那项请求不用做了", control(requestId, "cancel")));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled" && aliceTexts(state).length === 4);
+    const answered = await answerTwo(running, "om_queued_answer");
+    console.log(JSON.stringify({ kind: "dispatch_queued_choice_cancelled", commands: ["列出 Agent 笔记让我选发哪个", "帮我整理商品", "补充：换成最新的版本", "前面那项请求不用做了", "2"],
+      afterSupplement: { jobs: queued.agentDispatch, runs: sendRuns(queued) }, afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered),
+        outboxes: answered.agentFixtureOutboxes, coordinator: answered.feishuFixtureTextOutbox, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase),
+        executorTurns: answered.fixtureModelRequests?.length } }));
+    expect(sendRuns(queued).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
+    expectNothingSent(answered);
+    expect(answered.agentDispatch?.jobs.map(({ status, assignments }) => ({ status, assignments: assignments.map((assignment) => assignment.status) })))
+      .toEqual([{ status: "cancelled", assignments: ["cancelled"] }, { status: "running", assignments: ["running"] }]);
+    // The cancelled request never reached its supplement turn or a second Executor run.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"),
+      expect.stringContaining("完成后会在本群汇报。"), CANCELLED_ONE]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "plan"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 

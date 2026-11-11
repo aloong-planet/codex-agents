@@ -202,8 +202,8 @@ export class AgentDispatch {
     presented(presentation: PendingPresentation): void;
     pending?(event: InboundContent): Promise<DispatchPendingResult>;
     /**
-     * Closes every choice the request's Executors left open, so that no later answer resumes work its requester cancelled.
-     * `assignments` are the request's own; a request stored before Assignments existed has none.
+     * Closes every choice the request's Executors left open, so that no later answer resumes work its requester cancelled or
+     * superseded with a supplement. `assignments` are the request's own; a request stored before Assignments existed has none.
      */
     closeChoices?(job: DispatchJob, assignments: readonly DispatchAssignment[]): Promise<void>;
     report(code: string): void;
@@ -437,14 +437,17 @@ export class AgentDispatch {
             job.cancelRequested = true; job.supplements = [];
             if (job.status === "running" && this.workers.has(job.id)) {
               this.save(job); this.workers.get(job.id)!.abort.abort();
-              // A choice that is already open is closed now; one an Executor raises while it stops is closed when the worker ends.
+              // A choice that is already open is closed now; one an Executor raises while it stops is closed when that Executor ends.
               await this.closeChoices(job);
             } else {
-              // A waiting request has no worker, so nothing else changes it while its choice is closed. The choice is closed before the
-              // cancel is recorded: a stop between the two leaves a request that takes the cancel again, not a cancelled one whose choice is open.
-              if (job.status === "waiting") await this.closeChoices(job);
+              // A waiting request has no worker and nothing starts one, so nothing else changes it while its choice is closed. The choice
+              // is closed before the cancel is recorded: a stop between the two leaves a request that takes the cancel again, not a
+              // cancelled one whose choice is open. Any other request here can be started at any moment, so its cancel is recorded first.
+              const waiting = job.status === "waiting";
+              if (waiting) await this.closeChoices(job);
               this.cancel(job);
               const report = this.recordResult(job, `${event.key}:cancelled`);
+              if (!waiting) await this.closeChoices(job);
               await this.deliverNotice(report.id, report.notice);
             }
           } else {
@@ -456,6 +459,9 @@ export class AgentDispatch {
               await this.coordinate(event, bindingHash, "已补充到建议中。请确认是否开始处理。", job.id);
             } else {
               // A request waiting for a choice: the supplement supersedes the waiting Assignments and its Team Leader decides what it affects.
+              // Their choices are closed first, so that no answer to one resumes work the supplement replaced; like a waiting request's
+              // cancel, nothing else changes the request meanwhile, and a stop in between leaves the supplement to be taken in again.
+              await this.closeChoices(job);
               this.transaction(() => {
                 for (const assignment of this.assignments(job.id)) if (assignment.status === "waiting") { assignment.status = "cancelled"; this.saveAssignment(assignment); }
                 this.blockDependents(job.id);
@@ -553,7 +559,7 @@ export class AgentDispatch {
         }
       });
     }
-    if (job.cancelRequested) { await this.closeChoices(job); this.cancel(job); }
+    if (job.cancelRequested) this.cancel(job);
     // Delivery is a separate outcome: failure here must never restart completed business work.
     const report = this.recordResult(job, this.hasAttemptAssignments(job) ? this.closingId(job) : undefined);
     if (!this.closing) await this.deliverNotice(report.id, report.notice);
@@ -840,7 +846,11 @@ export class AgentDispatch {
     const ended = this.assignment(assignment.id)!;
     const current = this.job(job.id)!;
     // A cancelled request's unfinished Assignments are stopped together, and named so in its report.
-    if (signal.aborted && current.cancelRequested && result?.status !== "completed") return;
+    if (signal.aborted && current.cancelRequested && result?.status !== "completed") {
+      // A choice it raised while it stopped is the request's, so its run is kept and the choice is closed at once: nothing waits for its answer.
+      if (result?.status === "waiting" && result.runRef) { ended.runRef = result.runRef; this.saveAssignment(ended); await this.closeChoices(current); }
+      return;
+    }
     if (failure) {
       ended.status = "failed"; ended.result = `${failureReason(failure.error)}`; ended.cause = failureCause(failure);
     } else {
@@ -969,7 +979,8 @@ export class AgentDispatch {
 
   /**
    * Has the host close the choices the request's Executors left open (agent-dispatch::REQ-007/AC-03). A choice that cannot be
-   * closed stops no cancel: the failure is reported, and an answer to it is still held where pending answers are taken in.
+   * closed stops nothing: the failure is reported. The host then still acts on an answer to that choice before it hands the
+   * result over; where pending answers are taken in, only the request and its Assignments are kept as they are.
    */
   private async closeChoices(job: DispatchJob): Promise<void> {
     try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
