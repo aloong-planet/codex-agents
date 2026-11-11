@@ -1,10 +1,9 @@
 # Team management
 
-> Status: the team registry and the team management page are implemented locally. Teams are edited, bound to groups, onboarded by QR creation or with an existing application, and announced from the console, and changes apply without a restart.
+> Status: the team registry and the team management page are implemented locally. Teams are edited, bound to groups, onboarded by QR creation or with an existing application, announced, removed from groups and deleted from the console, and changes apply without a restart.
 > Related: [agent dispatch](agent-dispatch.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md).
 > Pending: parts of the page are not built.
-> - Not built yet: MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); deleting a team, the removal panel and the completion of a drain (US-004/AC-01 for deletion, AC-02 to AC-05); and the link to skill management (US-001/AC-04).
-> - Unchecking a group stops the team taking work there and announces its departure; the team then stays draining in that group.
+> - Not built yet: MCP binding (US-003/AC-03, AC-04); skills (US-003/AC-05); and the link to skill management (US-001/AC-04).
 > Pending: the Feishu onboarding steps follow official documentation and have not been verified on a real tenant. These points are open:
 > - whether Feishu's application-management APIs accept an application created by QR code, and whether the permissions asked for at creation let it change its own configuration; team-management::US-002/AC-08 says what the owner sees and does when they do not;
 > - whether a created application is already released when the scan ends, or only by step 3;
@@ -24,7 +23,7 @@ A team-management page in the local console lists every Agent Team beside an edi
 
 As the owner, I want to define a team once and choose the groups where it works, so that one team serves several groups without separate configurations or Feishu applications.
 
-- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state (固定 for Sam, otherwise 正常接单 or 接入未完成), its bound groups, its number of Executor profiles and its active Assignments.
+- team-management::US-001/AC-01: The page shows the team list beside the selected team's editor. The list is searchable and filterable by group; each entry shows the team, its state, its bound groups, its number of Executor profiles and its active Assignments. The state is 固定 for Sam; otherwise 正常接单, 接入未完成, or 「停止接单 · 做完后移除」 for a team that is being deleted. A group the team is being removed from stays among its bound groups until the removal completes. The active Assignments, shown as 「<n> 项分工进行中」, are the team's own Assignments that are queued, running or waiting for their requester.
 - team-management::US-001/AC-02: "新增团队" adds an unnamed team to the list and opens it in the editor.
 - team-management::US-001/AC-03: The groups section has a checkbox for each dispatch group. Each group shows a preview of the teams the Coordinator can dispatch to there. A team appears in the preview only when it accepts work in that group under team-management::REQ-003.
 - team-management::US-001/AC-04: Links lead from the page to the team overview, the MCP management page and the skill management page.
@@ -66,11 +65,15 @@ As the owner, I want to set each team's responsibility, its Team Leader's instru
 
 As the owner, I want to take a team out of a group, or delete it, without cancelling work in progress or losing its history.
 
-- team-management::US-004/AC-01: Unchecking a group and saving removes the team from that group. Deleting the team asks for confirmation and then removes it from all its groups. In either case the team stops accepting work in the affected groups immediately and shows as draining there.
-- team-management::US-004/AC-02: Active Assignments of the team in the affected groups finish, and its Team Leader closes them. The removal then completes: the team is unbound from those groups and, when deleted, leaves the team list, with a note in the editor that the deletion is complete. History keeps the team's identity and records.
-- team-management::US-004/AC-03: Scheduled tasks that send with the team's identity in an affected group are listed with the removal. Each must be moved to another team that accepts work in that group, or deleted, before the removal completes.
-- team-management::US-004/AC-04: Requests with Assignments of the team that wait for their requester keep waiting, and the removal stays pending. The page lists those requests with links to their records. The owner can confirm or cancel the ones the owner requested; the others wait for their own requester ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)).
-- team-management::US-004/AC-05: An unchecked group is marked 「保存后移除」; once saved, it shows 「移除中 · 停止接单」, draining and no longer taking work. A removal progress panel, shared by group removal and deletion, shows four steps: work stops, active Assignments finish, scheduled tasks are moved or deleted, and waiting requests are resolved.
+- team-management::US-004/AC-01: Unchecking a group and saving removes the team from that group. Deleting the team asks for confirmation and then removes it from all its groups: 「删除团队」 opens an inline confirmation that reads 「删除后 Sam 立即停止分派给 <负责人>；进行中的 <n> 项分工做完后从所有群移除，并在群里公告。用它身份发送的定时任务要先转给其他团队或删除。历史记录保留。」, or with 「没有进行中的分工，」 in place of the count when the team has no active Assignment, and offers 「确认删除」 and 「取消」. In either case the team stops accepting work in the affected groups immediately and shows as draining there. A deletion also drops the groups in which the team was still onboarding. A team that is being deleted is saved no more: its group checkboxes are disabled, and a save is refused with 「这个团队正在删除，本次保存没有生效。」
+- team-management::US-004/AC-02: Active Assignments of the team in the affected groups finish, and its Team Leader closes them. The removal from a group then completes by itself, once nothing of the team is left there: none of its Assignments is queued, running or waiting, its closing posts have gone out, no scheduled task is sent with its identity, and no request it is part of waits for a requester. The team is unbound from that group, and the groups section says 「已从<群>移除并解绑，历史记录保留。」 until the team's groups are edited again. A team that is being deleted shows 「已停止接单：Sam 不再分派给 <负责人>。下面各群的阻塞都处理完后，团队才会被移除。」 under 删除团队 and leaves the team list with its last removal; a team that nothing holds is deleted at once. Its editor, while it stays open, then shows the state 「已删除 · 历史保留」 and 「删除完成：<负责人> 已从所有群移除，Sam 不再分派给它；历史记录保留。」, with 保存 disabled. History keeps the team's identity and records.
+- team-management::US-004/AC-03: Scheduled tasks that send with the team's identity in an affected group are listed with the removal, each with its name, its schedule and 「用 <负责人> 的身份发送」. Each must be moved to another team that accepts work in that group, with 「转给…」, or deleted, before the removal completes. 「删除」 asks inline, 「删除后不再执行，已有的执行记录保留。」, with 「确认删除」 and 「取消」. After a move the panel says 「已把「<任务名>」转给 <目标负责人>：之后用 <目标负责人> 的身份发送，计划和内容不变。」, and after a deletion 「已删除定时任务「<任务名>」，执行记录保留。」
+- team-management::US-004/AC-04: A request waits with the team when one of the team's own Assignments waits for the requester, or, for the team that leads the request, when any of its Assignments does. Such requests keep waiting, and the removal stays pending. The panel lists each with its number and summary, linked to its record on the overview, and with 「发起人：本人」 or 「发起人：群成员」 and the titles of the waiting Assignments. Only the requester can confirm or cancel, by replying in the group: the owner replies there for the requests the owner made, and the others wait for their own requester ([agent-dispatch::REQ-007/AC-01](agent-dispatch.md)). The page offers no control that answers for a requester.
+- team-management::US-004/AC-05: An unchecked group is marked 「保存后移除」; once saved, it shows 「移除中 · 停止接单」, draining and no longer taking work. A removal progress panel, shared by group removal and deletion, is headed 「<群> · 移除进行中」 and shows four steps, each 已完成, 等待中 or 需处理. It ends with 「以上都结束后自动从<群>解绑，历史记录保留。」 A group removal's panel is in the groups section; a deletion's panels, one per group, are under 删除团队.
+  1. 停止接单, done at once: 「Sam 已不再分派给 <负责人>，并在<群>公告它离开；各负责人的团队通讯录已更新。」
+  2. 「进行中的分工 · <n> 项」, waiting until n is 0 and the team's closing posts are out. It counts the team's own Assignments in that group that are queued, running or waiting for their requester: the same Assignments as the list entry and the deletion confirmation count. Its note is 「做完后由 <负责人> 在群里收尾。」 while some are queued or running, followed by 「其中 <k> 项在等发起人回复，见第 4 步。」 when k of them wait; that second sentence alone when only waiting ones are left; 「分工已做完，<负责人> 正在群里收尾。」 at 0 while a closing post is still going out; and 「已全部结束。」 at 0 otherwise.
+  3. 「用 <负责人> 身份发送的定时任务 · <n> 项」, needing action while a task is left: 「每项转给<群>里其他接单的团队，或删除，才能完成移除。转给后只换发送身份，计划和内容不变。」, and 「已全部处理。」 at 0.
+  4. 「等待发起人确认的事务 · <n> 项」, waiting while a request is left: 「只有发起人能确认或取消；本人发起的请在群里回复，其他成员的等他们回复。」, and 「已全部结束。」 at 0.
 
 ## Functional Requirements
 
@@ -134,9 +137,18 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 | Owner deletes a team that owns scheduled tasks | Removal waits until each task is moved or deleted under team-management::US-004/AC-03 |
 | Owner tries to move a task to a team that is not accepting work in that group | Not offered under team-management::REQ-005 |
 | A draining team has an Assignment waiting for another member's confirmation | Removal stays pending; the request is listed under team-management::US-004/AC-04 |
+| A request the leaving team leads waits only with another team's Assignment | The leaving team's second step counts 0 and says 「已全部结束。」, because it counts the team's own Assignments; its fourth step lists the request, and the removal stays pending (team-management::US-004/AC-04, AC-05) |
+| Owner moves a task to a team that stops accepting work in that group, or is deleted, before the move is made | The task stays with the leaving team. One error line under the four steps says 「没有转交「<任务名>」：<目标负责人> 已不在该群接单，请重新选择。」, or 「…：所选团队已不存在，请重新选择。」 for a deleted team; the next task action's result replaces it |
+| Owner moves or deletes a task while it is executing or being sent | Refused, and the task stays: 「没有转交「<任务名>」：这项定时任务正在执行或发送，稍后再试。」, or the same after 「没有删除「<任务名>」：」 |
+| Owner moves or deletes a task that no longer exists, or acts on a removal whose team is gone | Refused with 「…：这项定时任务已不存在，请刷新页面。」 or 「…：这个团队已不存在，请刷新页面。」 after the same prefix. A failure the service gives no sentence for shows 「请求失败」 after the prefix |
+| Owner confirms the deletion of a team that no longer exists | The confirmation closes, and one error line under 删除团队 says 「没有开始删除：这个团队已不存在，请刷新页面。」 |
+| Owner saves a team that is being deleted, from a page loaded earlier | Refused under team-management::US-004/AC-01 |
+| Owner deletes a team whose QR code still waits for its scan | The deletion does not end the creation, and the code stays valid at Feishu until it runs out. A code confirmed after the deletion started gives the team no application, whether the team still drains or has left: the created application is not attached, its secret is not kept, and the audit names its App ID with the reason `abandoned`. A team that still drains keeps the application it has, so its remaining posts go out. If the service restarts while the code of a team that has left still waits, the start audits one `interrupted` entry for that team |
+| Owner opens a team that is being deleted and is in QR creation | The editor still shows 接入方式 and the QR area with 「刷新二维码」 as for any team in QR creation, although a save is refused. 「刷新二维码」 still requests a code, and its scan gives the team no application (the row above) |
+| A deletion completes while the team's editor is open | Above the completion note of team-management::US-004/AC-02, the onboarding block shows the team as one not saved yet; in QR creation that is 「保存后显示」 with 「保存团队后，这里显示二维码；用飞书扫码即可创建应用。」 「重新检查」 and the test message are not offered |
 | Coordinator's announcement fails to send | Binding change still holds; the announcement keeps its own delivery state under [agent-dispatch::REQ-015/AC-03](agent-dispatch.md) |
 | Owner tries to delete or unbind Sam | No such action under team-management::REQ-001/AC-01 |
-| Service restarts during a drain or onboarding | Drain and onboarding states resume from the stored registry; no step reruns without its recorded outcome |
+| Service restarts during a drain or onboarding | Drain and onboarding states resume from the stored registry; no step reruns without its recorded outcome. A removal that was held when the service stopped completes after the start, once the team has reported its interrupted work with its own application and nothing else holds it |
 | Service restarts while a QR code waits for its scan | The service no longer listens to that code: the creation step needs action, and 「刷新二维码」 requests a new code. The row on a stopped service above says what the owner checks first |
 | Service restarts after a created application's release was submitted | Startup checks whether the bot is enabled; the application is not configured or released again |
 | Service restarts while a test message is being sent | That group's result is unknown; nothing is resent (team-management::US-002/AC-09) |
@@ -168,6 +180,13 @@ Applies to: App Secrets entered by hand or filled in by QR creation. They are st
 
 The Team Directory and the Coordinator's roster are derived from bindings in the accepting state. Announcements are durable outbound messages with their own delivery state.
 
+**Removals.** A draining binding becomes removed once the team has nothing left in that group:
+- no unfinished request involves it there. A request involves its lead team until the request ends, and another team from the attempt that gives it work until that team's Team Leader has closed its Assignments in that attempt;
+- no group post under its identity is still to be sent there;
+- no scheduled task of that group is sent with its application.
+
+The service checks this after every console save and deletion, after a scheduled task is moved or deleted, whenever dispatch work ends, after every scheduler round and at startup. A check that fails removes nothing; the service's diagnostics report `dispatch_work_change_failed` or, after a scheduler round, `team_removal_settle_failed`, and the next check tries again. A team that is being deleted is marked so in its definition. It leaves the definitions in the version that removes its last draining binding, and its application's secret is dropped with it; a team that accepts work nowhere leaves in the version that deletes it. Unbinding and deletion change the registry only: nothing is asked of Feishu. Deleting a team deletes none of its Team Leader or Executor memory. The accounts stay stored and are never recalled, because team IDs are generated and nothing runs under a deleted team's ID again.
+
 **Console saves.** The console saves one team at a time. A save carries the team's editable fields, its checked groups and the definitions version the page was based on. It is refused as stale only when that team's own editable fields changed since then, so another team's save or an onboarding step never refuses it. The registry derives binding states from the checked groups:
 - a kept group keeps its state;
 - a newly checked group starts onboarding;
@@ -175,7 +194,7 @@ The Team Directory and the Coordinator's roster are derived from bindings in the
 - an unchecked onboarding group is dropped;
 - a replaced App ID starts onboarding again in every group the team is not draining from.
 
-A new team's ID is generated at its first save. Sam's save changes only its responsibility and instructions. An App Secret is written beside the versions and never returned.
+A team that is being deleted is not saved (team-management::US-004/AC-01). A new team's ID is generated at its first save. Sam's save changes only its responsibility and instructions. An App Secret is written beside the versions and never returned.
 
 The team's 接入方式 is one of its editable fields, so a save from a page that loaded the team with the other 接入方式 is stale. In QR creation the save does not set the application: the team keeps the one it has, whatever App ID or secret the save carries, and an application that QR creation attached since the page loaded does not make the save stale.
 
@@ -191,7 +210,7 @@ The team's 接入方式 is one of its editable fields, so a save from a page tha
   - `application:bot.basic_info:read`, to read its bot information in step 4.
 - **Listening for the confirmation.** Feishu creates the application when a code is confirmed on the phone, and a code that was shown stays valid there until it is confirmed, declined or runs out, whatever the page shows by then. The service therefore listens to every code it has shown until Feishu settles it, including a code that 「刷新二维码」 replaced and a code whose team has since been saved as an existing application. A request that is replaced before its code arrives is cancelled, because nobody saw that code. Listening lives in the running service only: it ends for a code when the connection to Feishu drops, and for every code when the service stops.
 - **Why the shown code gave no application.** The creation step records one of: `unreachable` (no code), `expired`, `denied` (the owner declined on the phone), `failed` (Feishu refused the scan, or the created application could not be stored), `connection_lost` (the connection dropped after the code was shown), `interrupted` (the service stopped while the code waited) or `unusable`. The page shows `unreachable` as no code and every other reason as an expired code.
-- **The created application** becomes the team's if the team still waits for an application from a scan. It replaces the team's application in a definitions version of its own, as a replaced App ID does in a console save, and its secret is stored beside the versions. An application that team-management::REQ-002 does not let the team use is not attached: the creation step then needs action as `unusable`.
+- **The created application** becomes the team's if the team still waits for an application from a scan and is not being deleted. It replaces the team's application in a definitions version of its own, as a replaced App ID does in a console save, and its secret is stored beside the versions. An application that team-management::REQ-002 does not let the team use is not attached: the creation step then needs action as `unusable`.
 - **Step 2** enables the bot capability, lets other applications invite the bot into groups, and adds the permissions above again, because the scan page may ignore what the link asked for. **Step 3** submits a release with the bot as its default capability, with the reason 「团队负责人机器人：在派单群里以自己的身份发言。」 and the description 「开启机器人能力，申请发送消息、上传文件和读取群信息的权限。」, which the tenant's admin reads when reviewing it. The created application makes both calls on itself.
 - **Review.** After a submitted release, step 3 awaits review until a check finds the bot enabled; the release is not submitted again. Feishu's answer that the application is under review counts as a submitted release, at step 2 as well.
 - **A refused or unanswered call** makes its step need action. A later check that finds the bot enabled completes steps 2 and 3, because an enabled bot has a configured and released application, whoever did it.
@@ -224,13 +243,15 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 **Audit.** These events are recorded with the authorized browser or the service, never with a secret:
 - `team_changed`, naming the fields, and the 接入方式 when the save set or changed it;
 - `team_secret_written`;
-- `team_binding_changed`, with the before and after states;
+- `team_binding_changed`, with the before and after states, also when the service unbinds a team at the end of a removal;
+- `team_delete_started`, with the groups that started draining, and `team_deleted`, when the team has left the definitions;
+- `team_task_moved`, with the task, its group and the team it went to, and `team_task_deleted`;
 - `team_profile_saved` and `team_profile_removed`;
 - `team_application_qr_requested`, for each QR code asked for;
 - `team_application_created`, with the created App ID and the App ID it replaced;
 - `team_application_qr_failed`, with the team and the reason, in these cases:
   - the code the page shows gave no application;
-  - a scan created an application that the team does not use; the entry carries its App ID, and the reason is `abandoned` (the team no longer waited for one), `unusable` or `failed`;
+  - a scan created an application that the team does not use; the entry carries its App ID, and the reason is `abandoned` (the team no longer waited for one, was being deleted or had left), `unusable` or `failed`;
   - the connection was lost for a code that the page no longer shows (`connection_lost`);
   - a start finds a team whose creation step still waited for its scan when the service stopped (`interrupted`); the start writes the entry before it records the step as interrupted, whether or not its channels then come up;
 - `team_onboarding_checked`, with each step's outcome;
@@ -238,7 +259,7 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 - `team_test_message_sent`, with each group's result;
 - `host_tool_refused`.
 
-**Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task.
+**Scheduled tasks.** Moving a task rewrites only its trusted sending identity. The canonical group scope keeps owning the task. A task that is executing or being sent is neither moved nor deleted.
 
 **Console API.** Team management is served by the local console under [agent-console::CON-001](agent-console.md), and every saved change is audited under [agent-console::REQ-004](agent-console.md).
 
@@ -256,6 +277,11 @@ A checked tool whose gate is not granted carries 「未授权」. Removing a too
 - Feishu hosted agents (aily), which cannot receive group events for this service.
 - Per-profile MCP credentials.
 - Restoring a deleted team; history keeps its records only.
+- Answering a waiting request for its requester from the page (team-management::US-004/AC-04).
+- Draining a team by itself after repeated failed credential checks or failed posts. The owner decides from 需处理.
+- Taking a removed team's application out of the Feishu chat. Unbinding changes the registry only, and the bot stays a member of the group until the owner removes it in Feishu; a mention of it there creates no Assignment.
+- Changing who sends a plan follow-up that was stored under a team's identity before the team left the group. While the team exists the follow-up is still posted under its identity, and after the team is deleted it cannot be sent.
+- Ending a team's QR creation when the team is deleted, and a page state of its own for a team in QR creation that is being deleted or was deleted. The failure-mode rows say what happens.
 
 ## Further Notes
 
