@@ -225,13 +225,13 @@ it.each([
   ["is proposed", "propose:alice", "proposed"],
 ] as const)("posts the report of a cancel at the next start when the service stops while the cancel closes the choices of a request that %s", async (_case, text, status) => {
   const state = directory();
-  let first: AgentDispatch | undefined, stopped: Promise<void> | undefined;
+  let stopped: Promise<void> | undefined;
   const before: Array<{ sender: string; message: string; id: string }> = [];
-  first = dispatchWith(state, closingLeader(), { run: async () => ({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }), close: () => {} }, before,
-    { closeChoices: async () => { stopped ??= first!.close(); } });
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), { run: async () => ({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }), close: () => {} }, before,
+    { closeChoices: async () => { stopped ??= first.close(); } });
   await first.start();
   first.admit(event("one", text));
-  await vi.waitFor(() => expect(first!.getState().jobs[0]?.status).toBe(status), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(first.getState().jobs[0]?.status).toBe(status), { timeout: 2000, interval: 10 });
   const posted = posts(before);
   first.admit(event("two", "cancel:one"));
   await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
@@ -2784,10 +2784,10 @@ it.each([
 // service does not send, goes out once at the next start, and the message is not classified again.
 it("asks at the next start what is wanted when the team stops accepting work while the reassignment notice is posted and the service stops meanwhile", async () => {
   const state = directory(), roster = [...accepting];
-  let first: AgentDispatch | undefined, stopped: Promise<void> | undefined;
+  let stopped: Promise<void> | undefined;
   const before: Array<{ sender: string; message: string; id: string }> = [];
-  first = dispatchWith(state, closingLeader(), { run: async () => { throw new Error("no Executor runs for a team that left"); }, close: () => {} }, before,
-    { roster, delivered: (message) => { if (message === REASSIGNED) { leaves(roster, "bill"); stopped = first!.close(); } } });
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), { run: async () => { throw new Error("no Executor runs for a team that left"); }, close: () => {} }, before,
+    { roster, delivered: (message) => { if (message === REASSIGNED) { leaves(roster, "bill"); stopped = first.close(); } } });
   await first.start();
   first.admit(event("one", "bill", { mentionedAgentIds: ["alice"] }));
   await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
