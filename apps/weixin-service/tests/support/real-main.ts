@@ -16,12 +16,12 @@ export type DispatchAssignmentState = { id: string; teamId: string; profileId: s
 export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; attempt: number; requester: string; result?: string;
     definitionsVersion: number | null; assignments: DispatchAssignmentState[] }>; notices?: Array<{ id: string; state: string }> };
   fixtureLeaderRequests?: Array<{ phase: "plan" | "supplement" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
-    directory?: Array<{ name: string; responsibility: string }>; memory?: string;
+    directory?: Array<{ name: string; responsibility: string }>; memory?: string; profiles?: Array<{ id: string; name: string; capabilities: string[] }>;
     assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
   fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;
   fixtureDispatchTurns?: DispatchTurnRecord[];
   fixtureMemoryCurations?: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }>;
-  fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
+  fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown; skills?: Array<{ folder: string; files: string[]; skillMd: string }> }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
   fixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string; fileName: string }[];
   penny?: { configured: boolean; ready: boolean; error?: string };
   pennyFixtureTextOutbox?: { chatId: string; message: string }[];
