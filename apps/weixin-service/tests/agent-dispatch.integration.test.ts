@@ -53,6 +53,10 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - Whether a real Team Leader marks a dependency is checked by the real-model suite. Whether its closing names the Assignments left
 //   not started and the retry order still needs a live run. The fixture injects the plan and the closing; the host's own fallback
 //   closing is unit-tested.
+// - A fixture application refuses a post by answering with an error code, which the channel records as rejected. A refusal that
+//   Feishu answers with an HTTP error status reaches the channel as a failed send and is recorded as unknown, so Sam's sentence for
+//   a rejected start message does not follow it. Retest condition: the transport tells such a refusal from a lost answer; then a
+//   live refused send.
 
 it("keeps travel rules in Bill's turn and the code-and-tests example in Jack's, with the shared rules in every turn", async () => {
   const directory = mkdtempSync(join(tmpdir(), "dispatch-profile-text-"));
@@ -327,6 +331,34 @@ it("fails a request whose start message was uncertain at a crash, without sendin
     expect(recovered.agentDispatch?.notices?.find(({ id }) => id.endsWith(":receipt:0"))?.state).toBe("unknown");
     expect(recovered.agentDispatch?.jobs[0]?.assignments).toEqual([expect.objectContaining({ status: "failed" })]);
     expect(recovered.fixtureModelRequests).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// agent-dispatch::REQ-008/AC-04, the one post another identity makes for a team. The engine's rule (which outcomes of the start
+// message get the sentence, once per attempt, never resent) is covered at the AgentDispatch boundary; this case shows main's
+// wiring: the channel records the platform's refusal as rejected, and the sentence leaves through Sam's application to the
+// request's chat. The plan's title and Brief and the Coordinator's summary differ from the sentence, so the exact outboxes
+// show that nothing of the team's content went out.
+it("has Sam tell the group that a request has not started when its team's start message is rejected, and posts nothing else for the team", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-receipt-rejected-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    // Bill's application refuses its start message and then its failure report.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["rejected", "rejected"] } });
+    await running.post("/api/fixture/inbound", groupMessage("om_receipt_rejected", "帮我规划周末一日行程", decision("bill", "规划周末一日行程"),
+      { leaderPlan: { assignments: [{ profileId: "executor-1", title: "排周末行程", brief: "两人，预算 400 元" }], decisions: ["先核对天气"] } }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentDispatch.notices?.length === 3 &&
+      state.agentDispatch.notices.every(({ state: delivery }) => delivery !== "queued" && delivery !== "sending"));
+    console.log(JSON.stringify({ kind: "dispatch_receipt_rejected", command: "帮我规划周末一日行程", jobs: failed.agentDispatch, outboxes: failed.agentFixtureOutboxes, coordinator: failed.fixtureTextOutbox }));
+    expect(failed.fixtureTextOutbox).toEqual([expect.objectContaining({ chatId: "oc_alpha", message: "Bill 队的接单通知未能发出，这项请求尚未开始处理。请检查 Bill 是否可在本群发言后明确重试。" })]);
+    expect(failed.agentFixtureOutboxes).toEqual({ alice: { text: [], media: [] }, bill: { text: [], media: [] }, jack: { text: [], media: [] } });
+    expect(failed.agentDispatch?.notices?.map(({ id, state }) => [id.split(":").slice(1).join(":"), state]))
+      .toEqual([["receipt:0", "rejected"], ["receipt-rejected:0", "accepted"], ["closing:0", "rejected"]]);
+    expect(failed.agentDispatch?.jobs[0]).toMatchObject({ agentId: "bill", status: "failed", result: "接单通知未确认发送，本次尚未开始处理。请检查机器人是否可在本群发言后明确重试。",
+      assignments: [{ title: "排周末行程", status: "failed" }] });
+    expect([failed.fixtureModelRequests ?? [], failed.fixtureMediaOutbox ?? []]).toEqual([[], []]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
