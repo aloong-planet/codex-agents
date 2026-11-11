@@ -10,16 +10,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CodexConversation } from "../src/codex-conversation.js";
-import type { DynamicToolHost } from "../src/dynamic-tool-host.js";
+import { ConsoleAudit } from "../src/console-audit.js";
+import type { DynamicToolDefinition, DynamicToolHost } from "../src/dynamic-tool-host.js";
 import { type IsolatedModelRuntime, spawnIsolatedAppServer } from "../src/isolated-model-runtime.js";
 import { createIsolatedRuntime, type IsolatedConversationKind, isolatedConversationOptions, ISOLATED_RUNTIME_KINDS } from "../src/isolated-runtime-kinds.js";
+import { McpCatalog } from "../src/mcp-catalog.js";
+import { McpProxyToolHost } from "../src/mcp-proxy-tools.js";
 import { resolveCodexExecutable } from "../src/stdio-app-server-transport.js";
 import { createProductionWorkflowToolCatalog } from "../src/workflow-tool-catalog.js";
 import { createScheduledResearch } from "../src/scheduled-research.js";
 import { AppServerSession, assistantMessage, FakeResponsesEndpoint, type FakeModelRequest, type FakeOutputItem, isolatedConversationPlacements,
   runsInstalledAppServer } from "./fixtures/isolated-runtime-probe.js";
+import { testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 
 describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on the installed Codex App Server", () => {
   let work: string, environment: NodeJS.ProcessEnv, model: FakeResponsesEndpoint, bundledCatalog: string;
@@ -238,6 +243,64 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
     expect(subAgents(placed.runtime)).toEqual({ spawnEdges: 0, subAgentThreads: 0 });
     expect(rollouts(placed.runtime)).toBe(1);
   }, 90_000);
+
+  // mcp-catalog Implementation Decisions (proxy tools): the App Server keeps `mcp` and every name that begins with `mcp__` for its
+  // own MCP client, and refuses a thread that is offered a tool whose name or input schema it cannot take. The proxy boundary
+  // therefore offers a server's tools as a namespace `mcp-<server>`, with names and schemas the App Server takes.
+  it("an Executor runtime is offered an attached MCP server's tools as a namespace and its call reaches the server", async () => {
+    const state = fs.mkdtempSync(path.join(work, "mcp-state-")), home = fs.mkdtempSync(path.join(work, "mcp-home-"));
+    const audit = new ConsoleAudit({ directory: state });
+    const catalog = new McpCatalog({ stateDirectory: state, homeDirectory: home, audit, retryMs: 0, refreshMs: 0 });
+    const { runtime, agentId } = place("dispatchAgent");
+    let conversation: CodexConversation | undefined;
+    try {
+      const files = testServerFiles(state, "amap");
+      // A dotted name and a tuple written as a list in `items`: forms real servers use and the App Server refuses as they are.
+      // `optional` holds forms that are offered as the server gave them: an optional value as a union with null (as Python
+      // servers write it), a property whose only type is null, and a type name that JSON Schema does not have.
+      writeTools(files.tools, [{ name: "admin.tools.list", description: "Lists.", inputSchema: { type: "object" } },
+        { name: "drag", description: "Drags.", inputSchema: { type: "object", properties: { from: { type: "array", items: [{ type: "number" }, { type: "number" }] } } } },
+        { name: "optional", description: "Takes optional values.", inputSchema: { type: "object", properties: { a: { anyOf: [{ type: "string" }, { type: "null" }] }, b: { type: "null" }, c: { type: "any" } } } }]);
+      const server = { name: "amap", command: process.execPath, args: testServerArgs(files) };
+      catalog.register(server, { confirmed: catalog.preview(server).launchLine, actor: {} });
+      await vi.waitFor(() => expect(catalog.viewServer("amap").state).toBe("connected"), { timeout: processWaitLimitMs, interval: 50 });
+      const proxy = new McpProxyToolHost({ definitions: () => hostCatalog.definitions(), execute: hostTools.execute, contractHash: () => hostCatalog.contractHash() }, catalog,
+        { snapshot: ["amap"], current: () => ["amap"], agent: { team: "alice", profile: "executor-1", executor: "执行者 1", request: "request-1" }, audit });
+      const open = (tools: DynamicToolHost) => new CodexConversation(() => spawnIsolatedAppServer(executable(), model.route(runtime, "gpt-5.6-terra")), 60_000, tools, undefined, 60_000,
+        isolatedConversationOptions("dispatchAgent", runtime, { structuredOutputSupported: true, ...(agentId !== undefined ? { agentId } : {}) }));
+      conversation = open(proxy);
+      const threadId = await conversation.startOrResume(undefined, runtime.cwd);
+      const written = path.join(state, "written.txt");
+      let served = false;
+      model.respondWith(() => {
+        if (served) return [assistantMessage("fake-model-reply")];
+        served = true;
+        return [{ type: "function_call", call_id: "mcp-write", name: "write_file", namespace: "mcp-amap", arguments: JSON.stringify({ path: written, text: "from the runtime" }) },
+          { type: "function_call", call_id: "mcp-dotted", name: "admin_tools_list_ce33de31", namespace: "mcp-amap", arguments: "{}" }];
+      });
+      const from = model.requests.length;
+      await conversation.reply(threadId, "use the server");
+      const requests = model.modelRequestsSince(from);
+      expect(toolSurface(requests[0]!).additional.at(-1)).toEqual([...granted(), "mcp-amap.env", "mcp-amap.whoami", "mcp-amap.read_file", "mcp-amap.write_file", "mcp-amap.admin_tools_list_ce33de31", "mcp-amap.drag", "mcp-amap.optional"].sort());
+      expect(fs.readFileSync(written, "utf8")).toBe("from the runtime");
+      const answered = outputs(requests.find((request) => "mcp-write" in outputs(request))!);
+      expect([JSON.parse(answered["mcp-write"]!), JSON.parse(answered["mcp-dotted"]!)]).toEqual([{ text: "written" }, { text: "called admin.tools.list" }]);
+      await conversation.close(); conversation = undefined;
+
+      // The names this boundary avoids: a thread offered any of them does not start.
+      const drag = proxy.definitions().flatMap((definition) => definition.type === "namespace" && definition.name === "mcp-amap" ? definition.tools : []).find(({ name }) => name === "drag")!;
+      const refusedForms: Array<[DynamicToolDefinition, RegExp]> = [
+        [{ type: "namespace", name: "mcp__amap", description: "MCP", tools: [drag] }, /dynamic tool namespace is reserved: mcp__amap/u],
+        [{ ...drag, name: "mcp__amap__drag" }, /dynamic tool name is reserved: mcp__amap__drag/u],
+        [{ type: "namespace", name: "mcp-amap", description: "MCP", tools: [{ ...drag, name: "admin.tools.list" }] }, /dynamic tool name must match/u],
+        [{ type: "namespace", name: "mcp-amap", description: "MCP", tools: [{ ...drag, inputSchema: { type: "object", properties: { from: { type: "array", items: [{ type: "number" }] } } } }] }, /input schema is not supported for drag/u],
+      ];
+      for (const [definition, refusal] of refusedForms) {
+        const refused = open({ definitions: () => [definition], execute: hostTools.execute });
+        try { await expect(refused.startOrResume(undefined, runtime.cwd)).rejects.toThrow(refusal); } finally { await refused.close(); }
+      }
+    } finally { await conversation?.close(); await catalog.close(); }
+  }, 120_000);
 
   it("group research through codex exec is offered only web search, still counts its searches and refuses hidden calls", async () => {
     const runtime = createIsolatedRuntime("research", { stateDirectory: fs.mkdtempSync(path.join(work, "research-")), instance: "feishu.group.probe", environment });

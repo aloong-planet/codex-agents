@@ -38,7 +38,7 @@ We adopt **option 1**.
   An App Server whose catalog file is missing also exits at start.
 - **Result:**
   - A runtime with no grant is offered no tools.
-  - A group or dispatch-agent runtime is offered exactly its host tools, plus `web.run` where web search is live.
+  - A group or dispatch-agent runtime is offered exactly its host tools, for an Executor also the proxy tools of the MCP servers its profile attaches ([MCP catalog](../specs/mcp-catalog.md)), plus `web.run` where web search is live.
   - Group research through `codex exec` is offered `web.run` only.
   - The three owner-private App Servers run in the owner's own Codex home and keep the owner's tool surface: the main conversation, the pending responder and the private memory curator.
 - **One table.** `ISOLATED_RUNTIME_KINDS` (`apps/weixin-service/src/isolated-runtime-kinds.ts`) holds each kind's root, scope, host tools, media access, whether the host writes skills into its home, and conversation options. `main.ts` creates every isolated runtime from it, an architecture test enforces that, and the tests drive the same table.

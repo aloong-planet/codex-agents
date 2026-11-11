@@ -27,6 +27,8 @@ Group invocation, memory, model recovery, file access, pending continuation and 
 
 Isolated model runtimes are created only from `ISOLATED_RUNTIME_KINDS` and started only through `spawnIsolatedAppServer`, so each one is offered only its host's grant, as described in [ADR-0030](docs/adr/0030-offer-isolated-runtimes-only-granted-tools.md).
 
+A dynamic tool offered to an App Server thread, whether a host tool or an MCP proxy tool, has a name of at most 64 letters, digits, `_` and `-`, neither it nor its namespace is named `mcp` or begins with `mcp__`, and its input schema has a form the App Server reads, as described in the [MCP catalog's implementation decisions](docs/specs/mcp-catalog.md#implementation-decisions).
+
 A released Executor's home and a superseded Team Leader's home keep only their thread rollouts, so anything else a runtime needs must be written again whenever the runtime is created, as described in [ADR-0031](docs/adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 
 Every route that reaches files through a saved grant refuses any access where a scope saved below that grant is closed, and writes where one is read-only, whichever module saved it, as described in [ADR-0032](docs/adr/0032-narrow-a-file-grant-by-every-scope-saved-below-it.md).

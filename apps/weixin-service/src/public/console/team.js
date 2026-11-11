@@ -3,8 +3,9 @@
 // runs onboarding and audits every change. Every value from the service is inserted as text (agent-console::REQ-005/AC-04).
 // A team gets its Feishu application by QR creation, with six onboarding steps, or as an existing application, with the last
 // three; the choice is saved with the team, and the QR code is asked for by the save that chooses it (team-management::US-002).
+// A profile attaches servers of the MCP Catalog: binding one shows a confirmation card with the server's exact command or address, and
+// the save carries that line, which the service checks again (team-management::US-003/AC-03, AC-04).
 // A profile's skills are checked from the Skill Library, which the Skill 管理 page maintains (team-management::US-003/AC-05).
-// Not built yet (ticket 11, decision D1): MCP binding.
 // The dispatch-group form (agent-console::US-009) fills the 未配置 panel and, with dispatch, the 派单群设置 drawer; a save writes
 // the channel configuration file and applies after the service restarts.
 (() => {
@@ -32,12 +33,14 @@
   const SAVEBAR = { clean: "保存后新事务立即使用新配置。", dirty: "有未保存的修改", saved: "已保存：新事务使用新配置，进行中的事务保持原配置。", reloaded: "已重新载入最新版本，请再修改。" };
   const SAM = "sam";
   const NEW = "new";
+  /** A server's connection state, in the words MCP 管理 uses for it. */
+  const MCP_STATE = { connected: "已连接", connecting: "连接中", disconnected: "已断开", failed: "连接失败", disabled: "已停用" };
   const $ = (id) => document.getElementById(id);
 
   /** The service's team view. */
   let view = null;
   let selected = null;
-  /** The team a link from another page asks for (`?team=<ID>`, as the skill's details link to unbind it); taken once the view has loaded. */
+  /** The team a link from another page asks for (`?team=<ID>`, as a skill's details and an MCP server's drawer link to unbind it); taken once the view has loaded. */
   let linked = new window.URLSearchParams(location.search).get("team");
   /** Per list entry, the editor's copy: the edit, the definitions version it is based on, the save bar state and a refusal. */
   const drafts = new Map();
@@ -45,6 +48,8 @@
   let filter = "all";
   /** The team whose test message waits for the owner's confirmation. */
   let testConfirm = null;
+  /** The profile whose 绑定 MCP list is open, with the server chosen in it and the command or address its card shows. */
+  let mcpPick = null;
   /** The dispatch-group form: the service's view of the file, the checked groups while edited, the save bar state and a refusal. */
   const dc = { view: null, open: false, checked: null, state: "clean", refusal: null };
   const DC_BAR = { clean: "保存后重启服务才生效。", dirty: "有未保存的修改", saved: "已保存，重启服务后生效", reloaded: "已重新载入最新的配置，请再修改。" };
@@ -87,12 +92,13 @@
     if (id === SAM) return { responsibility: view.coordinator.responsibility, instructions: view.coordinator.instructions };
     if (id === NEW) {
       return { teamName: "", responsibility: "", leader: { name: "", appId: "", instructions: "" }, groups: [], method: "qr", secretEditing: false, secret: "",
-        profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools), skills: [] }] };
+        profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools), mcpServers: [], skills: [] }] };
     }
     const team = shownTeam(id);
     return { id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader }, method: team.method, secretEditing: false, secret: "",
       groups: team.bindings.filter(({ state }) => state !== "draining").map(({ chatId }) => chatId),
-      profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools, skills }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools], skills: [...skills] })) };
+      profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools, mcpServers, skills }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools],
+        mcpServers: mcpServers.map((server) => ({ name: server })), skills: [...skills] })) };
   }
 
   const current = () => drafts.get(selected);
@@ -194,6 +200,31 @@
     }).join("")}</div></div>`).join("");
   }
 
+  const mcpKind = (server) => server.transport === "http" ? "网址" : "本机程序";
+  const mcpStatus = (server) => `${MCP_STATE[server.state] ?? server.state}${server.usable ? ` · 可用 ${server.usable} 个工具` : ""}`;
+
+  /** The 绑定 MCP list of a profile: the catalog's enabled servers it does not attach, and the confirmation card of the chosen one. */
+  function mcpPickHtml(draft, profile, index) {
+    if (mcpPick?.profile !== index) {
+      return `<div class="acf-row-actions atm-mcp-actions"><button class="acv2-button" type="button" data-mcp-pick="${index}">绑定 MCP</button><a class="acv2-button" href="/console/mcp">去 MCP 管理登记</a></div>`;
+    }
+    const free = view.mcpServers.filter((server) => server.enabled && !profile.mcpServers.some(({ name }) => name === server.name));
+    const chosen = free.find((server) => server.name === mcpPick.server);
+    const list = free.map((server) => `<label class="acf-check"><input type="radio" name="atm-mcp-pick" data-mcp-choose="${esc(server.name)}" ${chosen === server ? "checked" : ""}><span><code>${esc(server.name)}</code><small>${mcpKind(server)} · ${esc(mcpStatus(server))} · ${esc(server.launchLine)}</small></span></label>`).join("")
+      || '<p class="acf-section-note">MCP 管理里已启用的服务器都已绑定到这个能力档。</p>';
+    // The card shows the line that the save will carry as confirmed.
+    const card = chosen ? `<div class="acf-grant"><strong>确认授权</strong> 确认后，${esc(draft.leader.name || "新团队")} 团队「${esc(profile.name)}」创建的执行者可以使用 ${esc(chosen.name)} 的工具（mcp__${esc(chosen.name)}__…）。连接由本机服务持有，${chosen.transport === "http" ? "它连接" : "它在本机运行"}：<code>${esc(mcpPick.line)}</code>执行者拿不到它的凭证；这项能力不受模块授权限制，只对使用这个能力档的执行者生效，授权会记入配置变更记录。${chosen.state === "failed" ? "它目前连接失败，连上后工具才会提供。" : ""}</div>` : "";
+    return `<div class="atm-mcp-pick">${list}${card}<div class="acf-row-actions"><button class="acv2-button acv2-primary" type="button" data-mcp-bind ${chosen ? "" : "disabled"}>确认授权并绑定</button><button class="acv2-button" type="button" data-mcp-pick-cancel>取消</button></div></div>`;
+  }
+
+  /** A profile's MCP servers: the attached ones, each with 解绑, then the 绑定 MCP list. */
+  function mcpHtml(draft, profile, index) {
+    const rows = profile.mcpServers.map(({ name }) => view.mcpServers.find((server) => server.name === name)).filter(Boolean)
+      .map((server) => `<div class="atm-mcp"><div class="atm-mcp-main"><code>${esc(server.name)}</code><small>${mcpKind(server)} · ${esc(mcpStatus(server))} · 工具名 mcp__${esc(server.name)}__…</small><code>${esc(server.launchLine)}</code></div><button class="acv2-button" type="button" data-mcp-unbind="${esc(server.name)}" data-profile="${index}">解绑</button></div>`).join("")
+      || '<p class="acf-section-note atm-mcp-none">还没有 MCP。</p>';
+    return `<div class="acf-sub">MCP<small>从 MCP 管理里已登记的条目绑定；每次绑定都是一次授权；解绑立即生效</small></div>${rows}${mcpPickHtml(draft, profile, index)}`;
+  }
+
   /** The Skill Library's skills as checkboxes: each by its name, with what its SKILL.md says it is for. */
   function skillsHtml(profile, index) {
     const list = view.skills.length
@@ -203,12 +234,12 @@
   }
 
   function profilesHtml(draft) {
-    return `<section class="acf-section"><div class="acv-tip-row"><h3>执行者能力档</h3>${tip("负责人派活时选一个能力档创建临时执行者。\n· 实际可用的工具 = 勾选的工具 ∩ 模块授权。\n· 新增的工具只对新事务生效；取消勾选立即生效。")}</div>`
+    return `<section class="acf-section"><div class="acv-tip-row"><h3>执行者能力档</h3>${tip("负责人派活时选一个能力档创建临时执行者。\n· 实际可用的工具 = 勾选的工具 ∩ 模块授权。\n· MCP 会带来模块授权以外的能力，绑定前需要确认。\n· 新增的工具与 MCP 只对新事务生效；取消勾选或解绑立即生效。")}</div>`
       + draft.profiles.map((profile, index) => `<div class="atm-profile"><div class="atm-profile-head"><strong data-profile-title="${index}">${esc(profile.name || "未命名能力档")}</strong><button class="acv2-button" type="button" data-profile-remove="${index}">删除能力档</button></div>`
         + `<div class="acf-fields"><label class="acf-field">能力档名称<input class="acv2-input" data-profile-field="name" data-profile="${index}" value="${esc(profile.name)}" placeholder="例如：商品文案"></label>`
         + `<label class="acf-field">执行者称呼<input class="acv2-input" data-profile-field="noun" data-profile="${index}" value="${esc(profile.noun)}" placeholder="执行者"><span class="atm-noun-hint" data-noun-hint="${index}">${esc(nounHint(profile))}</span></label></div>`
         + `<label class="acf-field atm-field-gap">执行者提示词<textarea class="acf-textarea" data-profile-field="instructions" data-profile="${index}">${esc(profile.instructions)}</textarea></label>`
-        + `<div class="acf-sub">工具<small>实际可用的工具 = 勾选的工具 ∩ 模块授权</small></div>${toolsHtml(profile, index)}${effectiveHtml(profile)}${skillsHtml(profile, index)}</div>`).join("")
+        + `<div class="acf-sub">工具<small>实际可用的工具 = 勾选的工具 ∩ 模块授权</small></div>${toolsHtml(profile, index)}${effectiveHtml(profile)}${mcpHtml(draft, profile, index)}${skillsHtml(profile, index)}</div>`).join("")
       + '<div class="acf-row-actions"><button class="acv2-button" type="button" data-profile-add>新增能力档</button></div></section>';
   }
 
@@ -420,6 +451,7 @@
     deleteConfirm = null; taskConfirm = null; actionError = null;
     selected = id;
     testConfirm = null;
+    mcpPick = null;
     if (!drafts.has(id)) drafts.set(id, entryFor(id));
     renderList();
     renderEditor();
@@ -493,7 +525,7 @@
     // In QR creation the application is the service's to set; a secret is sent only for an existing application.
     return { ...(draft.id ? { id: draft.id } : {}), teamName: draft.teamName, responsibility: draft.responsibility, method: draft.method,
       leader: { name: draft.leader.name, appId: draft.leader.appId, instructions: draft.leader.instructions }, groups: draft.groups,
-      executorProfiles: draft.profiles.map(({ id, name, noun, instructions, hostTools, skills }) => ({ ...(id ? { id } : {}), name, noun, instructions, hostTools, skills })),
+      executorProfiles: draft.profiles.map(({ id, name, noun, instructions, hostTools, mcpServers, skills }) => ({ ...(id ? { id } : {}), name, noun, instructions, hostTools, mcpServers, skills })),
       ...(draft.method === "existing" && draft.secretEditing && draft.secret.trim() ? { secret: draft.secret } : {}) };
   }
 
@@ -625,9 +657,23 @@
     if (sendButton) { void sendTest(sendButton); return; }
     if (target.closest("[data-secret-edit]")) { draft.secretEditing = true; edited(); renderEditor(); document.querySelector('[data-field="secret"]')?.focus(); return; }
     if (target.closest("[data-secret-cancel]")) { draft.secretEditing = false; draft.secret = ""; renderEditor(); return; }
-    if (target.closest("[data-profile-add]")) { draft.profiles.push({ name: `能力档 ${draft.profiles.length + 1}`, noun: "执行者", instructions: "", hostTools: [], skills: [] }); edited(); renderEditor(); return; }
+    if (target.closest("[data-profile-add]")) { draft.profiles.push({ name: `能力档 ${draft.profiles.length + 1}`, noun: "执行者", instructions: "", hostTools: [], mcpServers: [], skills: [] }); edited(); renderEditor(); return; }
     const remove = target.closest("[data-profile-remove]");
-    if (remove) { draft.profiles.splice(Number(remove.dataset.profileRemove), 1); edited(); renderEditor(); return; }
+    if (remove) { draft.profiles.splice(Number(remove.dataset.profileRemove), 1); mcpPick = null; edited(); renderEditor(); return; }
+    const pick = target.closest("[data-mcp-pick]");
+    if (pick) { mcpPick = { profile: Number(pick.dataset.mcpPick), server: null, line: "" }; renderEditor(); return; }
+    if (target.closest("[data-mcp-pick-cancel]")) { mcpPick = null; renderEditor(); return; }
+    // Only the card's confirmation attaches the server, and only to the draft: the team's save applies it.
+    if (target.closest("[data-mcp-bind]")) {
+      if (mcpPick?.server) { draft.profiles[mcpPick.profile].mcpServers.push({ name: mcpPick.server, confirmed: mcpPick.line }); mcpPick = null; edited(); renderEditor(); }
+      return;
+    }
+    const unbind = target.closest("[data-mcp-unbind]");
+    if (unbind) {
+      const profile = draft.profiles[Number(unbind.dataset.profile)];
+      profile.mcpServers = profile.mcpServers.filter(({ name }) => name !== unbind.dataset.mcpUnbind);
+      edited(); renderEditor(); return;
+    }
     const recheckButton = target.closest("[data-recheck]");
     if (recheckButton) { void recheck(recheckButton); return; }
     if (target.closest("[data-save]")) { void save(); return; }
@@ -684,6 +730,14 @@
       return;
     }
     const draft = current().value;
+    const choice = target.dataset.mcpChoose;
+    if (choice && mcpPick) {
+      mcpPick = { ...mcpPick, server: choice, line: view.mcpServers.find((server) => server.name === choice)?.launchLine ?? "" };
+      renderEditor();
+      // The list is drawn again; keyboard focus stays on the server just chosen.
+      [...document.querySelectorAll("[data-mcp-choose]")].find((radio) => radio.dataset.mcpChoose === choice)?.focus();
+      return;
+    }
     const tool = target.dataset.tool;
     if (tool) {
       const profile = draft.profiles[Number(target.dataset.profile)];

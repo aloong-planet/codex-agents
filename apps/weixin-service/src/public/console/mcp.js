@@ -85,14 +85,20 @@
     if (!server.tools.length) return "";
     const waiting = server.counts.pending;
     const enabled = server.tools.filter((tool) => tool.enabled).length;
-    return `<section class="acf-section"><div class="amc-head-row"><div class="acv-tip-row"><h3>工具（共 ${server.tools.length} 个${enabled < server.tools.length ? `，启用 ${enabled} 个` : ""}）</h3>${tip(`勾选的工具提供给绑定了它的执行者；取消勾选即停用，下一次调用起生效，包括进行中的事务。\n· 新增的、定义有变化的工具暂停提供，核对说明和参数后点「确认」。\n· 服务器标为需人工确认的工具不提供。\n· 工具在执行者中的名称为 mcp__${server.name}__工具名。`)}</div>${waiting > 1 ? `<button class="acv2-button" type="button" data-approve="*">全部确认（${waiting}）</button>` : ""}</div><div class="amc-tools">${server.tools.map((tool) => `<label class="amc-tool"><input type="checkbox" data-tool="${esc(tool.name)}" ${tool.enabled ? "checked" : ""}><span><b>${esc(tool.name)}</b>${tool.readOnly ? '<span class="acv2-badge acv2-completed">只读</span>' : ""}${tool.mayModify ? '<span class="acv2-badge acv2-waiting">可能修改数据</span>' : ""}${tool.needsUser ? '<span class="acv2-badge acv2-failed">需人工确认，不提供</span>' : ""}${tool.pending ? `<span class="acv2-badge acv2-waiting">${tool.pending === "new" ? "新增，待复核" : "定义有变化，待复核"}</span>` : ""}<small>${esc(tool.description)}</small>${tool.pending === "changed" ? `<small>变化的部分：${tool.changed.map((part) => PARTS[part]).join("、")}；原说明：${esc(tool.was)}</small>` : ""}</span>${tool.pending ? `<button class="acv2-button" type="button" data-approve="${esc(tool.name)}">确认</button>` : ""}</label>`).join("")}</div></section>`;
+    return `<section class="acf-section"><div class="amc-head-row"><div class="acv-tip-row"><h3>工具（共 ${server.tools.length} 个${enabled < server.tools.length ? `，启用 ${enabled} 个` : ""}）</h3>${tip(`勾选的工具提供给绑定了它的执行者；取消勾选即停用，下一次调用起生效，包括进行中的事务。\n· 新增的、定义有变化的工具暂停提供，核对说明和参数后点「确认」。\n· 服务器标为需人工确认的工具不提供。\n· 工具的名称为 mcp__${server.name}__工具名，确认卡片和审计里都这样写。`)}</div>${waiting > 1 ? `<button class="acv2-button" type="button" data-approve="*">全部确认（${waiting}）</button>` : ""}</div><div class="amc-tools">${server.tools.map((tool) => `<label class="amc-tool"><input type="checkbox" data-tool="${esc(tool.name)}" ${tool.enabled ? "checked" : ""}><span><b>${esc(tool.name)}</b>${tool.readOnly ? '<span class="acv2-badge acv2-completed">只读</span>' : ""}${tool.mayModify ? '<span class="acv2-badge acv2-waiting">可能修改数据</span>' : ""}${tool.needsUser ? '<span class="acv2-badge acv2-failed">需人工确认，不提供</span>' : ""}${tool.pending ? `<span class="acv2-badge acv2-waiting">${tool.pending === "new" ? "新增，待复核" : "定义有变化，待复核"}</span>` : ""}<small>${esc(tool.description)}</small>${tool.pending === "changed" ? `<small>变化的部分：${tool.changed.map((part) => PARTS[part]).join("、")}；原说明：${esc(tool.was)}</small>` : ""}</span>${tool.pending ? `<button class="acv2-button" type="button" data-approve="${esc(tool.name)}">确认</button>` : ""}</label>`).join("")}</div></section>`;
   }
 
   function usedHtml(server) {
-    return `<section class="acf-section"><div class="acv-tip-row"><h3>绑定的能力档</h3>${tip("这些执行者能力档的执行者可以使用它的工具。\n· 要解除，请到团队管理解绑。")}</div>${server.attachedProfiles.length ? "" : '<p class="acf-section-note amc-flush">还没有能力档绑定它。在团队管理的执行者能力档里绑定，绑定时需要你确认。</p>'}</section>`;
+    return `<section class="acf-section"><div class="acv-tip-row"><h3>绑定的能力档</h3>${tip("这些执行者能力档的执行者可以使用它的工具。\n· 要解除，请到团队管理解绑。")}</div>${server.attachedProfiles.length
+      ? `<ul class="acv5-list">${server.attachedProfiles.map(({ teamId, leader, teamName, profile }) => `<li><span>${esc(leader)} · ${esc(teamName)}<small>能力档：${esc(profile)}</small></span><a class="acv2-button" href="/console/teams?team=${esc(encodeURIComponent(teamId))}">去团队管理解绑</a></li>`).join("")}</ul>`
+      : '<p class="acf-section-note amc-flush">还没有能力档绑定它。在团队管理的执行者能力档里绑定，绑定时需要你确认。</p>'}</section>`;
   }
 
   function dangerHtml(server) {
+    // A server that a profile attaches is not deleted (mcp-catalog::US-005/AC-01).
+    if (server.attachedProfiles.length) {
+      return `<section class="acf-section acf-danger"><h3>删除</h3><p class="acf-section-note">被 ${server.attachedProfiles.length} 个能力档绑定。先在团队管理解绑，才能删除。</p><button class="acv2-button acf-danger-button" type="button" disabled>删除服务器</button></section>`;
+    }
     return `<section class="acf-section acf-danger"><h3>删除</h3>${deleting
       ? `<div class="acf-inline-confirm">删除「${esc(server.name)}」：断开连接，配置和已保存的凭证一并删除。<div class="acf-row-actions"><button class="acv2-button acf-danger-button" type="button" data-delete-confirm>确认删除</button><button class="acv2-button" type="button" data-delete-cancel>取消</button></div></div>`
       : '<p class="acf-section-note">没有能力档绑定它，可以删除。</p><button class="acv2-button acf-danger-button" type="button" data-delete>删除服务器</button>'}</section>`;
@@ -145,7 +151,11 @@
 
   function grantHtml() {
     if (!preview?.needsConfirmation) return "";
-    return `<div class="acf-grant"><strong>确认登记</strong> ${form.transport === "http" ? "将连接" : "本机将运行"}：<code id="amc-launch">${esc(preview.launchLine)}</code>登记后还要在团队管理里绑定到能力档，执行者才能使用；绑定时会再次确认。</div>`;
+    // A change to a server that profiles attach reaches running requests too (mcp-catalog::REQ-002).
+    const attached = mode === "new" ? 0 : current()?.attachedProfiles.length ?? 0;
+    return `<div class="acf-grant"><strong>确认登记</strong> ${form.transport === "http" ? "将连接" : "本机将运行"}：<code id="amc-launch">${esc(preview.launchLine)}</code>${attached
+      ? `已绑定到 ${attached} 个能力档。确认后服务器重新连接，之后的每次调用都使用新的${form.transport === "http" ? "地址" : "命令"}，包括进行中的事务；定义有变化的工具会暂停提供，复核后再提供。`
+      : "登记后还要在团队管理里绑定到能力档，执行者才能使用；绑定时会再次确认。"}</div>`;
   }
 
   function formHtml() {
@@ -154,7 +164,7 @@
     const savebarText = note.text || (isNew ? "添加后即开始连接。" : "保存后重新连接；只改可信或停用工具时不重新连接。");
     const stdio = form.transport !== "http";
     return `<section class="acf-section"><div class="acv-tip-row"><h3>配置</h3>${tip(`环境变量、请求头和密钥的值只进不出。\n· 已保存的值显示为 ${KEEP}，不修改即沿用。\n· 错误信息和程序输出里出现时替换为 ***。`)}</div>`
-      + `<div class="acf-fields"><label class="acf-field"><span class="acv-tip-row">名称${REQ}${tip("英文字母、数字、_ 和 -，1–32 个字符，创建后不可修改。\n· 工具在执行者中的名称为 mcp__名称__工具名。")}</span><input class="acv2-input amc-mono" data-f="name" value="${esc(form.name)}" maxlength="32" placeholder="如：github" ${isNew ? "" : "disabled"}></label></div>`
+      + `<div class="acf-fields"><label class="acf-field"><span class="acv-tip-row">名称${REQ}${tip("英文字母、数字、_ 和 -，1–32 个字符，创建后不可修改。\n· 工具的名称为 mcp__名称__工具名，确认卡片和审计里都这样写。")}</span><input class="acv2-input amc-mono" data-f="name" value="${esc(form.name)}" maxlength="32" placeholder="如：github" ${isNew ? "" : "disabled"}></label></div>`
       + `<div class="acf-field amc-gap"><span class="acv-tip-row">连接方式${REQ}</span><div class="amc-radios"><label><input type="radio" name="amc-transport" data-kind="stdio" ${stdio ? "checked" : ""}>${KINDS.stdio}</label><label><input type="radio" name="amc-transport" data-kind="http" ${stdio ? "" : "checked"}>${KINDS.http}</label></div></div>`
       + (stdio ? stdioFieldsHtml() : httpFieldsHtml())
       + `<div class="acf-fields amc-gap"><label class="acf-field"><span class="acv-tip-row">超时（秒）${OPT}${tip("单次调用的超时，1–600 秒；留空为 60 秒。")}</span><input class="acv2-input" type="number" min="1" max="600" data-f="timeout" value="${esc(form.timeout)}" placeholder="60"></label></div>`
@@ -368,7 +378,8 @@
     if (target.closest("[data-delete-cancel]")) { deleting = false; renderServerSections(); return; }
     if (target.closest("[data-delete-confirm]")) {
       void api(`/api/mcp/servers/${encodeURIComponent(selected)}/delete`, {}).then(({ ok, body }) => {
-        if (!ok) { setNote(body.error ?? "请求失败", "dirty"); return; }
+        // A refusal leaves the server as it is; the drawer then shows what the service reports of it now.
+        if (!ok) { deleting = false; setNote(body.error ?? "请求失败", "dirty"); void load(); return; }
         close();
         void load();
       });

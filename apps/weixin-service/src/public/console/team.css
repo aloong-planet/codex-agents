@@ -54,6 +54,15 @@
 .atm-unauth{margin-left:4px;font-size:10px;color:var(--acv-warning)}
 .atm-effective{margin:8px 0 0;font-size:11px;color:var(--acv-ink);line-height:1.7}
 .atm-effective small{display:block;font-size:10px;color:var(--acv-muted)}
+.atm-mcp{display:flex;align-items:center;gap:8px;padding:7px 9px;border:1px solid var(--acv-line);border-radius:7px;margin-bottom:6px;font-size:11px}
+.atm-mcp code{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;color:var(--acv-ink);overflow-wrap:anywhere}
+.atm-mcp .atm-mcp-main{min-width:0;flex:1}
+.atm-mcp small{display:block;font-size:10px;color:var(--acv-muted)}
+.atm-mcp .acv2-button{min-height:24px;padding:2px 7px;font-size:10px}
+.atm-mcp-pick{border:1px dashed var(--acv-line);border-radius:8px;padding:10px;margin-top:6px;display:flex;flex-direction:column;gap:6px}
+.atm-mcp-pick .acf-section-note{margin:0}
+.acf-section-note.atm-mcp-none{margin:0 0 6px}
+.acf-row-actions.atm-mcp-actions{margin-top:4px}
 .atm-announce{flex-basis:100%;margin:0 0 2px 22px;font-size:10px;color:var(--acv-muted);line-height:1.6}
 .atm-announce[data-state="failed"]{color:var(--acv-error)}
 .atm-profile{border:1px solid var(--acv-line);border-radius:8px;padding:12px;margin-top:10px}

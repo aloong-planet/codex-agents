@@ -1,5 +1,5 @@
 // The console's API as an authorized browser session calls it, for what console journeys set up and check beside the page.
-// Shared by team-management.spec.ts and skill-library.spec.ts. Other spec files still send such requests with helpers of their own.
+// Shared by team-management.spec.ts, skill-library.spec.ts and mcp-catalog.spec.ts. Other spec files still send such requests with helpers of their own.
 
 /** The fixture service a journey runs against: its origin and the harness's own authorized cookie. */
 export type ConsoleServer = { url: string; cookie: string };
@@ -19,4 +19,11 @@ export const read = async <T>(server: ConsoleServer, pathname: string) => await 
 export async function importSkill(server: ConsoleServer, folder: string): Promise<string> {
   const { preview } = await post<{ preview: { fingerprint: string } }>(server, "/api/skills/read", { folder });
   return (await post<{ id: string }>(server, "/api/skills/import", { folder, confirmed: preview.fingerprint })).id;
+}
+
+/** Registers an MCP server with the line its confirmation card shows, as setup for journeys that are not about registration, and returns that line. */
+export async function registerMcpServer(server: ConsoleServer, definition: Record<string, unknown>): Promise<string> {
+  const { launchLine } = await post<{ launchLine: string }>(server, "/api/mcp/preview", { server: definition });
+  await post(server, "/api/mcp/servers", { server: definition, confirmed: launchLine });
+  return launchLine;
 }

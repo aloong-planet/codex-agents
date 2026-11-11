@@ -98,6 +98,7 @@ import { ConsoleAudit } from "./console-audit.js";
 import { ConsoleOverview, displayId } from "./console-overview.js";
 import { createConsoleRoutes } from "./console-routes.js";
 import { McpCatalog } from "./mcp-catalog.js";
+import { McpProxyToolHost } from "./mcp-proxy-tools.js";
 import { skillKey, SkillLibrary } from "./skill-library.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
@@ -229,6 +230,9 @@ const workflowToolCatalog = createProductionWorkflowToolCatalog({
 // runs, and every dispatch reader takes the current definitions from it (team-management spec; ticket 11, decision D5).
 const consoleStateDirectory = path.dirname(privateStatePath);
 const consoleAudit = new ConsoleAudit({ directory: consoleStateDirectory });
+// The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01). A
+// server that a profile of the current team definitions attaches is not deleted (mcp-catalog::US-005/AC-01).
+const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit, attachments: (server) => teamManagement?.mcpAttachments(server) ?? [] });
 // The Skill Library: skills imported from local folders as copies, which Executor profiles select (skill-library spec). Its
 // directory is service state, outside every file grant (ADR-0029). Which versions requests can still run with is known once
 // the dispatch records can be read; until then, and whenever the service runs without dispatch, the library removes none.
@@ -284,6 +288,7 @@ const feishuConfiguration = ((): FeishuStartupEntry | undefined => {
       tasks: { sentBy: (appId) => senderTasks.sentBy(appId), move: (...task) => senderTasks.move(...task), delete: (...task) => senderTasks.delete(...task) },
       rosterChanged: (roster) => applyRoster(roster),
       reservedApplications: () => pennyApplicationId ? { [pennyApplicationId]: "该飞书应用已用于 Penny，不能用于团队" } : {},
+      mcpCatalog,
       skills: () => skillLibrary.list(),
       report: (code) => process.stderr.write(`${code}\n`) });
     // A re-import that stopped after storing its version left the profiles on the earlier one: they follow now.
@@ -1078,10 +1083,12 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Each call is also checked against the profile's current allowlist, so a removed tool is refused at once in running
   // requests, and the refusal is audited (agent-dispatch::REQ-017/AC-02).
   const toolViews = new Map<string, ProfileToolHost>();
-  // A preset's host tools in the current definitions; undefined once the preset is gone.
-  const stillAllowed = (teamId: string, profileId: string) => {
-    try { return resolveAgentProfile(teams.current().definitions, { role: "executor", teamId, profileId }, catalogToolIds).hostTools; } catch { return undefined; }
+  // A preset as the current definitions resolve it; undefined once the preset is gone.
+  const currentProfile = (teamId: string, profileId: string) => {
+    try { return resolveAgentProfile(teams.current().definitions, { role: "executor", teamId, profileId }, catalogToolIds); } catch { return undefined; }
   };
+  // A preset's host tools in the current definitions; undefined once the preset is gone.
+  const stillAllowed = (teamId: string, profileId: string) => currentProfile(teamId, profileId)?.hostTools;
   const executorProfile = (job: import("./agent-dispatch-types.js").DispatchJob, assignment: import("./agent-dispatch-types.js").DispatchAssignment) => {
     const agent = { role: "executor", teamId: assignment.teamId, profileId: assignment.profileId } as const;
     const resolved = resolveAgentProfile(definitionsFor(job.definitionsVersion), agent, catalogToolIds);
@@ -1094,7 +1101,11 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
       });
       toolViews.set(key, tools);
     }
-    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools, skills: resolved.skills };
+    // Beside its host tools, the Executor gets the proxy tools of the MCP servers its profile attached when the request was
+    // admitted and still attaches; every call is checked again, and a refused one is audited (agent-dispatch::REQ-016/AC-03, REQ-017).
+    const granted = new McpProxyToolHost(tools, mcpCatalog, { snapshot: resolved.mcpServers, current: () => currentProfile(assignment.teamId, assignment.profileId)?.mcpServers,
+      agent: { team: assignment.teamId, profile: assignment.profileId, executor: assignment.executor, request: job.id }, audit: consoleAudit });
+    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: granted, skills: resolved.skills };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: closeDispatchRuntime });
@@ -1140,10 +1151,13 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     return { leader: { id: team.id, name: team.leader.name, teamName: team.teamName, responsibility: team.responsibility, instructions },
       // Each preset with what an Executor created from it can do now, which is all its Team Leader is told of it (agent-dispatch::REQ-011/AC-01).
       profiles: team.executorProfiles.map(({ id, name, noun }) => {
-        const resolved = resolveAgentProfile(versionDefinitions, { role: "executor", teamId, profileId: id }, catalogToolIds);
+        const resolved = resolveAgentProfile(versionDefinitions, { role: "executor", teamId, profileId: id }, catalogToolIds), attachedNow = currentProfile(teamId, id)?.mcpServers ?? [];
+        // What the preset's attached MCP servers give its Executors now: those of the request's version that it still attaches.
+        const mcp = resolved.mcpServers.filter((server) => attachedNow.includes(server))
+          .map((server) => ({ server, tools: mcpCatalog.toolsFor(server).map(({ tool, description }) => ({ name: tool, description })) }));
         // Its skills are the request's own versions, with the names and descriptions those versions were imported with.
         return { id, name, ...(noun ? { noun } : {}), capabilities: executorCapabilities(resolved.hostTools, stillAllowed(teamId, id), scopes,
-          ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live", resolved.skills.flatMap((ref) => skillLibrary.version(ref) ?? [])) };
+          ISOLATED_RUNTIME_KINDS.dispatchAgent.conversation.webSearch === "live", resolved.skills.flatMap((ref) => skillLibrary.version(ref) ?? []), mcp) };
       }), memoryScope };
   };
   const executor = new CodexDispatchExecutor(path.join(path.dirname(privateStatePath), "agent-sessions.sqlite"), {
@@ -1448,8 +1462,6 @@ skillSnapshots.needed = () => {
 skillLibrary.prune();
 // Every page and API of the local service requires an owner-authorized browser (agent-console::CON-001).
 const consoleAccess = new ConsoleAccess({ directory: consoleStateDirectory, audit: consoleAudit });
-// The MCP Catalog: the service holds every registered server's connection and credentials (mcp-catalog::REQ-003/AC-01).
-const mcpCatalog = new McpCatalog({ stateDirectory: consoleStateDirectory, audit: consoleAudit });
 // The dispatch-group form writes the channel configuration file this service loaded; a save applies at the next start (agent-console::US-009).
 const dispatchGroupSettings = new DispatchGroupSettings({ file: channelConfigurationPath, running: feishuConfiguration?.dispatch?.groupChatIds ?? [],
   unfinished: () => unfinishedRequestsByGroup(agentDispatch?.getState().jobs ?? [], (accountId, target) => feishuConfiguration!.owner.deliveryTarget(accountId, target)),

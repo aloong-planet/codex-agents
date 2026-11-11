@@ -86,8 +86,8 @@ async function connected(catalog: McpCatalog, name: string) {
 /** Every file directly in the state directory, as text: no secret may survive in any of them. */
 const stateText = (state: string) => fs.readdirSync(state).filter((file) => fs.statSync(path.join(state, file)).isFile()).map((file) => fs.readFileSync(path.join(state, file), "utf8")).join("\n");
 
-async function callJson(catalog: McpCatalog, tool: string) {
-  const result = await catalog.call(tool, {});
+async function callJson(catalog: McpCatalog, server: string, tool: string) {
+  const result = await catalog.call(server, tool, {});
   return JSON.parse(result.text);
 }
 
@@ -136,8 +136,10 @@ describe("connections held by the host", () => {
     register(catalog, input("envcheck", testServerFiles(work)));
     await connected(catalog, "envcheck");
 
-    const { env, cwd } = await callJson(catalog, "mcp__envcheck__env");
-    expect(env.SECRET_TOKEN).toBe(SECRET_SENTINEL);
+    const files = testServerFiles(work);
+    const { env, cwd } = await callJson(catalog, "envcheck", "env");
+    // The program received its own variable (its start marker records it); the call's result masks it for the agent.
+    expect([starts(files)[0]?.secretToken, env.SECRET_TOKEN]).toEqual([SECRET_SENTINEL, "***"]);
     expect(env.PATH).toBe(process.env.PATH);
     for (const key of ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME", "FEISHU_APP_SECRET"]) expect(env).not.toHaveProperty(key);
     expect(fs.realpathSync(cwd)).toBe(fs.realpathSync(home));
@@ -223,7 +225,7 @@ describe("reviewing tools", () => {
     expect(tools.other).not.toHaveProperty("pending");
     expect(catalog.toolsFor().map((tool) => tool.name)).not.toEqual(expect.arrayContaining(["mcp__review__fresh"]));
     expect(catalog.toolsFor().map((tool) => tool.name)).not.toContain("mcp__review__lookup");
-    await expect(catalog.call("mcp__review__lookup", { q: "x" })).rejects.toThrow("该工具的定义有变化，等待复核");
+    await expect(catalog.call("review", "lookup", { q: "x" })).rejects.toThrow("该工具的定义有变化，等待复核");
 
     catalog.approve("review", ["fresh"], actor);
     expect(catalog.toolsFor().map((tool) => tool.name)).toContain("mcp__review__fresh");
@@ -255,13 +257,13 @@ describe("reviewing tools", () => {
 
     expect(catalog.viewServer("person").tools.find((tool) => tool.name === "pay")).toMatchObject({ needsUser: true, usable: false });
     expect(catalog.toolsFor().map((tool) => tool.name)).not.toContain("mcp__person__pay");
-    await expect(catalog.call("mcp__person__pay", {})).rejects.toThrow("服务器要求每次调用都由人确认，不提供这类工具");
+    await expect(catalog.call("person", "pay", {})).rejects.toThrow("服务器要求每次调用都由人确认，不提供这类工具");
 
     writeTools(files.tools, [NEEDS_PERSON, { ...NEEDS_PERSON, name: "refund" }]);
     await vi.waitFor(() => expect(catalog.viewServer("person").tools.map((tool) => tool.name)).toContain("refund"), WAIT);
     catalog.approve("person", undefined, actor);
     expect(catalog.viewServer("person").tools.find((tool) => tool.name === "refund")).toMatchObject({ needsUser: true, usable: false });
-    await expect(catalog.call("mcp__person__refund", {})).rejects.toThrow("服务器要求每次调用都由人确认，不提供这类工具");
+    await expect(catalog.call("person", "refund", {})).rejects.toThrow("服务器要求每次调用都由人确认，不提供这类工具");
   });
 
   it("a disabled tool or server is refused at the next call", async () => {
@@ -271,16 +273,16 @@ describe("reviewing tools", () => {
     const server = input("switch", files);
     register(catalog, server);
     await connected(catalog, "switch");
-    expect((await callJson(catalog, "mcp__switch__whoami")).pid).toBe(starts(files)[0]?.pid);
+    expect((await callJson(catalog, "switch", "whoami")).pid).toBe(starts(files)[0]?.pid);
 
     catalog.setToolEnabled("switch", "whoami", false, actor);
     expect(catalog.toolsFor().map((tool) => tool.name)).not.toContain("mcp__switch__whoami");
-    await expect(catalog.call("mcp__switch__whoami", {})).rejects.toThrow(McpCallRefused);
-    await expect(catalog.call("mcp__switch__whoami", {})).rejects.toThrow("该工具已停用");
-    expect(JSON.parse((await catalog.call("mcp__switch__env", {})).text).cwd).toBeTruthy();
+    await expect(catalog.call("switch", "whoami", {})).rejects.toThrow(McpCallRefused);
+    await expect(catalog.call("switch", "whoami", {})).rejects.toThrow("该工具已停用");
+    expect(JSON.parse((await catalog.call("switch", "env", {})).text).cwd).toBeTruthy();
 
     catalog.update("switch", { ...server, enabled: false }, { actor });
-    await expect(catalog.call("mcp__switch__env", {})).rejects.toThrow("MCP 服务器 switch 已停用");
+    await expect(catalog.call("switch", "env", {})).rejects.toThrow("MCP 服务器 switch 已停用");
     expect(catalog.viewServer("switch").state).toBe("disabled");
     const pid = starts(files)[0]!.pid;
     await vi.waitFor(() => expect(isAlive(pid)).toBe(false), WAIT);
@@ -298,16 +300,16 @@ describe("changes and deletion", () => {
     const server = input("moving", first);
     register(catalog, server);
     await connected(catalog, "moving");
-    const before = await callJson(catalog, "mcp__moving__whoami");
+    const before = await callJson(catalog, "moving", "whoami");
 
     const moved = { ...server, args: testServerArgs(second) };
     expect(catalog.preview(moved, "moving")).toEqual({ launchLine: [process.execPath, ...testServerArgs(second)].join(" "), needsConfirmation: true });
     expect(() => catalog.update("moving", moved, { actor })).toThrow("请先确认将要运行的命令");
-    expect((await callJson(catalog, "mcp__moving__whoami")).argv).toEqual(before.argv);
+    expect((await callJson(catalog, "moving", "whoami")).argv).toEqual(before.argv);
 
     catalog.update("moving", moved, { confirmed: catalog.preview(moved, "moving").launchLine, actor });
-    await vi.waitFor(async () => expect((await callJson(catalog, "mcp__moving__whoami")).pid).not.toBe(before.pid), WAIT);
-    expect((await callJson(catalog, "mcp__moving__whoami")).argv).toEqual(testServerArgs(second).slice(1));
+    await vi.waitFor(async () => expect((await callJson(catalog, "moving", "whoami")).pid).not.toBe(before.pid), WAIT);
+    expect((await callJson(catalog, "moving", "whoami")).argv).toEqual(testServerArgs(second).slice(1));
     expect(catalog.viewServer("moving").tools.find((tool) => tool.name === "lookup")).toMatchObject({ pending: "changed", changed: ["schema"] });
     expect(catalog.viewServer("moving").tools.find((tool) => tool.name === "env")).toMatchObject({ usable: true });
   });
@@ -322,8 +324,8 @@ describe("changes and deletion", () => {
     const elsewhere = temporary("mcp-catalog-cwd-");
 
     catalog.update("keeper", { ...server, env: { SECRET_TOKEN: "••••••" }, cwd: elsewhere, timeout: 90 }, { actor });
-    await vi.waitFor(async () => expect(fs.realpathSync((await callJson(catalog, "mcp__keeper__env")).cwd)).toBe(fs.realpathSync(elsewhere)), WAIT);
-    expect((await callJson(catalog, "mcp__keeper__env")).env.SECRET_TOKEN).toBe(SECRET_SENTINEL);
+    await vi.waitFor(async () => expect(fs.realpathSync((await callJson(catalog, "keeper", "env")).cwd)).toBe(fs.realpathSync(elsewhere)), WAIT);
+    expect(starts(files).at(-1)?.secretToken).toBe(SECRET_SENTINEL);
   });
 
   it("deleting an unattached server stops it and removes its secrets", async () => {
@@ -417,7 +419,7 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     register(catalog, input("boxed", files, { args: [...testServerArgs(files), "--named", path.join(home, "notes", "named.txt")], sandbox: { domains: [], read: [readable], write: [writable] } }));
     await connected(catalog, "boxed");
 
-    const call = (tool: string, args: Record<string, unknown>) => catalog.call(`mcp__boxed__${tool}`, args);
+    const call = (tool: string, args: Record<string, unknown>) => catalog.call("boxed", tool, args);
     expect(await call("read_file", { path: path.join(readable, "in.txt") })).toEqual({ text: "readable content", isError: false });
     expect(await call("write_file", { path: path.join(writable, "out.txt"), text: "ok" })).toEqual({ text: "written", isError: false });
     expect(fs.readFileSync(path.join(writable, "out.txt"), "utf8")).toBe("ok");
@@ -426,7 +428,7 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     expect(await call("read_file", { path: path.join(home, "notes", "sibling.txt") })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(await call("write_file", { path: path.join(readable, "new.txt"), text: "no" })).toMatchObject({ isError: true, text: expect.stringMatching(/^EPERM/) });
     expect(fs.existsSync(path.join(readable, "new.txt"))).toBe(false);
-  });
+  }, 20_000);
 
   it("an npx server starts with the server's own npm cache, whatever the owner entered", async () => {
     const { work, home, open } = setup();
@@ -441,7 +443,7 @@ describe.skipIf(process.platform !== "darwin")("sandbox (macOS)", () => {
     await vi.waitFor(() => expect(catalog.viewServer("npxbox")).toMatchObject({ state: "connected" }), { timeout: 60_000, interval: 200 });
 
     const own = path.join(home, "Library", "Caches", "codex-weixin", "mcp", "npxbox");
-    expect(JSON.parse((await catalog.call("mcp__npxbox__npm_settings", {})).text)).toEqual({ cache: path.join(own, "npm"), userconfig: path.join(own, "npmrc") });
+    expect(JSON.parse((await catalog.call("npxbox", "npm_settings", {})).text)).toEqual({ cache: path.join(own, "npm"), userconfig: path.join(own, "npmrc") });
     expect(fs.readdirSync(path.join(own, "npm")).length).toBeGreaterThan(0);
     expect(fs.statSync(own).mode & 0o777).toBe(0o700);
     expect(fs.readFileSync(path.join(own, "npmrc"), "utf8")).toBe("");
@@ -481,7 +483,7 @@ describe("URL servers", () => {
     register(catalog, { name: "remote", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
     register(catalog, { name: "refused", transport: "http", url: refusing.url, headers: { "X-Api-Key": HEADER_SENTINEL } });
     expect((await connected(catalog, "remote")).server).toEqual({ name: "catalog-http-test-server", version: "2.0.1" });
-    expect(await callJson(catalog, "mcp__remote__whoami")).toEqual({ scheme: "none", scope: null, headers: ["X-Api-Key"] });
+    expect(await callJson(catalog, "remote", "whoami")).toEqual({ scheme: "none", scope: null, headers: ["X-Api-Key"] });
     const seen = server.requests.map((request) => request.headers["X-Api-Key"]);
     expect(seen.length).toBeGreaterThanOrEqual(3);
     expect(new Set(seen)).toEqual(new Set([HEADER_SENTINEL]));
@@ -508,7 +510,7 @@ describe("URL servers", () => {
 
     register(catalog, { name: "docs", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read" } });
     await connected(catalog, "docs");
-    expect(await callJson(catalog, "mcp__docs__whoami")).toEqual({ scheme: "Bearer", scope: "docs:read", headers: ["X-Api-Key"] });
+    expect(await callJson(catalog, "docs", "whoami")).toEqual({ scheme: "Bearer", scope: "docs:read", headers: ["X-Api-Key"] });
     expect(as.tokenRequests).toEqual([{ clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL, scope: "docs:read", dpop: false, granted: true }]);
     const presented = server.requests.filter((request) => request.scheme !== "refused");
     expect(presented.length).toBeGreaterThanOrEqual(2);
@@ -524,7 +526,7 @@ describe("URL servers", () => {
 
     register(catalog, { name: "bound", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL }, oauth: { issuer: as.issuer, clientId: "agent-console", clientSecret: CLIENT_SECRET_SENTINEL }, dpop: true });
     await connected(catalog, "bound");
-    expect(await callJson(catalog, "mcp__bound__whoami")).toMatchObject({ scheme: "DPoP", headers: ["X-Api-Key"] });
+    expect(await callJson(catalog, "bound", "whoami")).toMatchObject({ scheme: "DPoP", headers: ["X-Api-Key"] });
     expectNoConfiguredHeader(as);
     expect(as.tokenRequests).toMatchObject([{ dpop: true, granted: true }]);
     expect(as.issued).toMatchObject([{ type: "DPoP", jkt: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/) }]);
@@ -561,7 +563,7 @@ describe("URL servers", () => {
     register(catalog, { name: "accepting", transport: "http", url: server.url, headers: { "X-Api-Key": HEADER_SENTINEL, Accept: "text/plain" } });
     await vi.waitFor(() => expect(["connected", "failed"]).toContain(catalog.viewServer("accepting").state), WAIT);
     expect(catalog.viewServer("accepting")).toMatchObject({ state: "connected" });
-    expect(await callJson(catalog, "mcp__accepting__whoami")).toMatchObject({ scheme: "none" });
+    expect(await callJson(catalog, "accepting", "whoami")).toMatchObject({ scheme: "none" });
   });
 
   it.each([
@@ -579,7 +581,7 @@ describe("URL servers", () => {
     let line: string;
     if (rpc === "tools/call") {
       await connected(catalog, "moved");
-      line = await catalog.call("mcp__moved__whoami", {}).then(() => "", (error: Error) => error.message);
+      line = await catalog.call("moved", "whoami", {}).then(() => "", (error: Error) => error.message);
       // A failed call the server did not answer reconnects at once, to the configured URL.
       await connected(catalog, "moved");
     } else {
@@ -671,7 +673,7 @@ describe("URL servers", () => {
     await connected(catalog, "gone");
 
     await first.close();
-    if (options.refreshMs === 0) await expect(catalog.call("mcp__gone__whoami", {})).rejects.toThrow();
+    if (options.refreshMs === 0) await expect(catalog.call("gone", "whoami", {})).rejects.toThrow();
     await vi.waitFor(() => expect(catalog.viewServer("gone")).toMatchObject({ state: "failed", retryAt: expect.any(String) }), { timeout: 3_000, interval: 50 });
     const back = await httpServer({ port });
     await connected(catalog, "gone");
@@ -691,14 +693,14 @@ describe("URL servers", () => {
     const toUrl = { name: "moving", transport: "http", url: first.url, headers: { "X-Api-Key": HEADER_SENTINEL } };
     expect(catalog.preview(toUrl, "moving")).toEqual({ launchLine: first.url, needsConfirmation: true });
     expect(() => catalog.update("moving", toUrl, { actor })).toThrow("请先确认将要连接的地址：确认卡片上的地址与当前填写的不一致");
-    expect((await callJson(catalog, "mcp__moving__whoami")).pid).toBe(pid);
+    expect((await callJson(catalog, "moving", "whoami")).pid).toBe(pid);
 
     catalog.update("moving", toUrl, { confirmed: first.url, actor });
     await vi.waitFor(() => expect(catalog.viewServer("moving").server?.name).toBe("catalog-http-test-server"), WAIT);
     // The URL server's whoami differs from the program's, and lookup is new: both wait for review (REQ-002).
     expect(Object.fromEntries(catalog.viewServer("moving").tools.map((tool) => [tool.name, tool.pending]))).toEqual({ whoami: "changed", lookup: "new" });
     catalog.approve("moving", undefined, actor);
-    expect(await callJson(catalog, "mcp__moving__whoami")).toMatchObject({ scheme: "none" });
+    expect(await callJson(catalog, "moving", "whoami")).toMatchObject({ scheme: "none" });
     await vi.waitFor(() => expect(isAlive(pid)).toBe(false), WAIT);
     expect(stateText(state)).toContain(HEADER_SENTINEL);
     expect(stateText(state)).not.toContain(SECRET_SENTINEL);

@@ -5,7 +5,8 @@ import path from "node:path";
 import { expect, type Locator, type Page, type TestInfo } from "@playwright/test";
 
 import { WorkflowModulePermissionStore } from "../src/workflow-module-permission-store.js";
-import { importSkill, post, read } from "./console-api.js";
+import { testServerArgs, testServerFiles, writeTools } from "../tests/fixtures/mcp-test-server-control.js";
+import { importSkill, post, read, registerMcpServer } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // 团队管理 (docs/specs/team-management.md) in a real browser, against the fixture service with Feishu dispatch and the fake
@@ -14,7 +15,8 @@ import { test } from "./fixtures.js";
 // check that the page, the API and the service are wired together.
 // QR creation runs against the fake platform, whose scan the journeys end through the fixture route: no Feishu tenant is called,
 // and whether Feishu accepts the automatic configuration and release of a QR-created application stays live acceptance.
-// Not built yet (decision D1), so not driven here: MCP binding.
+// MCP binding runs against real local MCP programs, registered through the catalog's API; what an attached server's tools then
+// do for an Executor is driven in tests/team-management.integration.test.ts and tests/mcp-proxy-tools.test.ts.
 const SAM_APP = "cli_0123456789abcdef";
 const SECRET_SENTINEL = "page-secret-SENTINEL-7d21";
 const LONG = { timeout: 15_000 };
@@ -238,6 +240,63 @@ test.describe("with Feishu dispatch", () => {
     await expect(profile.locator("[data-profile-title]")).toHaveText("行程规划");
     await expect(profile.locator(".atm-noun-hint")).toHaveText("群里称为「行程执行者 51」这样的称呼加编号");
     await testInfo.attach("profile-tools", { body: await page.screenshot(), contentType: "image/png" });
+  });
+
+  // team-management::US-003/AC-03, AC-04. The catalog holds an enabled server and a disabled one; only the card's confirmation
+  // puts the server into the team's draft, and only the save attaches or unbinds it.
+  test("lists the enabled servers a profile does not attach under 绑定 MCP, attaches one only from its confirmation card and the save, and unbinds it", async ({ page, fixtureServer }, testInfo) => {
+    const register = (name: string, extra: Record<string, unknown> = {}) => {
+      const files = testServerFiles(fixtureServer.directory, name);
+      writeTools(files.tools, [{ name: "route_plan", description: "Plans a route.", inputSchema: { type: "object" } }]);
+      return registerMcpServer(fixtureServer, { name, command: process.execPath, args: testServerArgs(files), ...extra });
+    };
+    const line = await register("amap");
+    await register("spare", { enabled: false });
+    type McpTeamsView = { mcpServers: Array<{ name: string; state: string }>; teams: Array<{ id: string; profiles: Array<{ mcpServers: string[] }> }> };
+    const attached = async () => (await read<McpTeamsView>(fixtureServer, "/api/teams")).teams.find(({ id }) => id === "bill")!.profiles[0]!.mcpServers;
+    await expect.poll(async () => (await read<McpTeamsView>(fixtureServer, "/api/teams")).mcpServers.find(({ name }) => name === "amap")?.state, LONG).toBe("connected");
+
+    await page.goto("/console/teams");
+    await listItem(page, "Bill · 生活团队").click();
+    const profile = editor(page).locator(".atm-profile").first();
+    await expect(profile.locator(".atm-mcp-none")).toHaveText("还没有 MCP。");
+    await expect(profile.getByRole("link", { name: "去 MCP 管理登记" })).toHaveAttribute("href", "/console/mcp");
+    await profile.getByRole("button", { name: "绑定 MCP" }).click();
+    const picker = profile.locator(".atm-mcp-pick");
+    // The disabled server is not offered; the enabled one shows its transport, state, usable tools and exact command.
+    await expect(picker.locator(".acf-check")).toHaveText([`amap本机程序 · 已连接 · 可用 5 个工具 · ${line}`]);
+    await expect(picker.getByRole("button", { name: "确认授权并绑定" })).toBeDisabled();
+    await picker.getByRole("radio").check();
+    await expect(picker.locator(".acf-grant")).toHaveText(`确认授权 确认后，Bill 团队「能力档 1」创建的执行者可以使用 amap 的工具（mcp__amap__…）。连接由本机服务持有，它在本机运行：${line}执行者拿不到它的凭证；这项能力不受模块授权限制，只对使用这个能力档的执行者生效，授权会记入配置变更记录。`);
+    await testInfo.attach("mcp-bind-card", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+    // Closing the card without confirming attaches nothing and leaves the team unedited.
+    await picker.getByRole("button", { name: "取消" }).click();
+    await expect(profile.locator(".atm-mcp")).toHaveCount(0);
+    await expect(page.locator("#atm-savebar")).toHaveAttribute("data-state", "clean");
+
+    await profile.getByRole("button", { name: "绑定 MCP" }).click();
+    await picker.getByRole("radio").check();
+    await picker.getByRole("button", { name: "确认授权并绑定" }).click();
+    const row = profile.locator(".atm-mcp");
+    await expect(row.locator(".atm-mcp-main")).toHaveText(`amap本机程序 · 已连接 · 可用 5 个工具 · 工具名 mcp__amap__…${line}`);
+    await expect(page.locator("#atm-savebar")).toHaveText(/有未保存的修改/);
+    expect(await attached()).toEqual([]);
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator("#atm-savebar")).toHaveText(/已保存：新事务使用新配置，进行中的事务保持原配置。/);
+    expect(await attached()).toEqual(["amap"]);
+    await expect(row).toHaveCount(1);
+    // Every enabled server is attached now.
+    await profile.getByRole("button", { name: "绑定 MCP" }).click();
+    await expect(picker.locator(".acf-section-note")).toHaveText("MCP 管理里已启用的服务器都已绑定到这个能力档。");
+    await testInfo.attach("mcp-attached-row", { body: await page.screenshot({ fullPage: true }), contentType: "image/png" });
+    await picker.getByRole("button", { name: "取消" }).click();
+
+    await row.getByRole("button", { name: "解绑" }).click();
+    await expect(profile.locator(".atm-mcp-none")).toHaveText("还没有 MCP。");
+    expect(await attached()).toEqual(["amap"]);
+    await page.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(page.locator("#atm-savebar")).toHaveText(/已保存/);
+    expect(await attached()).toEqual([]);
   });
 
   // team-management::US-003/AC-05 and US-001/AC-04: a profile's skills are checked from the Skill Library, and the page leads

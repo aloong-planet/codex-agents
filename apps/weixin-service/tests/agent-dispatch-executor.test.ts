@@ -354,6 +354,43 @@ it.each([
   } finally { await executor.close(); }
 });
 
+// agent-dispatch::CON-003: what an Executor is told it may do. An Executor whose tool host grants it an MCP server is told that
+// what its tools do may be done; every other Executor keeps the sentence that rules out operating a website. The host lists no
+// tool in any row: a granted server may list nothing at the moment of a turn, while the Executor's thread keeps the tools it
+// started with.
+const PLAIN_AUTHORITY = "只能使用本轮已授权能力，不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。";
+it.each<[string, (() => boolean) | undefined, string]>([
+  ["whose tool host knows no MCP server", undefined, PLAIN_AUTHORITY],
+  ["that is granted no MCP server", () => false, PLAIN_AUTHORITY],
+  ["that is granted an MCP server, also while the server lists no tool", () => true,
+    "只能使用本轮已授权能力：提供给你的工具能完成的操作可以执行，除此之外不能执行终端命令或操作网站后台；无法执行的步骤必须明确标记未执行。"],
+])("tells an Executor %s what it may do", async (_case, grantsMcp, sentence) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-executor-authority-")); directories.push(directory);
+  const agent = conversation("thread-1");
+  const prompts: string[] = [];
+  agent.runTurn.mockImplementation(async (_thread, turn) => {
+    const prepared = await (turn as ChannelTurnAdapter).prepare();
+    prompts.push(JSON.stringify(prepared.input)); await prepared.binding?.release();
+    return { owner: "model_owned", finalText: '{"message":"已整理好商品文案。","results":[]}' };
+  });
+  const executor = new CodexDispatchExecutor(join(directory, "agent-sessions.sqlite"), {
+    agents: () => [{ id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
+    runtimes: new RuntimePool<DispatchRuntime>({ limit: 2, idleMs: 60_000, close: ({ agent: owned }) => owned.close() }),
+    createRuntime: (_job, scope) => ({ agent, cwd: `/isolated/${scope}` }),
+    tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, tools: { definitions: () => [], contractHash: () => "contract-1",
+      execute: async () => { throw new Error("tool calls are not part of this case"); }, ...(grantsMcp ? { grantsMcp } : {}) } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined,
+  });
+  try {
+    await expect(executor.run(job("request-one"), assignment("request-one:assignment:0:1"), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(sentence);
+    expect(prompts[0]!.split("只能使用本轮已授权能力")).toHaveLength(2);
+  } finally { await executor.close(); }
+});
+
 // agent-dispatch::REQ-010/AC-01: a cross-team Assignment runs under its own team, so what its Executor produces goes out under
 // that team's Team Leader, with the application frozen when the team took its part (agent-dispatch::REQ-008/AC-04). The runtime's
 // turn prepares itself as the App Server does, which binds the workflow tools to the turn's event.

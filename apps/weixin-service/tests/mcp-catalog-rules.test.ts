@@ -12,8 +12,11 @@ import {
   normalizeHttp,
   normalizeStdio,
   normalizeTimeout,
+  offeredInput,
+  offeredToolName,
   pinDiff,
   pinOf,
+  redactDeep,
   redactSecrets,
   retryDelay,
   toolStatus,
@@ -348,5 +351,96 @@ describe("import check (mcp-catalog::US-002/AC-01)", () => {
     ['{"mcpServers": {}}', "mcpServers 里没有服务器"],
   ])("refuses %s", (text, message) => {
     expect(() => checkImport(text, () => false, context)).toThrow(message);
+  });
+});
+
+// The name a runtime is offered for a tool: the tool's own name when the model provider takes it (letters, digits, `_` and
+// `-`, at most 64 characters), measured on the installed App Server, which refuses a thread whose tool has any other name.
+// Hash suffixes are the first 8 hex characters of the name's SHA-256, computed by hand with `shasum -a 256`.
+describe("offered tool name", () => {
+  it.each([
+    ["lookup", "lookup"], ["Create-Issue_2", "Create-Issue_2"], ["a".repeat(64), "a".repeat(64)],
+    ["admin.tools.list", "admin_tools_list_ce33de31"], ["查询 天气", "______218fc15d"],
+    // Each name gets its own form whatever else the server lists: `a.b` and `a b` differ from each other and from a tool named `a_b`.
+    ["a.b", "a_b_2e7336dc"], ["a b", "a_b_c8687a08"], ["a_b", "a_b"],
+    ["t".repeat(70), `${"t".repeat(55)}_a75c6749`],
+  ])("offers %s as %s", (tool, offered) => {
+    expect(offeredToolName(tool)).toBe(offered);
+  });
+});
+
+// That the installed App Server refuses a tuple written as a list in `items`, and takes the open object offered instead, is the
+// opt-in case "an Executor runtime is offered an attached MCP server's tools …" in isolated-runtime-tools.test.ts. The other rows
+// are forms it took or refused when measured by hand on codex-cli 0.167.0-alpha.3.2 (2026-11-11).
+describe("the input schema a runtime is offered", () => {
+  const point = { type: "array", items: [{ type: "number" }, { type: "number" }] };
+  // Each row builds its schema twice, so the expected value is not the object the rule was given.
+  it.each([
+    ["an object with typed properties", () => ({ type: "object", properties: { q: { type: "string" } }, required: ["q"] })],
+    ["references, unions, type lists and unknown keywords", () => ({ type: "object", properties: { item: { $ref: "#/$defs/item" }, v: { anyOf: [{ type: "string" }, { type: ["number", "null"] }] }, any: true },
+      $defs: { item: { type: "object", additionalProperties: { type: "string" } } }, "x-custom": 1 })],
+    ["an optional value written as a union with null, a null-only property and a type name of the server's own", () => ({ type: "object",
+      properties: { a: { anyOf: [{ type: "string" }, { type: "null" }] }, b: { type: "null" }, c: { type: "any" } } })],
+    ["an empty schema", () => ({})],
+  ])("offers %s as the server gave it", (_case, schema) => {
+    expect(offeredInput("Finds an item.", schema())).toEqual({ description: "Finds an item.", inputSchema: schema() });
+  });
+
+  it.each([
+    ["a tuple written as a list in items", { type: "object", properties: { from: point } }],
+    ["such a tuple inside a union inside a definition", { type: "object", $defs: { target: { oneOf: [{ type: "string" }, point] } } }],
+    ["a schema whose only type is null", { type: "null" }],
+    ["a required that is not a list of names", { type: "object", required: "q" }],
+    ["no schema at all", undefined],
+    ["a schema that is a list", [{ type: "object" }]],
+  ])("offers %s as an open object and puts the schema in the description", (_case, schema) => {
+    expect(offeredInput("Drags.", schema)).toEqual({ description: `Drags.\n\n参数按这份 JSON Schema 填写：${JSON.stringify(schema ?? null)}`, inputSchema: { type: "object", additionalProperties: true } });
+  });
+
+  it("puts only the schema in the description of a tool that has none", () => {
+    expect(offeredInput("", { type: "null" }).description).toBe('参数按这份 JSON Schema 填写：{"type":"null"}');
+  });
+});
+
+// mcp-catalog::REQ-003/AC-01: no agent sees a server's saved secrets; a call's result is masked by REQ-001's rule.
+describe("masking a secret as JSON text writes it", () => {
+  it("masks a secret with a quote, a backslash or a line break both as it is and as JSON escapes it", () => {
+    const password = 'pa"ss\\word', key = "BEGIN\nMIIEvQ\nEND";
+    expect(redactSecrets(`plain ${password} and ${key}; json ${JSON.stringify({ password, key })}`, [password, key]))
+      .toBe('plain *** and ***; json {"password":"***","key":"***"}');
+  });
+
+  // The first three texts are what `go run` (encoding/json), `python3` (json.dumps) and `php` (json_encode) printed for these
+  // values on 2026-11-11, and the nested one is what Node printed for `JSON.stringify({ output: JSON.stringify({ v }) })`.
+  it.each([
+    ["a secret written with Go's \\u0026 for &", ["postgres://app:S3cr3t@db/x?sslmode=require&connect_timeout=10"],
+      String.raw`{"DATABASE_URL":"postgres://app:S3cr3t@db/x?sslmode=require\u0026connect_timeout=10"}`, '{"DATABASE_URL":"***"}'],
+    ["secrets written with Python's \\uXXXX for a character outside ASCII, one of them as a surrogate pair", ["pässwort-2026", "key-😀-2026"],
+      String.raw`{"PASSWORD": "p\u00e4sswort-2026", "KEY": "key-\ud83d\ude00-2026"}`, '{"PASSWORD": "***", "KEY": "***"}'],
+    ["a secret written with PHP's \\/ for /", ["tok/abc/def-123456"], String.raw`{"TOKEN":"tok\/abc\/def-123456"}`, '{"TOKEN":"***"}'],
+    ["a secret whose line breaks are written as \\u000A", ["BEGIN\nMIIEvQ\nEND"], String.raw`{"KEY":"BEGIN\u000AMIIEvQ\u000aEND"}`, '{"KEY":"***"}'],
+    ["a secret in JSON text carried as a string inside JSON text", ['pa"ss\\word-1'], String.raw`{"output":"{\"v\":\"pa\\\"ss\\\\word-1\"}"}`, String.raw`{"output":"{\"v\":\"***\"}"}`],
+    // Backslashes that belong to the text: nothing but the secret changes, whether they read as JSON escapes (`\t`, `\\`) or
+    // not (`\q`, and `\u` before letters that are no hexadecimal number).
+    ["a secret beside a path whose backslashes read as JSON escapes", ["abcdef"], String.raw`dir C:\temp "C:\\x" key abcdef`, String.raw`dir C:\temp "C:\\x" key ***`],
+    ["a secret beside backslashes that are no JSON escapes", ["abcdef"], String.raw`C:\q\users key abcdef`, String.raw`C:\q\users key ***`],
+    // The secret is a backslash and five letters: the JSON text holds it both as written (from the second backslash) and escaped.
+    ["a secret found under two spellings at once", ["\\abcde"], String.raw`{"k":"\\abcde"}`, '{"k":"***"}'],
+  ])("masks %s", (_case, secrets, text, expected) => {
+    expect(redactSecrets(text, secrets)).toBe(expected);
+  });
+
+  // REQ-001's limit: a secret is masked under up to four layers of JSON text, counting the one that holds it.
+  it("masks a secret in JSON text nested four deep and leaves one nested five deep", () => {
+    const secret = 'pa"ss\\word-1';
+    const nested = (value: string, depth: number): string => depth === 0 ? value : nested(JSON.stringify({ v: value }), depth - 1);
+    expect([redactSecrets(nested(secret, 4), [secret]), redactSecrets(nested(secret, 5), [secret])]).toEqual([nested("***", 4), nested(secret, 5)]);
+  });
+});
+
+describe("masking every string of a call's structured result", () => {
+  it("masks secrets of 6 characters or more in values and keys at any depth, and leaves other values as they are", () => {
+    expect(redactDeep({ token: "tok-123456", rows: [{ note: "uses tok-123456 twice: tok-123456", n: 7, ok: true, none: null }], "tok-123456": "short abc" }, ["tok-123456", "abc"]))
+      .toEqual({ token: "***", rows: [{ note: "uses *** twice: ***", n: 7, ok: true, none: null }], "***": "short abc" });
   });
 });

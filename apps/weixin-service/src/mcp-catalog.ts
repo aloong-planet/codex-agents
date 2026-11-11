@@ -23,8 +23,10 @@ import {
   normalizeHttp,
   normalizeStdio,
   normalizeTimeout,
+  offeredToolName,
   pinDiff,
   pinOf,
+  redactDeep,
   redactSecrets,
   retryDelay,
   toolStatus,
@@ -42,7 +44,8 @@ import {
 /**
  * The MCP Catalog (docs/specs/mcp-catalog.md, ADR-0027, ADR-0028): the local programs and URL servers the owner
  * registered or imported, and the host-side connections to them. The service holds every connection and every
- * credential; agents only ever reach a server through `toolsFor` and `call`, which re-check the current configuration.
+ * credential; agents only ever reach a server through `toolsFor` and `call`, which re-check the current configuration
+ * and mask the server's saved secrets in whatever a call returns.
  *
  * - `mcp-catalog.json` holds the readable configuration, disabled tools and pinned definitions; `mcp-secrets.json`
  *   holds environment values, header values and OAuth client secrets. Both are owner-only and replaced atomically;
@@ -138,9 +141,12 @@ export type McpServerView = ({
   output?: string;
   tools: McpToolView[];
   counts: { total: number; usable: number; pending: number };
-  /** Profiles that attach this server. Profiles gain MCP attachment in ticket 16; until then none does. */
-  attachedProfiles: Array<{ team: string; profile: string }>;
+  /** The profiles that attach this server, each with its team (mcp-catalog::US-003/AC-03). */
+  attachedProfiles: McpAttachment[];
 };
+
+/** A profile that attaches a server: the team's ID, its Team Leader's name, its name, and the profile's name. */
+export type McpAttachment = { teamId: string; leader: string; teamName: string; profile: string };
 
 export type McpServerInput = {
   name?: unknown;
@@ -176,8 +182,21 @@ type ServerSecrets = { env: Record<string, string>; headers: Record<string, stri
 
 export type McpActor = { browser?: ConsoleBrowser };
 
-/** A tool call the catalog refuses; the message is the reason. */
-export class McpCallRefused extends Error {}
+/**
+ * Why the catalog does not forward a call: the server is not registered or is disabled; the tool is disabled, is not
+ * among the tools the server lists, needs a person, or waits for review; or the server cannot be connected (`unavailable`).
+ */
+export type McpRefusal = "server_unknown" | "server_disabled" | "tool_disabled" | "tool_unknown" | "needs_user" | "pending_review" | "unavailable";
+
+/** A tool call the catalog refuses; the message is the reason in the owner's words. `tool` is the tool's own name when the call named a listed tool, else the name as called. */
+export class McpCallRefused extends Error {
+  constructor(message: string, readonly reason: McpRefusal, readonly tool: string) { super(message); }
+}
+
+/** A forwarded call that got no result: no answer within the server's timeout (`timedOut`), or a failed request. The message holds none of the server's saved secrets. */
+export class McpCallFailed extends Error {
+  constructor(message: string, readonly timedOut: boolean) { super(message); }
+}
 
 export type McpCatalogOptions = {
   stateDirectory: string;
@@ -194,6 +213,8 @@ export type McpCatalogOptions = {
    * `~/Library/Caches/codex-weixin/mcp`.
    */
   cacheDirectory?: string;
+  /** The profiles of the current team definitions that attach `server`; a server any of them attaches is not deleted. */
+  attachments?: (server: string) => McpAttachment[];
   now?: () => number;
 };
 
@@ -404,9 +425,14 @@ export class McpCatalog {
     return this.viewOf(next);
   }
 
-  /** Deletes an unattached server: its connection stops and its secrets leave the disk (mcp-catalog::US-005/AC-02). */
+  /**
+   * Deletes an unattached server: its connection stops and its secrets leave the disk (mcp-catalog::US-005/AC-02). A
+   * server that a profile attaches is not deleted (mcp-catalog::US-005/AC-01).
+   */
   async remove(name: string, actor: McpActor): Promise<void> {
     const server = this.require(name);
+    const attached = this.attachmentsOf(name).length;
+    if (attached) throw new McpConfigError(`被 ${attached} 个能力档绑定。先在团队管理解绑，才能删除。`);
     this.commit(this.servers.filter((item) => item !== server), withServerSecrets(this.secrets, name, undefined), { browser: actor.browser, event: "mcp_server_deleted", server: name });
     await this.disconnect(name);
     this.connections.delete(name);
@@ -508,41 +534,71 @@ export class McpCatalog {
     return this.viewOf(this.require(name));
   }
 
-  /** The proxy tools that may be provided now: enabled servers' enabled, reviewed tools that need no person. */
-  toolsFor(): Array<{ name: string; server: string; tool: string; description: string; inputSchema: unknown }> {
-    return this.servers.filter((server) => server.enabled).flatMap((server) =>
-      (this.connections.get(server.name)?.tools ?? [])
-        .filter((tool) => this.statusOf(server, tool).usable)
-        .map((tool) => ({ name: proxyName(server.name, tool.name), server: server.name, tool: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema ?? { type: "object" } })));
+  /**
+   * The proxy tools that may be provided now: enabled servers' enabled, reviewed tools that need no person; with
+   * `only`, those of that server. `offered` is the name a runtime is offered the tool under (`offeredToolName`). When two
+   * tools of a server would be offered under one name, only the one that `call` reaches by that name is provided.
+   */
+  toolsFor(only?: string): Array<{ name: string; server: string; tool: string; offered: string; description: string; inputSchema: unknown }> {
+    return this.servers.filter((server) => server.enabled && (only === undefined || server.name === only)).flatMap((server) => {
+      const listed = this.connections.get(server.name)?.tools ?? [];
+      return listed.filter((tool) => this.statusOf(server, tool).usable && this.resolve(listed, offeredToolName(tool.name)) === tool)
+        .map((tool) => ({ name: proxyName(server.name, tool.name), server: server.name, tool: tool.name, offered: offeredToolName(tool.name), description: tool.description ?? "", inputSchema: tool.inputSchema ?? { type: "object" } }));
+    });
+  }
+
+  /** The listed tool a call's name stands for: the tool of that name, else the first one offered under it. */
+  private resolve(listed: ToolDefinition[], name: string): ToolDefinition | undefined {
+    return listed.find((tool) => tool.name === name) ?? listed.find((tool) => offeredToolName(tool.name) === name);
+  }
+
+  /**
+   * The own name of the tool `called` stands for, for a record such as the audit: `called` when the server has a pinned tool
+   * of that name, else the first pinned tool that is offered under it, else `called` as it is. Every tool that was ever
+   * offered is pinned, and a pin stays while the server is registered. Nothing is asked of the server.
+   */
+  toolName(name: string, called: string): string {
+    const pinned = Object.keys(this.find(name)?.pins ?? {});
+    return pinned.includes(called) ? called : pinned.find((tool) => offeredToolName(tool) === called) ?? called;
   }
 
   /**
    * Calls a tool through the host, re-checking the current configuration on every call: a disabled server or tool,
-   * an unreviewed definition or a tool that needs a person is refused (mcp-catalog::US-004/AC-01, AC-03, AC-04).
+   * an unreviewed definition or a tool that needs a person is refused (mcp-catalog::US-004/AC-01, AC-03, AC-04). The
+   * call is bounded by the server's timeout. Every string it returns, and the message of a failure, has the server's
+   * saved secrets of 6 characters or more replaced by `***`, so that no agent sees them (mcp-catalog::REQ-003/AC-01).
+   *
+   * `called` is the tool's own name or the name a runtime was offered it under. The tool it stands for is looked up
+   * once the server is connected, among the tools the server lists then: a thread may call a name it was offered
+   * before the server's program, or the service, started again.
    */
-  async call(full: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
-    const server = this.servers.find((item) => full.startsWith(`mcp__${item.name}__`));
-    if (!server) throw new McpCallRefused(`没有可用的 MCP 工具 ${full}`);
-    const toolName = full.slice(`mcp__${server.name}__`.length);
-    if (!server.enabled) throw new McpCallRefused(`MCP 服务器 ${server.name} 已停用`);
-    if (server.disabledTools.includes(toolName)) throw new McpCallRefused("该工具已停用");
+  async call(name: string, called: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean; structuredContent?: unknown }> {
+    const server = this.find(name);
+    if (!server) throw new McpCallRefused(`没有名为 ${name} 的 MCP 服务器`, "server_unknown", called);
+    if (!server.enabled) throw new McpCallRefused(`MCP 服务器 ${server.name} 已停用`, "server_disabled", called);
+    // A disabled tool called by its own name is refused without starting the server's program for it.
+    if (server.disabledTools.includes(called)) throw new McpCallRefused("该工具已停用", "tool_disabled", called);
     let connection = this.connections.get(server.name);
     if (connection?.state === "connecting" && connection.pending) await connection.pending.catch(() => {});
     else if (!connection?.client) await this.connect(server.name).catch(() => {});
     connection = this.connections.get(server.name);
-    if (!connection?.client) throw new McpCallRefused(`MCP 服务器 ${server.name} 无法连接：${connection?.error ?? "未连接"}`);
-    const tool = connection.tools.find((item) => item.name === toolName);
-    if (!tool) throw new McpCallRefused("服务器当前的工具列表中没有它");
+    if (!connection?.client) throw new McpCallRefused(`MCP 服务器 ${server.name} 无法连接：${connection?.error ?? "未连接"}`, "unavailable", called);
+    const tool = this.resolve(connection.tools, called);
+    if (!tool) throw new McpCallRefused("服务器当前的工具列表中没有它", "tool_unknown", called);
+    const toolName = tool.name;
+    if (server.disabledTools.includes(toolName)) throw new McpCallRefused("该工具已停用", "tool_disabled", toolName);
     const status = this.statusOf(server, tool);
-    if (status.needsUser) throw new McpCallRefused("服务器要求每次调用都由人确认，不提供这类工具");
-    if (status.pending) throw new McpCallRefused(`该工具${status.pending === "new" ? "是新增的" : "的定义有变化"}，等待复核`);
+    if (status.needsUser) throw new McpCallRefused("服务器要求每次调用都由人确认，不提供这类工具", "needs_user", toolName);
+    if (status.pending) throw new McpCallRefused(`该工具${status.pending === "new" ? "是新增的" : "的定义有变化"}，等待复核`, "pending_review", toolName);
     const generation = connection.generation;
+    const secrets = this.secretValues(server.name);
     const result = await connection.client.callTool({ name: toolName, arguments: args }, { timeout: server.timeout * 1000 }).catch((error: unknown) => {
       if (server.transport === "http" && connectionLost(error)) this.reconnectAfterLoss(server.name, generation);
-      throw error;
+      throw new McpCallFailed(redactSecrets(errorText(error), secrets), error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout);
     });
     const text = (result.content ?? []).map((block) => (block.type === "text" ? block.text : `[${block.type}]`)).join("\n");
-    return { text, isError: result.isError === true };
+    return { text: redactSecrets(text, secrets), isError: result.isError === true,
+      ...(result.structuredContent === undefined ? {} : { structuredContent: redactDeep(result.structuredContent, secrets) }) };
   }
 
   private statusOf(server: StoredServer, tool: ToolDefinition) {
@@ -602,7 +658,7 @@ export class McpCatalog {
       ...(connection?.output.trim() ? { output: redactSecrets(connection.output.trim(), secrets) } : {}),
       tools,
       counts: { total: tools.length, usable: tools.filter((tool) => tool.usable).length, pending: tools.filter((tool) => tool.pending).length },
-      attachedProfiles: [],
+      attachedProfiles: this.attachmentsOf(server.name),
     };
   }
 
@@ -666,6 +722,10 @@ export class McpCatalog {
     throw new McpConfigError(settings.transport === "http"
       ? "请先确认将要连接的地址：确认卡片上的地址与当前填写的不一致"
       : "请先确认将要运行的命令：确认卡片上的命令与当前填写的不一致");
+  }
+
+  private attachmentsOf(name: string): McpAttachment[] {
+    return this.options.attachments?.(name) ?? [];
   }
 
   private require(name: string): StoredServer {

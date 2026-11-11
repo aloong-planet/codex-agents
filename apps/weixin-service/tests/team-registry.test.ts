@@ -300,6 +300,84 @@ describe("console saves of a team", () => {
   });
 });
 
+// team-management::US-003/AC-03, AC-04: a profile attaches registered MCP servers by name. The registry is given the catalog's
+// servers, each with its exact command or address, and holds the second confirmation: a server the profile did not attach
+// before must carry the line its confirmation card showed.
+describe("MCP servers attached to a profile", () => {
+  const GITHUB = "npx -y @modelcontextprotocol/server-github", AMAP = "https://mcp.example.com/amap-routes";
+  const catalog = { github: { launchLine: GITHUB, enabled: true }, amap: { launchLine: AMAP, enabled: true }, taobao: { launchLine: "/usr/local/bin/taobao-mcp", enabled: false } };
+  type Attached = NonNullable<TeamEdit["executorProfiles"][number]["mcpServers"]>;
+  const attaching = (edit: TeamEdit, mcpServers: Attached): TeamEdit => ({ ...edit, executorProfiles: edit.executorProfiles.map((profile) => ({ ...profile, mcpServers })) });
+  function seeded() {
+    const registry = new TeamRegistry(databasePath());
+    return { registry, first: registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS }) };
+  }
+  const profiles = (registry: TeamRegistry, id: string) => registry.current()!.definitions.teams.find((team) => team.id === id)!.executorProfiles;
+
+  it("attaches the servers whose confirmed command or address is the catalog's, by name, and leaves a profile that attaches none as it was", () => {
+    const { registry, first } = seeded();
+    try {
+      const bill = editOf(first.definitions, "bill");
+      registry.saveTeam({ ...bill, executorProfiles: [{ ...bill.executorProfiles[0]!, mcpServers: [{ name: "github", confirmed: GITHUB }, { name: "amap", confirmed: AMAP }, { name: "github", confirmed: GITHUB }] },
+        { name: "餐饮采购", noun: "采购执行者", instructions: "", hostTools: [] }] }, { basedOn: 1, mcpServers: catalog });
+      expect(profiles(registry, "bill").map((profile) => profile.mcpServers)).toEqual([["github", "amap"], undefined]);
+      // A team that attaches nothing is stored as before, so a restart's import of the same roster still appends no version.
+      expect(Object.keys(profiles(registry, "alice")[0]!)).toEqual(["id", "name", "noun", "instructions", "hostTools"]);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["without the confirmed line", [{ name: "github" }], ["MCP 服务器 github 的命令或地址与确认时不一致，请重新绑定并确认。"]],
+    ["with a line the server no longer has", [{ name: "github", confirmed: "npx -y @modelcontextprotocol/server-github --old" }], ["MCP 服务器 github 的命令或地址与确认时不一致，请重新绑定并确认。"]],
+    ["that is not registered", [{ name: "ghost", confirmed: "ghost --run" }], ["MCP 服务器 ghost 已停用或已不在 MCP 管理中，请重新载入页面。"]],
+    ["that is disabled", [{ name: "taobao", confirmed: "/usr/local/bin/taobao-mcp" }], ["MCP 服务器 taobao 已停用或已不在 MCP 管理中，请重新载入页面。"]],
+  ] as const)("refuses to attach a server %s, and attaches nothing", (_case, mcpServers, reasons) => {
+    const { registry, first } = seeded();
+    try {
+      let refused: unknown;
+      try { registry.saveTeam(attaching(editOf(first.definitions, "bill"), mcpServers), { basedOn: 1, mcpServers: catalog }); } catch (error) { refused = error; }
+      expect((refused as TeamDefinitionError).reasons).toEqual(reasons);
+      expect(registry.current()).toEqual(first);
+    } finally { registry.close(); }
+  });
+
+  it("asks a new profile for the confirmation of every server it attaches", () => {
+    const { registry, first } = seeded();
+    try {
+      const bill = editOf(first.definitions, "bill");
+      const added = (mcpServers: Attached) => ({ ...bill, executorProfiles: [...bill.executorProfiles, { name: "行程规划", noun: "行程执行者", instructions: "", hostTools: [], mcpServers }] });
+      expect(() => registry.saveTeam(added([{ name: "amap" }]), { basedOn: 1, mcpServers: catalog })).toThrow(TeamDefinitionError);
+      registry.saveTeam(added([{ name: "amap", confirmed: AMAP }]), { basedOn: 1, mcpServers: catalog });
+      expect(profiles(registry, "bill").map((profile) => profile.mcpServers)).toEqual([undefined, ["amap"]]);
+    } finally { registry.close(); }
+  });
+
+  it("keeps an attached server without a new confirmation, also once it is disabled or runs another command, and unbinds one the save leaves out", () => {
+    const { registry, first } = seeded();
+    try {
+      const bound = registry.saveTeam(attaching(editOf(first.definitions, "bill"), [{ name: "github", confirmed: GITHUB }, { name: "amap", confirmed: AMAP }]), { basedOn: 1, mcpServers: catalog }).version;
+      const later = { github: { launchLine: "npx -y another-github-server", enabled: false }, amap: catalog.amap };
+      const kept = registry.saveTeam({ ...attaching(editOf(bound.definitions, "bill"), [{ name: "github" }, { name: "amap" }]), responsibility: "生活新职责" }, { basedOn: bound.version, mcpServers: later }).version;
+      expect(profiles(registry, "bill")[0]!.mcpServers).toEqual(["github", "amap"]);
+      registry.saveTeam(attaching(editOf(kept.definitions, "bill"), [{ name: "amap" }]), { basedOn: kept.version, mcpServers: later });
+      expect(profiles(registry, "bill")[0]!.mcpServers).toEqual(["amap"]);
+      registry.saveTeam(attaching(editOf(registry.current()!.definitions, "bill"), []), { basedOn: registry.current()!.version, mcpServers: later });
+      expect(Object.hasOwn(profiles(registry, "bill")[0]!, "mcpServers")).toBe(false);
+      // Unbound, github is a new attachment again: its confirmation is asked for, and it is disabled now.
+      expect(() => registry.saveTeam(attaching(editOf(registry.current()!.definitions, "bill"), [{ name: "github" }]), { basedOn: registry.current()!.version, mcpServers: later })).toThrow(TeamDefinitionError);
+    } finally { registry.close(); }
+  });
+
+  it("refuses as outdated a save from a page loaded before another page attached a server to the team", () => {
+    const { registry, first } = seeded();
+    try {
+      registry.saveTeam(attaching(editOf(first.definitions, "bill"), [{ name: "github", confirmed: GITHUB }]), { basedOn: 1, mcpServers: catalog });
+      expect(() => registry.saveTeam({ ...editOf(first.definitions, "bill"), responsibility: "生活新职责" }, { basedOn: 1, mcpServers: catalog })).toThrow(/^team_registry_version_stale$/);
+      expect(profiles(registry, "bill")[0]!.mcpServers).toEqual(["github"]);
+    } finally { registry.close(); }
+  });
+});
+
 // ADR-0025: Penny's private financial bot never posts for a team; the service passes its application as reserved.
 it("refuses a team on an application reserved outside the registry, with the reason it was given", () => {
   const registry = new TeamRegistry(databasePath());

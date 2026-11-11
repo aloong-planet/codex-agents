@@ -258,12 +258,74 @@ export function needsConfirmation(previous: ServerTarget | undefined, next: Serv
   return previous === undefined || (previous.transport ?? "stdio") !== (next.transport ?? "stdio") || launchLine(previous) !== launchLine(next);
 }
 
-/** Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors and logs. */
+/** How many times over JSON text may be carried as a string inside JSON text for a secret in it still to be masked. */
+const JSON_NESTING_LIMIT = 4;
+const JSON_SHORT_ESCAPES = new Map([['"', '"'], ["\\", "\\"], ["/", "/"], ["b", "\b"], ["f", "\f"], ["n", "\n"], ["r", "\r"], ["t", "\t"]]);
+
+/** A text, and where each of its characters begins and ends in the text it was read from. */
+type Spelled = Readonly<{ text: string; from(at: number): number; to(at: number): number }>;
+
+/** `spelled` with its JSON string escapes undone once; undefined when it holds none. Any other backslash stays. */
+function unescaped({ text, from, to }: Spelled): Spelled | undefined {
+  if (!text.includes("\\")) return undefined;
+  const units: string[] = [], starts: number[] = [], ends: number[] = [];
+  for (let at = 0; at < text.length; at += 1) {
+    let unit = text[at]!, last = at;
+    if (unit === "\\") {
+      const short = JSON_SHORT_ESCAPES.get(text[at + 1] ?? "");
+      const hex = text[at + 1] === "u" ? /^[0-9a-fA-F]{4}/.exec(text.slice(at + 2, at + 6))?.[0] : undefined;
+      if (short !== undefined) { unit = short; last = at + 1; }
+      else if (hex) { unit = String.fromCharCode(Number.parseInt(hex, 16)); last = at + 5; }
+    }
+    units.push(unit); starts.push(from(at)); ends.push(to(last));
+    at = last;
+  }
+  return units.length === text.length ? undefined : { text: units.join(""), from: (at) => starts[at]!, to: (at) => ends[at]! };
+}
+
+/**
+ * Masks secrets of `MIN_REDACTED_LENGTH` characters or more in program output, errors, logs and what a tool call returns
+ * (mcp-catalog::REQ-001). A secret is found as it is and in every spelling JSON text gives it: any character may be written
+ * as `\uXXXX`, and a quote, a backslash, a slash or a control character by its short escape. JSON text may itself be carried
+ * as a string inside JSON text, so escapes are undone up to `JSON_NESTING_LIMIT` times over, and whatever then reads as a
+ * secret is masked where it stands in `text`.
+ */
 export function redactSecrets(text: string, secrets: Iterable<string>): string {
-  let out = text;
-  const longestFirst = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH).sort((a, b) => b.length - a.length);
-  for (const secret of longestFirst) out = out.split(secret).join("***");
-  return out;
+  const values = [...new Set(secrets)].filter((secret) => secret.length >= MIN_REDACTED_LENGTH);
+  if (!values.length) return text;
+  // Where a spelling of a secret begins and ends in `text`.
+  const found: Array<[number, number]> = [];
+  let spelled: Spelled = { text, from: (at) => at, to: (at) => at + 1 };
+  for (let depth = 0; ; depth += 1) {
+    for (const secret of values) {
+      for (let at = spelled.text.indexOf(secret); at >= 0; at = spelled.text.indexOf(secret, at + 1)) found.push([spelled.from(at), spelled.to(at + secret.length - 1)]);
+    }
+    const next = depth < JSON_NESTING_LIMIT ? unescaped(spelled) : undefined;
+    if (!next) break;
+    spelled = next;
+  }
+  // Spellings that overlap are masked as one.
+  const spans: Array<[number, number]> = [];
+  for (const [start, end] of found.sort((a, b) => a[0] - b[0] || a[1] - b[1])) {
+    const last = spans.at(-1);
+    if (last && start < last[1]) last[1] = Math.max(last[1], end);
+    else spans.push([start, end]);
+  }
+  let out = "", done = 0;
+  for (const [start, end] of spans) { out += `${text.slice(done, start)}***`; done = end; }
+  return out + text.slice(done);
+}
+
+/** `redactSecrets` over every string of a JSON value, keys included, at any depth. */
+export function redactDeep(value: unknown, secrets: Iterable<string>): unknown {
+  const values = [...secrets];
+  const walk = (item: unknown): unknown => {
+    if (typeof item === "string") return redactSecrets(item, values);
+    if (Array.isArray(item)) return item.map(walk);
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, inner]) => [redactSecrets(key, values), walk(inner)]));
+    return item;
+  };
+  return walk(value);
 }
 
 /** Key-sorted JSON, so that a definition sent with another key order is not reported as changed. */
@@ -296,6 +358,56 @@ export function pinDiff(pinned: Pin, tool: ToolDefinition): { changed: PinPart[]
 }
 
 /** Delay before automatic retry number `failures + 1`: from 30 s, doubling, at most 10 minutes. */
+/** A function name the model provider takes: letters, digits, `_` and `-`, at most 64 characters. */
+const OFFERED_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * The name a runtime is offered for a tool, from the tool's own name alone. A name the model provider takes is offered as
+ * it is. Any other name is offered with every other character as `_`, cut to 55 characters, followed by `_` and the first 8
+ * hex characters of the name's SHA-256. The App Server refuses a thread that is offered a tool with any other kind of
+ * name. A thread keeps the names it was offered when it started, also across a restart of the server's program or of the
+ * service, so the offered name must not depend on what else the server lists.
+ */
+export function offeredToolName(tool: string): string {
+  if (OFFERED_NAME.test(tool)) return tool;
+  return `${tool.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 55)}_${createHash("sha256").update(tool).digest("hex").slice(0, 8)}`;
+}
+
+const SCHEMA_MAPS = ["properties", "$defs", "definitions", "patternProperties"];
+const SCHEMA_VALUES = ["items", "additionalProperties", "not", "if", "then", "else", "propertyNames", "contains"];
+const SCHEMA_LISTS = ["anyOf", "oneOf", "allOf", "prefixItems"];
+
+/** Whether every keyword that holds a schema, a list or a type name in `schema` has that form, at any depth. */
+function wellFormedSchema(schema: unknown): boolean {
+  if (typeof schema === "boolean") return true;
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const record = schema as Record<string, unknown>;
+  const strings = (value: unknown) => Array.isArray(value) && value.every((item) => typeof item === "string");
+  if (record.type !== undefined && typeof record.type !== "string" && !(strings(record.type) && (record.type as unknown[]).length > 0)) return false;
+  if (record.required !== undefined && !strings(record.required)) return false;
+  if (record.enum !== undefined && !Array.isArray(record.enum)) return false;
+  for (const key of SCHEMA_MAPS) {
+    const value = record[key];
+    if (value !== undefined && (!value || typeof value !== "object" || Array.isArray(value) || !Object.values(value).every(wellFormedSchema))) return false;
+  }
+  for (const key of SCHEMA_VALUES) if (record[key] !== undefined && !wellFormedSchema(record[key])) return false;
+  for (const key of SCHEMA_LISTS) if (record[key] !== undefined && !(Array.isArray(record[key]) && (record[key] as unknown[]).every(wellFormedSchema))) return false;
+  return true;
+}
+
+/**
+ * A tool's description and input schema as a runtime is offered them. The Codex App Server refuses a whole thread when one
+ * offered tool has an input schema it cannot read; measured on it, that is a list in `items` (the older way to write a tuple)
+ * and a schema whose only type is `null`. A schema with such a form, or one that is not an object, is therefore offered as an
+ * open object, and the description then ends with the schema itself, so that the model can still fill the arguments in.
+ */
+export function offeredInput(description: string, inputSchema: unknown): { description: string; inputSchema: Record<string, unknown> } {
+  const record = inputSchema && typeof inputSchema === "object" && !Array.isArray(inputSchema) ? inputSchema as Record<string, unknown> : undefined;
+  const onlyNull = record?.type === "null" || (Array.isArray(record?.type) && record.type.every((type) => type === "null"));
+  if (record && !onlyNull && wellFormedSchema(record)) return { description, inputSchema: record };
+  return { description: `${description}${description ? "\n\n" : ""}参数按这份 JSON Schema 填写：${JSON.stringify(inputSchema ?? null)}`, inputSchema: { type: "object", additionalProperties: true } };
+}
+
 export function retryDelay(failures: number, base = RETRY_BASE_MS): number {
   return Math.min(base * 2 ** failures, RETRY_MAX_MS);
 }
