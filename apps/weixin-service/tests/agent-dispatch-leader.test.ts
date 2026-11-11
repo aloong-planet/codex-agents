@@ -154,7 +154,7 @@ afterEach(() => { vi.useRealTimers(); for (const directory of directories.splice
 const input = (revision = "r1", definitionsVersion = 1): LeaderTurnInput => ({
   requestId: "request-one",
   leader: { id: "bill", name: "Bill", teamName: "生活团队", responsibility: "衣食住行", instructions: "负责人规则" },
-  profiles: [{ id: "trip", name: "行程", capabilities: ["读取授权目录里的文件", "联网搜索"] }, { id: "meal", name: "餐饮", capabilities: ["把授权目录里的文件发到本群"] }],
+  profiles: [{ id: "trip", name: "行程", capabilities: ["读取授权目录里的文件", "联网搜索", "技能「行程核对」：逐段核对站名、换乘与开放时间"] }, { id: "meal", name: "餐饮", capabilities: ["把授权目录里的文件发到本群"] }],
   brief: { message: "帮我规划周末一日行程", summary: "规划周末一日行程" },
   directory: [{ name: "生活团队", responsibility: "衣食住行" }],
   memory: "",
@@ -168,9 +168,12 @@ function leaderWith(access: ConstructorParameters<typeof CodexTeamLeader>[1]["ru
 const reply = (value: unknown): AppServerTurnResult => ({ owner: "model_owned", finalText: JSON.stringify(value) });
 // What a plan and a supplement turn tell the Team Leader about its presets (agent-dispatch::REQ-011/AC-01, REQ-002/AC-05): each
 // preset with its capabilities and nothing else, that it holds no tools itself, that the list is of tool operations while text work
-// needs no tool, and that only an Executor's send brings a file to the group.
-const PRESET_FRAGMENTS = ['{"id":"trip","name":"行程","capabilities":["读取授权目录里的文件","联网搜索"]}', '{"id":"meal","name":"餐饮","capabilities":["把授权目录里的文件发到本群"]}',
-  "你本人没有任何工具", "阅读、分析和撰写文字不需要工具", "不要为这些操作向其他团队求助", "只有执行者发送才会到本群", "brief 必须写明由执行者把成果保存成文件并发到本群"];
+// needs no tool, that a skill a preset selects is a way of working and its use decides which preset fits, and that only an
+// Executor's send brings a file to the group.
+const PRESET_FRAGMENTS = ['{"id":"trip","name":"行程","capabilities":["读取授权目录里的文件","联网搜索","技能「行程核对」：逐段核对站名、换乘与开放时间"]}',
+  '{"id":"meal","name":"餐饮","capabilities":["把授权目录里的文件发到本群"]}',
+  "你本人没有任何工具", "阅读、分析和撰写文字不需要工具", "以「技能」开头的项不是工具", "选有这项技能的能力档", "不要为这些操作向其他团队求助", "只有执行者发送才会到本群",
+  "brief 必须写明由执行者把成果保存成文件并发到本群"];
 
 describe("Team Leader wrapper", () => {
   it("plans through a tool-free constrained turn on a persisted thread and releases it", async () => {
