@@ -52,6 +52,14 @@ import { LocalFileOperationStore } from "../src/local-file-operation-store.js";
 // - A message the pending-choice router takes as a new goal while the only open choice is a superseded one replaces nothing and goes
 //   to the Coordinator. No case drives it through main: the fixture router never answers with a new goal. The dispatch engine's own
 //   guard is unit-tested. Retest condition: a fixture router that can answer with a new goal, or a live run.
+// - A new goal that replaces the open choice of a waiting Assignment ends only that Assignment. No case drives it through main, for the
+//   same reason; the dispatch engine's cases do. Retest condition: the same.
+// - Two Assignments of one request that each raise a choice are driven only at the dispatch engine. Through main, which of the two
+//   workflows reaches its choice last, and so which choice is replaced, depends on timing; the real-main case replaces a waiting
+//   request's choice from a second request instead. Retest condition: a fixture hold ahead of a tool call.
+// - A replaced choice that is noticed only at the next start, or that an Executor's end leaves to the intake because a message of the
+//   group is being taken in, is driven only at the dispatch engine. Retest condition: a fixture seam that stops main, or holds a
+//   message's intake, between a workflow's start and its Executor's end.
 // - The fixture holds an Executor's turn only at its end, after its tool calls. The case that cancels after a choice was asked again
 //   therefore shows the stopped turn never completing, not a tool call still ahead of it being withheld. Retest condition: a fixture
 //   hold ahead of a tool call.
@@ -1269,6 +1277,90 @@ it("stops the Executor that still runs when the requester cancels after another 
     expect(sendRuns(settled).map(({ status, effects }) => ({ status, effects }))).toEqual([{ status: "cancelled", effects: [] }]);
     expect(settled.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
     expect(settled.fixtureModelRequests).toHaveLength(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+// An Assignment that asks back without a workflow run beside one that waits on a choice (agent-dispatch failure mode "One Assignment
+// asks the requester a question without a workflow run, another raises a choice, and the requester answers the choice").
+const askingBack = (message: string, subject: string) => JSON.stringify({ message, results: [{ subject, status: "needs_input" }] });
+
+it("ends only the choosing Assignment when its choice is answered, and closes the request once, after the reply to the other Assignment's question", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-asked-back-")), business = mkdtempSync(join(tmpdir(), "dispatch-asked-back-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    // The first Assignment asks back, with no workflow run. Its turn is held, so its question goes out after the second one's choice.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_asked_back", "整理要点，再列出 Agent 笔记让我选发哪个", decision("alice", "整理要点并发送运营笔记"), {
+      leaderPlan: divided(["整理要点", "发送笔记"]),
+      executorTurns: { 整理要点: { modelReply: askingBack("要点按哪个版本整理？", "要点"), modelHold: true }, 发送笔记: { modelToolCalls: chooseNote } } }));
+    const request = (state: Awaited<ReturnType<Running["state"]>>) => state.agentDispatch?.jobs[0];
+    const statuses = (state: Awaited<ReturnType<Running["state"]>>) => request(state)?.assignments.map(({ status }) => status).join();
+    await running.until((state) => statuses(state) === "running,waiting" && aliceTexts(state).length === 2);
+    await running.post("/api/fixture/feishu/inbound", { modelControl: { messageId: "om_asked_back", title: "整理要点", action: "release" } });
+    const asked = await running.until((state) => request(state)?.status === "waiting" && statuses(state) === "waiting,waiting" && aliceTexts(state).length === 3);
+    const requestId = request(asked)!.id;
+    // The answer ends the second Assignment and sends its note. The request has waited again since: its worker ran and closed nothing.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_asked_back_answer", "2", clarified));
+    const answered = await running.until((state) => request(state)?.status === "waiting" && statuses(state) === "waiting,completed" &&
+      state.agentFixtureOutboxes?.alice?.media.length === 1);
+    // The reply to the question is a supplement, for which the Team Leader reruns the first Assignment.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_asked_back_reply", "要点按最新版本整理", control(requestId, "supplement"), {
+      leaderSupplement: { affected: [1], assignments: [], decisions: [] }, modelReply: executorReply("要点已按最新版本整理。", "要点") }));
+    const closed = await running.until((state) => request(state)?.status === "completed" && aliceTexts(state).length === 5);
+    console.log(JSON.stringify({ kind: "dispatch_asked_back_beside_choice", commands: ["整理要点，再列出 Agent 笔记让我选发哪个", "2", "要点按最新版本整理"],
+      afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered), outboxes: answered.agentFixtureOutboxes, leader: answered.fixtureLeaderRequests?.map(({ phase }) => phase) },
+      afterReply: { jobs: closed.agentDispatch, runs: sendRuns(closed), outboxes: closed.agentFixtureOutboxes, coordinator: closed.feishuFixtureTextOutbox,
+        leader: closed.fixtureLeaderRequests?.map(({ phase }) => phase), executorTurns: closed.fixtureModelRequests?.length } }));
+    // After the answer: no closing, no Team Leader turn, and the first Assignment still waits for its reply.
+    expect(aliceTexts(answered)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"), "要点按哪个版本整理？"]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan"]);
+    expect(sendRuns(answered).map(({ status }) => status)).toEqual(["succeeded"]);
+    // After the reply: the first Assignment reran, and the request has one closing, with each Assignment's own result.
+    expect(request(closed)).toMatchObject({ status: "completed", assignments: [{ status: "completed", attempt: 1 }, { status: "completed", attempt: 0 }] });
+    expect(aliceTexts(closed).slice(3)).toEqual(["我安排执行者 1（能力档 1）处理：整理要点。完成后会在本群汇报。", "要点已按最新版本整理。\n文件已发送，请查收。"]);
+    expect(closed.agentFixtureOutboxes?.alice?.media.map((item) => (item as { fileName: string }).fileName)).toEqual(["Agent Beta.md"]);
+    expect(closed.feishuFixtureTextOutbox).toEqual([]);
+    expect(closed.fixtureLeaderRequests?.map(({ phase }) => phase)).toEqual(["plan", "supplement", "close"]);
+    expect(closed.fixtureModelRequests).toHaveLength(3);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+// A choice that a newer workflow of the same requester replaces (agent-dispatch failure mode "A workflow of the same requester in the
+// group replaces the choice an Assignment waits on"). The second request goes to another team, whose Executor raises a choice of its own.
+it("stops the Assignment whose choice another request's workflow replaced, tells the requester once under its own Team Leader, and closes both requests", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-replaced-choice-")), business = mkdtempSync(join(tmpdir(), "dispatch-replaced-choice-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_replaced", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), {
+      modelToolCalls: chooseNote, leaderClosing: { message: "笔记没有发出。" } }));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting" && aliceTexts(state).length === 2);
+    // The fixture pending-choice router passes this text on as an ordinary message, so the Coordinator routes it as a new request.
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_replaced_other", "请 Jack 也列出 Agent 笔记让我选发哪个", decision("jack", "选择并发送技术笔记"), { modelToolCalls: chooseNote }));
+    const statuses = (state: Awaited<ReturnType<Running["state"]>>) => state.agentDispatch?.jobs.map(({ status, assignments }) => `${status}:${assignments.map((assignment) => assignment.status).join()}`);
+    const replaced = await running.until((state) => statuses(state)?.join(" ") === "cancelled:cancelled waiting:waiting" && aliceTexts(state).length === 4 && jackTexts(state).length === 2);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_replaced_answer", "2", clarified));
+    const answered = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed" && jackTexts(state).length === 3);
+    console.log(JSON.stringify({ kind: "dispatch_replaced_choice", commands: ["列出 Agent 笔记让我选发哪个", "请 Jack 也列出 Agent 笔记让我选发哪个", "2"],
+      afterReplacement: { jobs: replaced.agentDispatch, runs: sendRuns(replaced), outboxes: replaced.agentFixtureOutboxes },
+      afterAnswer: { jobs: answered.agentDispatch, runs: sendRuns(answered), outboxes: answered.agentFixtureOutboxes, coordinator: answered.feishuFixtureTextOutbox,
+        leader: answered.fixtureLeaderRequests?.map(({ phase, teamId }) => `${teamId}:${phase}`), executorTurns: answered.fixtureModelRequests?.length } }));
+    // Alice's Assignment stopped when Jack's Executor ended: she tells the requester, then closes her request. Jack's choice is the open one.
+    const told = "执行者 1（能力档 1）的分工「选择并发送运营笔记」等待的选择已被新的操作取代，这项分工已停止。";
+    expect(aliceTexts(replaced)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md"), told, "笔记没有发出。"]);
+    expect(jackTexts(replaced)).toEqual([expect.stringContaining("完成后会在本群汇报。"), expect.stringContaining("Agent Beta.md")]);
+    expect(sendRuns(replaced).map(({ status }) => status).sort()).toEqual(["cancelled", "needs_input"]);
+    // The answer goes to Jack's choice: his note goes out and his request closes. Nothing more is posted or sent for Alice's request.
+    expect(statuses(answered)).toEqual(["cancelled:cancelled", "completed:completed"]);
+    expect(jackTexts(answered)[2]).toBe("文件已发送，请查收。");
+    expect(answered.agentFixtureOutboxes?.jack?.media.map((item) => (item as { fileName: string }).fileName)).toEqual(["Agent Beta.md"]);
+    expect(aliceTexts(answered)).toEqual(aliceTexts(replaced));
+    expect(answered.agentFixtureOutboxes?.alice?.media).toEqual([]);
+    expect(answered.feishuFixtureTextOutbox).toEqual([]);
+    expect(answered.fixtureLeaderRequests?.map(({ phase, teamId }) => `${teamId}:${phase}`)).toEqual(["alice:plan", "jack:plan", "alice:close", "jack:close"]);
+    expect(answered.fixtureModelRequests).toHaveLength(2);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
 }, 30000);
 

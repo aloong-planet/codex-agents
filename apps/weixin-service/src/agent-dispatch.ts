@@ -260,6 +260,11 @@ export class AgentDispatch {
      * superseded with a supplement. `assignments` are the request's own; a request stored before Assignments existed has none.
      */
     closeChoices?(job: DispatchJob, assignments: readonly DispatchAssignment[]): Promise<void>;
+    /**
+     * Whether the choice of `runRef` was closed because a newer workflow of its requester in the group replaced it. Such a choice
+     * takes no answer any more, and nothing tells the dispatch when it happens.
+     */
+    choiceReplaced?(runRef: string): boolean;
     report(code: string): void;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
@@ -296,6 +301,8 @@ export class AgentDispatch {
     // Every request is recovered before anything is awaited, so no message is taken in while one is still as the stop left it.
     const cancelled: DispatchJob[] = [];
     for (const job of this.jobs()) if (job.status === "running" && this.recover(job)) cancelled.push(job);
+    // A choice replaced before the stop, or while the service was stopped; its post goes out with the queued ones below.
+    this.endReplaced();
     for (const job of cancelled) await this.closeChoices(job);
     for (const row of this.database.prepare("SELECT id, payload FROM dispatch_notice WHERE state = 'queued' ORDER BY sequence").all()) {
       await this.deliverNotice(String(row.id), JSON.parse(String(row.payload)) as Notice);
@@ -433,6 +440,9 @@ export class AgentDispatch {
 
   private async processInputs(target: string): Promise<void> {
     while (!this.closing) {
+      // Between two messages nothing of this group is being taken in, so a waiting request may be changed here.
+      await this.tellReplaced(this.endReplaced(target));
+      if (this.closing) return;
       const row = this.database.prepare("SELECT * FROM dispatch_input WHERE target = ? AND state = 'queued' ORDER BY sequence LIMIT 1").get(target);
       if (!row) return;
       const event = JSON.parse(String(row.payload)) as InboundContent, bindingHash = String(row.binding_hash);
@@ -454,8 +464,16 @@ export class AgentDispatch {
       try {
         const pending = await this.options.pending?.(event, (runRef) => this.heldRequest(runRef, event) !== undefined);
         if (pending && !pending.handled && pending.cancelledRunRef && !this.heldRequest(pending.cancelledRunRef, event)) {
+          // The requester's new goal replaced an open choice. Only the Assignment that waited on it ends, and nothing is posted for
+          // it: the message itself goes on to the Coordinator. A request stored before Assignments existed waits on its own run,
+          // and is cancelled with it.
           const superseded = this.requestOfRun(pending.cancelledRunRef, event);
-          if (superseded) { superseded.status = "cancelled"; this.save(superseded); }
+          const assignments = superseded ? this.assignments(superseded.id) : [];
+          if (superseded && !assignments.length) { superseded.status = "cancelled"; this.save(superseded); }
+          else if (superseded && !superseded.cancelRequested && ["queued", "running", "waiting"].includes(superseded.status)) {
+            this.endUnanswered(superseded, assignments.filter(({ status, runRef }) => status === "waiting" && runRef === pending.cancelledRunRef), false);
+            this.kick();
+          }
         }
         if (pending?.handled) {
           const held = pending.runRef ? this.heldRequest(pending.runRef, event) : undefined;
@@ -475,8 +493,9 @@ export class AgentDispatch {
             await this.coordinate(event, bindingHash, REQUEST_ENDED);
             this.finishInput(event.key); continue;
           }
-          const waiting = original && this.assignments(original.id).find((assignment) => assignment.status === "waiting" &&
-            (assignment.runRef === pending.runRef || (assignment.runRef === undefined && original.runRef === pending.runRef)));
+          // An answer settles the Assignment that keeps the choice's run. One that asked back without a workflow run keeps none: it
+          // is settled only by the reply to its own question, which the Coordinator takes as a supplement.
+          const waiting = original && this.assignments(original.id).find((assignment) => assignment.status === "waiting" && assignment.runRef === pending.runRef);
           const several = original !== undefined && this.assignments(original.id).length > 1;
           const notice = { event, bindingHash, agentId: agent.id, senderAccountId: agent.senderAccountId, text: pending.result.message };
           if (original && waiting && (pending.result.status === "completed" || pending.result.status === "failed" || (several && pending.result.status === "cancelled"))) {
@@ -1035,12 +1054,16 @@ export class AgentDispatch {
     catch (error) { failure = { kind: "error", error }; }
     // An Executor cut off by a stop is reported as interrupted at the next start.
     if (this.closing && (failure || result!.status === "cancelled")) return;
+    // Its workflow may have replaced an open choice of its requester in the group. While a message of the group is being taken
+    // in, that is left to the intake, which asks before its next message.
+    const replaced = this.intake.has(job.event.target) ? [] : this.endReplaced(job.event.target);
     const ended = this.assignment(assignment.id)!;
     const current = this.job(job.id)!;
     // A cancelled request's unfinished Assignments are stopped together, and named so in its report.
     if (signal.aborted && current.cancelRequested && result?.status !== "completed") {
       // A choice it raised while it stopped is the request's, so its run is kept and the choice is closed at once: nothing waits for its answer.
       if (result?.status === "waiting" && result.runRef) { ended.runRef = result.runRef; this.saveAssignment(ended); await this.closeChoices(current); }
+      await this.tellReplaced(replaced);
       return;
     }
     if (failure) {
@@ -1050,6 +1073,9 @@ export class AgentDispatch {
       if (result!.status === "failed") ended.cause = failureCause({ kind: "reported", toolRefused: result!.cause === "tool_refused" });
     }
     if (result?.runRef) { ended.runRef = result.runRef; current.runRef = result.runRef; }
+    // An Assignment keeps the run of its Executor's latest result, and none when that result names none: a run of an earlier
+    // attempt is not the one it waits on.
+    else if (result) delete ended.runRef;
     // The post that reports this end is queued with it, so a stop between the two cannot leave the end unreported.
     let post: { id: string; notice: Notice } | undefined;
     const reporting = !this.closing && !current.cancelRequested;
@@ -1071,6 +1097,8 @@ export class AgentDispatch {
       }
       this.save(current); if (post) this.queueNotice(post.id, post.notice);
     });
+    // The requester is told of a replaced choice before this Executor's own post, which may be the prompt that replaced it.
+    await this.tellReplaced(replaced);
     if (post) await this.deliverNotice(post.id, post.notice);
     // A failed closing here must not end the attempt while other Executors run: the request's own close tries it again.
     if (!this.closing && !current.cancelRequested && ended.teamId !== current.agentId) {
@@ -1179,6 +1207,61 @@ export class AgentDispatch {
   private async closeChoices(job: DispatchJob): Promise<void> {
     try { await this.options.closeChoices?.(job, this.assignments(job.id)); }
     catch { this.failure("dispatch_choice_close_failed"); }
+  }
+
+  /**
+   * Ends every waiting Assignment whose choice a newer workflow of its requester replaced: in the group `target`, or everywhere
+   * at a start. Nothing tells the dispatch of a replaced choice, so it asks the host when an Executor ends, since that Executor's
+   * workflow may have replaced one, before each message of a group is taken in, and at a start. It changes waiting requests, and
+   * a cancel or a supplement of a waiting request relies on nothing else changing that request while its choices are closed, so
+   * apart from a start it must run only while no message of that group is being taken in. Returns the queued posts, which
+   * `tellReplaced` delivers; a start delivers them with its other queued posts.
+   */
+  private endReplaced(target?: string): Array<{ id: string; notice: Notice }> {
+    const asked = this.options.choiceReplaced;
+    const posts: Array<{ id: string; notice: Notice }> = [];
+    if (!asked) return posts;
+    // A host that cannot say leaves the Assignment waiting, and the failure is reported.
+    const replaced = (runRef: string) => { try { return asked(runRef); } catch { this.failure("dispatch_choice_state_failed"); return false; } };
+    for (const job of this.jobs()) {
+      if ((target !== undefined && job.event.target !== target) || job.cancelRequested || !["queued", "running", "waiting"].includes(job.status)) continue;
+      posts.push(...this.endUnanswered(job, this.assignments(job.id).filter(({ status, runRef }) => status === "waiting" && runRef !== undefined && replaced(runRef)), true));
+    }
+    return posts;
+  }
+
+  /**
+   * Delivers the posts that tell requesters of replaced choices, then starts the requests that waited on those choices, so that
+   * a post normally goes out before its request's closing. A stopping service leaves the posts queued for the next start: a post
+   * sent while it stops would be cancelled.
+   */
+  private async tellReplaced(posts: ReadonlyArray<{ id: string; notice: Notice }>): Promise<void> {
+    for (const post of posts) if (!this.closing) await this.deliverNotice(post.id, post.notice);
+    if (posts.length) this.kick();
+  }
+
+  /**
+   * Ends the waiting Assignments `unanswered` of `job`, whose choices were closed without an answer and take none any more. Each
+   * ends cancelled and keeps no prompt. Their dependents are left not started in the same step, and a request that waited returns
+   * to its worker, which closes it once nothing else is unfinished. With `told`, the post that tells the requester of each is
+   * queued in that step too; the posts are returned for delivery.
+   */
+  private endUnanswered(job: DispatchJob, unanswered: readonly DispatchAssignment[], told: boolean): Array<{ id: string; notice: Notice }> {
+    const posts: Array<{ id: string; notice: Notice }> = [];
+    if (!unanswered.length) return posts;
+    this.transaction(() => {
+      for (const assignment of unanswered) {
+        assignment.status = "cancelled"; delete assignment.result; this.saveAssignment(assignment);
+        if (!told) continue;
+        // The post goes out under the Team Leader of the Assignment's own team, as its prompt did (agent-dispatch::REQ-013/AC-04).
+        const post = { id: `${job.id}:replaced:${assignment.id}:${assignment.attempt}`, notice: { ...this.teamNotice(job, assignment.teamId,
+          `${executorLabel(assignment)}的分工「${assignment.title}」等待的选择已被新的操作取代，这项分工已停止。`), requestId: job.id } };
+        this.queueNotice(post.id, post.notice); posts.push(post);
+      }
+      this.blockDependents(job.id);
+      if (job.status === "waiting") { job.status = "queued"; this.save(job); }
+    });
+    return posts;
   }
 
   /** The requester's cancellation of the whole request: every unfinished Assignment stops; completed effects are reported, not undone. */

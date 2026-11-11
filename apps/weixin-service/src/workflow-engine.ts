@@ -75,6 +75,14 @@ export type WorkflowRunView = {
   pendingInput?: WorkflowPendingInput;
 };
 
+/**
+ * Whether the run's pending choice was closed because a newer workflow of the same requester and target replaced it. A choice that
+ * its requester answered or cancelled, that was cancelled for its requester, that expired or that still waits is not replaced.
+ */
+export function pendingChoiceReplaced(run: Pick<WorkflowRunView, "status" | "errorCode"> | undefined): boolean {
+  return run?.status === "cancelled" && run.errorCode === "workflow_pending_superseded";
+}
+
 export type PublicWorkflowState = {
   runs: PublicWorkflowRun[];
 };
