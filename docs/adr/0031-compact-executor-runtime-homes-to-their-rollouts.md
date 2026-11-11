@@ -60,7 +60,7 @@ A Team Leader's session is keyed by leader, conversation, binding, access revisi
 
 Which homes to compact:
 
-1. **Compact a home once it is superseded: its definitions version is not the current one, and no stored request of that version is queued, running or waiting. Keep the homes of the current version whole.**
+1. **Compact a home once it is superseded: it belongs to an earlier access revision, or its definitions version is not the current one and no stored request of that version in its conversation is queued, running or waiting. Keep the homes of the current version under the current revision whole.**
 2. Also keep a home whole while a failed, partially failed or partially unassigned request could be retried on it. Not adopted, for the reason option 4 above was not: a retry never expires, so those homes would stay whole for ever, while a retry needs only the rollout.
 3. Compact every Team Leader home at each release, like an Executor's (not recorded): implied by the choice of option 1 rather than compared. A Team Leader's runtime is released after every idle period and resumed by the next request, so its home would be rebuilt again and again.
 
@@ -85,7 +85,7 @@ We adopt **options 1 and 4**.
 - Negative:
   - A retry of a failed request, and any other request that returns to a compacted home, depends on the App Server resuming a thread from its rollout alone, as an Executor's retry does. The opt-in check on the installed App Server covers a Team Leader session too and is rerun after every Codex upgrade.
   - A home whose request ends with no further Team Leader turn stays whole until the next sweep.
-- Neutral: the homes of the current version stay whole for every team and conversation that has used them. Their number is bounded by the teams times the conversations.
+- Neutral: the homes of the current version under the current revision stay whole for every team and conversation that has used them. Their number is bounded by the teams times the conversations and their bindings.
 
 ### Sources
 

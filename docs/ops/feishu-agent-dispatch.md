@@ -154,9 +154,9 @@ When the service cannot confirm a home's records, it keeps the whole home and wr
 
 ## Team Leader runtime homes
 
-Each Team Leader session has its own home, `group-model-runtimes/dispatch-leader-<64 hex>/`: one per team, conversation, access revision and definitions version. A home that no stored request can use any more is superseded, and the service compacts it to its thread rollouts, as it does an Executor home. A home stays whole in two cases:
+Each Team Leader session has its own home, `group-model-runtimes/dispatch-leader-<64 hex>/`: one per team, conversation, binding (Sam's application and the group's allowed senders), access revision and definitions version. A home that no stored request can use any more is superseded, and the service compacts it to its thread rollouts, as it does an Executor home. A home stays whole in two cases:
 
-- a request that is queued, running or waiting was planned under its definitions version;
+- a request of the same conversation and binding that is queued, running or waiting was planned under its definitions version;
 - its definitions version is the current one.
 
 A changed access revision supersedes every earlier home at once.
