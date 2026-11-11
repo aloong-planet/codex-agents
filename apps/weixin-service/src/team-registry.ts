@@ -19,15 +19,17 @@ const SEEDED_EXECUTOR_INSTRUCTIONS: Readonly<Record<string, string>> = {
   bill: "搜索摘要可能缓存旧内容，天气等持续更新的信息必须打开官方页面核对发布时间，注明来源发布时点；无法取得当前内容时明确标注未核实，不把旧预报写成最新预报。出行路线须逐段核对站名、线路和换乘站，不能凭记忆拼接；区分景区名称与地铁站名称。步行入口、方位、距离和耗时没有地图或官方资料支持时，不猜测具体数值或地点，标注需现场导航并预留弹性时间。开放时间、预约要求和天气须附本轮查证来源；未核实的明确标注并提供可行备选，不写成确定事实。交付文件前复核预算和时间安排是否自洽。",
 };
 
-/** An agent's instructions and host-tool allowlist. MCP servers and skills join with their catalogs. */
+/** An agent's instructions and host-tool allowlist. Skills join with their catalog. */
 export type AgentProfile = Readonly<{ instructions: string; hostTools: readonly string[] }>;
 /** What an Executor is called in its group when a profile names none, and in versions saved before profiles had a noun. */
 export const DEFAULT_EXECUTOR_NOUN = "执行者";
 /**
  * One of a team's preset Agent Profiles for its Executors; `id` stays stable across renames. Its Executors are named
- * `<noun> <n>`; versions saved before the noun existed omit it and read as DEFAULT_EXECUTOR_NOUN.
+ * `<noun> <n>`; versions saved before the noun existed omit it and read as DEFAULT_EXECUTOR_NOUN. `mcpServers` are the names
+ * of the MCP Catalog servers the profile attaches, so a definitions version fixes them (agent-dispatch::REQ-017/AC-01); a
+ * profile that attaches none omits it.
  */
-export type ExecutorProfile = AgentProfile & Readonly<{ id: string; name: string; noun?: string }>;
+export type ExecutorProfile = AgentProfile & Readonly<{ id: string; name: string; noun?: string; mcpServers?: readonly string[] }>;
 export type BindingState = "onboarding" | "accepting" | "draining" | "removed";
 export type TeamBinding = Readonly<{ chatId: string; state: BindingState }>;
 export type TeamDefinition = Readonly<{
@@ -52,8 +54,14 @@ export type CoordinatorDefinition = Readonly<{
 /** Everything one definitions version holds. Application secrets are never part of it. */
 export type TeamDefinitions = Readonly<{ coordinator: CoordinatorDefinition; dispatchGroups: readonly string[]; teams: readonly TeamDefinition[] }>;
 export type DefinitionsVersion = Readonly<{ version: number; basedOn: number | null; source: "local_configuration" | "console" | "onboarding" | "removal"; definitions: TeamDefinitions }>;
-/** An Executor profile as the console edits it; a profile without `id` is new. */
-export type ExecutorProfileEdit = Readonly<{ id?: string; name: string; noun: string; instructions: string; hostTools: readonly string[] }>;
+/**
+ * An Executor profile as the console edits it; a profile without `id` is new. `mcpServers` are the servers it attaches; one it
+ * did not attach before carries `confirmed`, the exact command or address its confirmation card showed.
+ */
+export type ExecutorProfileEdit = Readonly<{ id?: string; name: string; noun: string; instructions: string; hostTools: readonly string[];
+  mcpServers?: ReadonlyArray<Readonly<{ name: string; confirmed?: string }>> }>;
+/** A registered MCP server as a team save judges an attachment to it: its exact command or address, and whether it is enabled. */
+export type AttachableServer = Readonly<{ launchLine: string; enabled: boolean }>;
 /**
  * One team as the console saves it: its editable fields and the dispatch groups it is checked into. A team without `id` is new.
  * Binding states are the registry's: the console only says which groups are checked (team-management Implementation Decisions).
@@ -177,8 +185,14 @@ export class TeamRegistry {
    * or secret the save carries, and an application attached since `basedOn` does not make the save stale. The save that first
    * chooses QR creation starts one creation; a save as an existing application ends it. Returns the saved version, the
    * team's ID and whether a creation was started or ended.
+   *
+   * `mcpServers` gives the MCP Catalog's servers by name. A server a profile did not attach in the latest definitions is
+   * attached only when it is registered and enabled and the edit carries its current command or address as confirmed, so a
+   * skipped or outdated confirmation card attaches nothing (team-management::US-003/AC-03); a server the profile already
+   * attached is kept as it is.
    */
-  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number }>):
+  saveTeam(edit: TeamEdit, options: Readonly<{ basedOn: number; secret?: string; reserved?: Readonly<Record<string, string>>; at?: number;
+    mcpServers?: Readonly<Record<string, AttachableServer>> }>):
     Readonly<{ version: DefinitionsVersion; teamId: string; creation?: "started" | "ended" }> {
     let teamId = edit.id ?? "";
     let creation: "started" | "ended" | undefined;
@@ -197,7 +211,8 @@ export class TeamRegistry {
       }
       if (edit.groups.some((chatId) => !definitions.dispatchGroups.includes(chatId))) throw new Error("team_registry_group_unknown");
       const appId = qr ? existing?.leader.appId ?? "" : edit.leader.appId.trim();
-      const reasons = teamReasons({ ...edit, leader: { ...edit.leader, appId } }, definitions, options.reserved ?? {});
+      const reasons = [...teamReasons({ ...edit, leader: { ...edit.leader, appId } }, definitions, options.reserved ?? {}),
+        ...attachmentReasons(edit, existing, options.mcpServers ?? {})];
       if (reasons.length) throw new TeamDefinitionError(reasons);
       teamId = existing?.id ?? `team-${randomUUID().slice(0, 8)}`;
       const replaced = existing !== undefined && existing.leader.appId !== appId;
@@ -216,7 +231,8 @@ export class TeamRegistry {
         leader: { name: edit.leader.name.trim(), appId, ...(qr ? { method: "qr" as const } : {}),
           profile: { instructions: edit.leader.instructions, hostTools: existing?.leader.profile.hostTools ?? [] } },
         executorProfiles: edit.executorProfiles.map((profile) => ({ id: profile.id ?? freshId(), name: profile.name.trim(),
-          noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)] })),
+          noun: profile.noun.trim() || DEFAULT_EXECUTOR_NOUN, instructions: profile.instructions, hostTools: [...new Set(profile.hostTools)],
+          ...(profile.mcpServers?.length ? { mcpServers: [...new Set(profile.mcpServers.map(({ name }) => name))] } : {}) })),
         bindings };
       const teams = existing ? definitions.teams.map((candidate) => candidate.id === teamId ? team : candidate) : [...definitions.teams, team];
       if (qr) {
@@ -536,7 +552,8 @@ function representable({ coordinator, dispatchGroups, teams }: TeamDefinitions):
 function editable(team: TeamDefinition, application: boolean) {
   return { teamName: team.teamName, responsibility: team.responsibility,
     leader: { name: team.leader.name, ...(application ? { appId: team.leader.appId } : {}), method: team.leader.method ?? "existing", instructions: team.leader.profile.instructions },
-    profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools })),
+    profiles: team.executorProfiles.map(({ id, name, noun, instructions, hostTools, mcpServers }) => ({ id, name, noun: noun ?? DEFAULT_EXECUTOR_NOUN, instructions, hostTools,
+      mcpServers: mcpServers ?? [] })),
     groups: team.bindings.filter(({ state }) => state !== "draining" && state !== "removed").map(({ chatId }) => chatId) };
 }
 
@@ -553,6 +570,24 @@ function teamReasons(edit: TeamEdit, definitions: TeamDefinitions, reserved: Rea
   const appId = edit.leader.appId.trim();
   if (appId) reasons.push(...applicationReasons(appId, edit.id, definitions, reserved));
   return reasons;
+}
+
+/**
+ * Why a save may not attach an MCP server (team-management::US-003/AC-03): a server the profile did not attach in `existing`
+ * is no longer registered or enabled, or the edit does not carry its current command or address as confirmed.
+ */
+function attachmentReasons(edit: TeamEdit, existing: TeamDefinition | undefined, servers: Readonly<Record<string, AttachableServer>>): string[] {
+  const reasons = new Set<string>();
+  for (const profile of edit.executorProfiles) {
+    const kept = new Set(existing?.executorProfiles.find(({ id }) => id === profile.id)?.mcpServers ?? []);
+    for (const { name, confirmed } of profile.mcpServers ?? []) {
+      if (kept.has(name)) continue;
+      const server = Object.hasOwn(servers, name) ? servers[name]! : undefined;
+      if (!server?.enabled) reasons.add(`MCP 服务器 ${name} 已停用或已不在 MCP 管理中，请重新载入页面。`);
+      else if (confirmed !== server.launchLine) reasons.add(`MCP 服务器 ${name} 的命令或地址与确认时不一致，请重新绑定并确认。`);
+    }
+  }
+  return [...reasons];
 }
 
 /**
