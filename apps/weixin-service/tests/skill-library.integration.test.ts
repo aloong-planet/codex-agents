@@ -72,7 +72,8 @@ it("gives each Executor exactly its profile's skills as its request was admitted
     const audit = readFileSync(join(directory, "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter(({ event }) => String(event).startsWith("skill_")).map(({ event, skill, version, by }) => ({ event, skill, version, by }));
     console.log(JSON.stringify({ kind: "skill_library_main", commands: ["import trip-check", "import meal-plan", "Bill 能力档 1 selects trip-check", "请帮我规划周末一日行程", "re-import trip-check", "重试", "再帮我规划周日行程"],
-      jobs: result.agentDispatch, executorSkills: result.fixtureModelRequests?.map(({ skills }) => skills), leaderSkillLines: [skillLines(result, "请帮我规划周末一日行程"), skillLines(result, "再帮我规划周日行程")], audit }));
+      jobs: result.agentDispatch, coordinator: result.fixtureTextOutbox, outboxes: result.agentFixtureOutboxes,
+      executorSkills: result.fixtureModelRequests?.map(({ skills }) => skills), leaderSkillLines: [skillLines(result, "请帮我规划周末一日行程"), skillLines(result, "再帮我规划周日行程")], audit }));
 
     // Each Executor turn, in order: the first attempt, its retry after the re-import, and the request admitted afterwards.
     const loaded = (body: string, description: string) => [{ folder: trip, files: ["SKILL.md", "references/rules.md"], skillMd: skillMd("trip-check", description, body) }];
