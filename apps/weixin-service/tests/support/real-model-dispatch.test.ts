@@ -182,6 +182,9 @@ it.each([
 it("writes a scenario's run record, service log and granted directory, and leaves no temporary root or login behind", async () => {
   const records = temporary("real-model-entry-records-"), before = scenarioRoots();
   const directory = await realModelScenario({ id: "entry-self-test", acceptance: ["agent-dispatch::REQ-001"], files: { "project/sample.txt": "x\n" }, records, env: noModel() }, async (run) => {
+    // A scenario sets the console up as the owner does: the run's own requests reach its API, authorized.
+    expect(await run.post("/api/mcp/preview", { server: { name: "entry-probe", command: "node", args: ["probe.mjs"] } })).toEqual({ launchLine: "node probe.mjs", needsConfirmation: true });
+    expect(await run.get("/api/mcp/servers")).toEqual({ servers: [] });
     await run.send("om_entry_self_test", "帮我整理闲鱼商品描述");
     await run.until("the Coordinator's fallback post", fallbackPosted, processWaitLimitMs);
   });

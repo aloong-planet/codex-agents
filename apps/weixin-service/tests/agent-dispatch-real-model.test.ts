@@ -1,9 +1,11 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { LeaderPlan } from "../src/agent-dispatch-leader.js";
 import type { DispatchDecision, DispatchExecutionResult, PrerequisiteResult } from "../src/agent-dispatch-types.js";
 import type { DispatchTurnRecord } from "../src/fixture-dispatch-recorder.js";
+import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 import type { State } from "./support/real-main.js";
 import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
 
@@ -67,6 +69,19 @@ import { applyDiscount } from "../src/discount.js";
 test("takes the discount off the price", () => { assert.equal(applyDiscount(100, 30), 70); });
 `,
 };
+
+/**
+ * A warehouse lookup served by the local MCP test server. Its description says what it is for, which is all a Team Leader is told
+ * of it. The answer names a bin and a stock count that are in neither the request nor that description, so they reach an
+ * Executor only through a call to the tool.
+ */
+const STOCK_TOOL = { name: "stock_lookup", description: "查询仓库系统里某个货号的当前库存，返回库存数量和所在仓位。",
+  inputSchema: { type: "object", properties: { sku: { type: "string", description: "货号" } }, required: ["sku"] },
+  _meta: { "test/answer": "货号 KP5-BLK：库存 37 件，仓位 B-12-04。" } };
+const STOCK_BIN = "B-12-04";
+type McpTeamsView = { version: number; mcpServers: Array<{ name: string; state: string; launchLine: string }>;
+  teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
+    profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[]; mcpServers: string[] }> }> };
 
 type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
 type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
@@ -193,6 +208,61 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       // The request asked for a reviewable patch, so the source the Executor inspected is as the case wrote it.
       expect(readFileSync(join(run.grantedDirectory, "discount-project", "src", "discount.ts"), "utf8")).toBe(DISCOUNT_SOURCE);
     }), REQUEST_LIMIT_MS);
+
+  // What an attached MCP server gives a profile's Executors. The Team Leader is told, for the preset that attaches the server,
+  // what the server's tools do, and puts work that needs them on that preset without asking another team
+  // (agent-dispatch::REQ-011/AC-01). The Executor created from it is offered the server's proxy tools and calls one
+  // (agent-dispatch::REQ-016/AC-03, mcp-catalog::REQ-003/AC-02): the bin its result names is only in the tool's answer. The run also
+  // shows whether the model's provider takes the namespace the tools are offered under.
+  it("has a Team Leader put work an attached MCP server is for on the preset that attaches it, and its Executor call the server", async () => {
+    // The server's files are outside the granted directory; the service starts the program and stops it when it stops.
+    const servers = mkdtempSync(join(tmpdir(), "real-model-mcp-"));
+    try {
+      await realModelScenario({ id: "attached-mcp-server", acceptance: ["agent-dispatch::REQ-011/AC-01", "agent-dispatch::REQ-016/AC-03", "mcp-catalog::REQ-003/AC-02"] }, async (run) => {
+        const files = testServerFiles(servers, "warehouse");
+        writeTools(files.tools, [STOCK_TOOL]);
+        const server = { name: "warehouse", command: process.execPath, args: testServerArgs(files) };
+        const { launchLine } = await run.post<{ launchLine: string }>("/api/mcp/preview", { server });
+        await run.post("/api/mcp/servers", { server, confirmed: launchLine });
+        let view = await run.get<McpTeamsView>("/api/teams");
+        for (const until = Date.now() + 15_000; view.mcpServers[0]?.state !== "connected" && Date.now() < until;) view = await run.get<McpTeamsView>("/api/teams");
+        expect(view.mcpServers).toMatchObject([{ name: "warehouse", state: "connected" }]);
+        // Alice's team gets a second preset, which attaches the server and has no host tool; her seeded preset attaches none.
+        const alice = view.teams.find(({ id }) => id === "alice")!;
+        const saved = await run.post<{ view: McpTeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
+          leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
+            ...alice.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, mcpServers: [] })),
+            { name: "仓库查询", noun: "仓库执行者", instructions: "", hostTools: [], mcpServers: [{ name: "warehouse", confirmed: launchLine }] }] } });
+        const attaching = saved.view.teams.find(({ id }) => id === "alice")!.profiles.find(({ name }) => name === "仓库查询")!.id;
+
+        await run.send("om_real_mcp", "闲鱼上有买家要拍那台黑色 Kindle，帮我查一下货号 KP5-BLK 仓库里现在还有多少库存、放在哪个仓位，直接在群里回我就行，不用存成文件。");
+        const state = await run.until("the request's end", (current) => atRest(current, "om_real_mcp"), REQUEST_WAIT_MS);
+        expect(decisionOn(state, "om_real_mcp")).toMatchObject({ kind: "dispatch", agentId: "alice" });
+        expect(state.agentDispatch?.jobs).toHaveLength(1);
+        const request = state.agentDispatch!.jobs[0]!;
+        // The Team Leader was told what the server gives that preset's Executors, and nothing of the tool's answer.
+        const plan = turns(state, "plan").find((item) => item.teamId === "alice") as Turn<{ profiles: Array<{ id: string; capabilities: string[] }> }, LeaderPlan> | undefined;
+        expect(plan?.output, "the Team Leader's plan").toBeDefined();
+        expect(plan!.input.profiles.find(({ id }) => id === attaching)?.capabilities.find((capability) => capability.startsWith("通过 MCP 服务器「warehouse」：")))
+          .toContain(`stock_lookup（${STOCK_TOOL.description}）`);
+        expect(plan!.input.profiles.filter(({ id }) => id !== attaching).flatMap(({ capabilities }) => capabilities).join("\n")).not.toContain("MCP 服务器");
+        expect(JSON.stringify(plan!.input)).not.toContain(STOCK_BIN);
+        // It put the lookup on that preset and asked no other team for it.
+        expect(plan!.output!.help, "the plan asks another team for what its own preset's server gives").toEqual([]);
+        const chosen = request.assignments.filter(({ profileId }) => profileId === attaching);
+        expect(chosen.length, "no Assignment was put on the preset that attaches the server").toBeGreaterThanOrEqual(1);
+        // That preset's Executor called the server: its result names the bin that only the tool's answer holds.
+        const runs = turns(state, "run") as ExecutorRun[];
+        const results = chosen.map((assignment) => runs.find(({ input }) => input.assignmentId === assignment.id)?.output);
+        expect(results.map((result) => result?.status)).toEqual(chosen.map(() => "completed"));
+        expect(results.some((result) => result!.message.includes(STOCK_BIN)), "no result of that preset's Executors names the bin from the tool's answer").toBe(true);
+        expect(request.status).toBe("completed");
+        // The closing, under Alice's identity, carries the answer to the group.
+        expect(textsBy(state, "alice").at(-1)?.message).toContain(STOCK_BIN);
+      });
+      expect(runningPrograms(servers)).toEqual([]);
+    } finally { stopRunningPrograms(servers); rmSync(servers, { recursive: true, force: true }); }
+  }, REQUEST_LIMIT_MS);
 
   it("starts an Assignment that depends on another after it, with that Assignment's result", () => realModelScenario(
     { id: "dependency", acceptance: ["agent-dispatch::REQ-011/AC-05"], files: DISCOUNT_PROJECT }, async (run) => {

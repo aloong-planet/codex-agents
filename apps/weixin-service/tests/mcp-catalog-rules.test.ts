@@ -368,8 +368,9 @@ describe("offered tool names", () => {
   });
 });
 
-// What the installed App Server did with each schema at thread start is in the opt-in case "offers an MCP proxy namespace"
-// (isolated-runtime-tools.test.ts) for the two refused forms; the accepted rows are forms it took in the same measurement.
+// That the installed App Server refuses a tuple written as a list in `items`, and takes the open object offered instead, is the
+// opt-in case "an Executor runtime is offered an attached MCP server's tools …" in isolated-runtime-tools.test.ts. The other rows
+// are forms it took or refused when measured by hand on codex-cli 0.167.0-alpha.3.2 (2026-11-11).
 describe("the input schema a runtime is offered", () => {
   const point = { type: "array", items: [{ type: "number" }, { type: "number" }] };
   it.each([
