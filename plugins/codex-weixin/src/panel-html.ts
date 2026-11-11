@@ -1,5 +1,9 @@
 export const WEIXIN_PANEL_URI = "ui://codex-weixin/panel.html";
 
+// The account/target selection rule in this script's applyResult is covered only by the browser cases in
+// tests/ui-e2e.test.ts. Moving it into a unit-tested function first needs a test that renders the panel from
+// the built dist/server.mjs: that bundle is minified, so an injected function that refers to a module-level
+// helper fails only in the shipped panel.
 export const weixinPanelHtml = String.raw`<!doctype html>
 <html lang="zh-CN">
 <head>
