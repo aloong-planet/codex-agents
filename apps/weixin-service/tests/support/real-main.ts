@@ -10,7 +10,7 @@ import { authorizeLocalService } from "../../e2e/console-session.js";
 
 // Shared real-main helpers for whole-app cases: main runs in fixture mode with fixture-only external peers.
 export type DispatchAssignmentState = { id: string; teamId: string; profileId: string; executor: string; title: string; status: string; attempt: number; dependsOn: string[] };
-export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; requester: string; result?: string;
+export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: string; senderAccountId: string; status: string; attempt: number; requester: string; result?: string;
     definitionsVersion: number | null; assignments: DispatchAssignmentState[] }>; notices?: Array<{ id: string; state: string }> };
   fixtureLeaderRequests?: Array<{ phase: "plan" | "supplement" | "close"; teamId: string; input: { brief: { message: string; latest?: string; summary: string }; refusal?: string;
     directory?: Array<{ name: string; responsibility: string }>; memory?: string;
@@ -115,6 +115,14 @@ export function dispatchConfig(directory: string, dual = false) {
 }
 
 /** A Feishu group text event from the owner in `oc_alpha`, with the fixture's canned Coordinator decision and optional extra fixture inputs. */
+/** Grants the fixture notes module read and write on every scope, so an Executor's file tools reach the fixture business directory. */
+export async function allowNotes(running: Awaited<ReturnType<typeof start>>) {
+  await running.until((state) => state.channels?.feishu?.ready === true);
+  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: true, write: true })) });
+}
+
 /** The fixture Coordinator's decision to dispatch a request to `agentId`. */
 export const decision = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
 export const groupMessage = (messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {}) => ({

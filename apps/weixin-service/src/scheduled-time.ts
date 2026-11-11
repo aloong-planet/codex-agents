@@ -2,6 +2,22 @@ export type Schedule = { kind: "once"; at: string }
   | { kind: "interval"; everySeconds: number; firstAt: string }
   | { kind: "calendar"; time: string; weekdays: number[] };
 
+/** A schedule as the console shows it; a one-time instant is written in the task's own timezone. */
+export function scheduleText(schedule: Schedule, timezone: string): string {
+  if (schedule.kind === "calendar") {
+    const days = [1, 2, 3, 4, 5, 6, 0].filter((day) => schedule.weekdays.includes(day));
+    return `${days.length === 7 ? "每天" : `每周${days.map((day) => "日一二三四五六"[day]).join("、")}`} ${schedule.time}`;
+  }
+  if (schedule.kind === "interval") {
+    const [size, unit] = ([[86_400, "天"], [3600, "小时"], [60, "分钟"], [1, "秒"]] as const).find(([seconds]) => schedule.everySeconds % seconds === 0)!;
+    return schedule.everySeconds === size ? `每${unit}` : `每 ${schedule.everySeconds / size} ${unit}`;
+  }
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, calendar: "iso8601", numberingSystem: "latn",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(Date.parse(schedule.at));
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)!.value;
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
+}
+
 export function nextInstant(schedule: Schedule, after: number, timezone: string): string | null {
   if (schedule.kind === "once") return null;
   if (schedule.kind === "calendar") return calendarInstant(schedule, after, timezone, 1);

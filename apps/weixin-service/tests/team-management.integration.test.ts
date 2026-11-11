@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { TeamRegistry } from "../src/team-registry.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
-import { config, decision, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
+import { allowNotes, config, decision, dispatchConfig, freePort, groupMessage, start, type State } from "./support/real-main.js";
 
 // Real main composition through the fixture-only Feishu ingress; the model and every Feishu application are fixtures, and the
 // onboarding platform is the fake fixture mode uses (team-onboarding.test.ts covers its answers). The first two cases read and save
@@ -117,8 +118,12 @@ it("onboards a team saved while the service runs: Sam announces it, its genuine 
 }, 45000);
 
 type Running = Awaited<ReturnType<typeof start>>;
-type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string };
-  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>; bindings: Array<{ chatId: string; state: string; join?: { status: string; reason?: string } }>;
+/** What a removal in one group still waits for (team-management::US-004). */
+type Removal = { active: number; awaitingRequester: number; closing: number; tasks: Array<{ id: string; name: string; when: string }>;
+  waiting: Array<{ requestId: string; label: string; summary: string; requester: string; waitingFor: string[] }> };
+type TeamView = { id: string; teamName: string; responsibility: string; leader: { name: string; appId: string; instructions: string }; deleting: boolean;
+  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }>;
+  bindings: Array<{ chatId: string; state: string; join?: { status: string; reason?: string }; removal?: Removal }>;
   announcements: Record<string, { kind: string; state: string }> };
 type View = { version: number; teams: TeamView[]; preview: Record<string, string[]> };
 type Edit = { id: string; teamName: string; responsibility: string; leader: TeamView["leader"];
@@ -139,6 +144,15 @@ const team = (view: View, id: string) => view.teams.find((candidate) => candidat
 const failedReply = (subject: string) => JSON.stringify({ message: "缺少日期，行程未完成。", results: [{ subject, status: "failed" }] });
 const completedReply = (subject: string) => JSON.stringify({ message: "行程已规划好。", results: [{ subject, status: "completed" }] });
 const CLARIFICATION = "我还不能确定这条消息需要如何处理，请说明希望完成的事务和结果。";
+/** The owner's group message with a genuine mention of one application, as Feishu's message details report it. */
+const mentioning = (messageId: string, text: string, appId: string, name: string, dispatchDecision: unknown) => ({
+  event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+      mentions: [{ key: "@_user_0", id: { open_id: `ou_${name.toLowerCase()}view0` }, name }], content: JSON.stringify({ text: `@_user_0 ${text}` }) } },
+  messageDetails: { message_id: messageId, chat_id: "oc_alpha", msg_type: "text", body: { content: JSON.stringify({ text }) },
+    mentions: [{ key: "@_user_0", id: appId, id_type: "app_id", name }] },
+  dispatchDecision,
+});
 
 it("gives a team whose bot cannot join the group no work there, and leaves it out of that group's preview", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-onboarding-blocked-"));
@@ -178,7 +192,10 @@ it("keeps a team accepting work when its join announcement is rejected, and neve
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 45000);
 
-it("stops giving work to a team in a group unchecked from it, announces that it left and drops it from the Team Directory", async () => {
+// Nothing of Alice's is left in the group, so the removal completes with the save (team-management::US-004/AC-02). Unbinding is a
+// registry state: her application stays a member of the chat, so she can still be mentioned there, and the mention gives her
+// no work (decision 2026-11-11 (g)).
+it("unbinds an idle team from a group unchecked from it: Sam announces that it left, a mention of it gets no work and the Team Directory drops it", async () => {
   const directory = mkdtempSync(join(tmpdir(), "team-removal-start-"));
   let running: Running | undefined;
   try {
@@ -188,18 +205,199 @@ it("stops giving work to a team in a group unchecked from it, announces that it 
     await running.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "alice", (alice) => ({ ...alice, groups: [] })) });
     const left = await running.until((state) => announcements(state).length === 1);
     expect(announcements(left)).toEqual(["Alice（运营团队）已离开本群，不再接新的事务；进行中的事务会做完。"]);
-    expect(team(await running.get<View>("/api/teams"), "alice").bindings).toEqual([{ chatId: "oc_alpha", state: "draining" }]);
-    await running.post("/api/fixture/inbound", groupMessage("om_after_leave", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    expect(team(await running.get<View>("/api/teams"), "alice").bindings).toEqual([]);
+    await running.post("/api/fixture/inbound", mentioning("om_after_leave", "帮我整理闲鱼商品描述", "cli_aaaaaaaaaaaaaaaa", "Alice", decision("alice", "整理闲鱼商品描述")));
     await running.until((state) => (state.fixtureTextOutbox?.length ?? 0) === 2);
     await running.post("/api/fixture/inbound", groupMessage("om_bill_after_leave", "帮我规划周末一日行程", decision("bill", "规划周末一日行程")));
     const result = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 2);
-    console.log(JSON.stringify({ kind: "team_removal_start", commands: ["uncheck Alice oc_alpha", "帮我整理闲鱼商品描述", "帮我规划周末一日行程"],
+    console.log(JSON.stringify({ kind: "team_removal_start", commands: ["uncheck Alice oc_alpha", "@Alice 帮我整理闲鱼商品描述", "帮我规划周末一日行程"],
       coordinator: result.fixtureTextOutbox, jobs: result.agentDispatch, leader: result.fixtureLeaderRequests }));
     expect(result.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["Alice（运营团队）已离开本群，不再接新的事务；进行中的事务会做完。", CLARIFICATION]);
     expect(result.agentDispatch?.jobs.map(({ agentId }) => agentId)).toEqual(["bill"]);
+    expect(result.agentFixtureOutboxes?.alice?.text).toEqual([]);
     expect(result.fixtureLeaderRequests!.find(({ teamId, phase }) => teamId === "bill" && phase === "plan")!.input.directory!.map(({ name }) => name)).toEqual(["生活团队", "技术团队"]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
+
+// Deleting a team (team-management::US-004/AC-01, AC-02, REQ-004/AC-01; agent-dispatch::REQ-015/AC-01, AC-03; agent-console::US-003/AC-02).
+// The team stays in the definitions while its Assignment runs, so its Team Leader's closing goes out with its own application
+// (decision 2026-11-11: a deleted team's last closing still goes out); only then does it leave the list.
+it("deletes a team with a running Assignment: it stops taking work at once, is marked as being deleted, closes its work with its own application and then leaves the list", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-delete-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_bill_held", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" && (state.fixtureModelRequests?.length ?? 0) === 1);
+    const { view: started } = await running.post<{ view: View }>("/api/teams/delete", { teamId: "bill" });
+    expect(team(started, "bill")).toMatchObject({ deleting: true, bindings: [{ chatId: "oc_alpha", state: "draining", removal: { active: 1, awaitingRequester: 0, closing: 0, tasks: [], waiting: [] } }] });
+    expect(started.teams.filter(({ deleting }) => deleting).map(({ id }) => id)).toEqual(["bill"]);
+    const overview = await running.get<{ teams: Array<{ id: string; deleting: boolean }> }>("/api/overview");
+    expect(overview.teams.map(({ id, deleting }) => [id, deleting])).toEqual([["alice", false], ["bill", true], ["jack", false]]);
+    // A mention of the draining team's application gives it no work (decision 2026-11-11 (g)).
+    await running.post("/api/fixture/inbound", mentioning("om_mention_draining", "再帮我订一家餐厅", "cli_bbbbbbbbbbbbbbbb", "Bill", decision("bill", "订一家餐厅")));
+    const refused = await running.until((state) => (state.fixtureTextOutbox?.length ?? 0) === 2);
+    expect(refused.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["Bill（生活团队）已离开本群，不再接新的事务；进行中的事务会做完。", CLARIFICATION]);
+    expect(refused.agentDispatch?.jobs.map(({ agentId, status }) => [agentId, status])).toEqual([["bill", "running"]]);
+    // Another team's next turn no longer lists the team being deleted.
+    await running.post("/api/fixture/inbound", groupMessage("om_alice_after_delete", "帮我整理闲鱼商品描述", decision("alice", "整理闲鱼商品描述")));
+    const routed = await running.until((state) => state.agentFixtureOutboxes?.alice?.text.length === 2);
+    expect(routed.fixtureLeaderRequests!.find(({ teamId, phase }) => teamId === "alice" && phase === "plan")!.input.directory!.map(({ name }) => name)).toEqual(["运营团队", "技术团队"]);
+    expect(team(await running.get<View>("/api/teams"), "bill").bindings[0]?.state).toBe("draining");
+    await running.post("/api/fixture/inbound", { modelControl: { messageId: "om_bill_held", action: "release" } });
+    const gone = await viewUntil(running, (current) => !current.teams.some(({ id }) => id === "bill"));
+    expect(gone.teams.map(({ id }) => id)).toEqual(["alice", "jack"]);
+    const closed = await running.state();
+    console.log(JSON.stringify({ kind: "team_delete", commands: ["请帮我规划周末一日行程", "delete Bill", "@Bill 再帮我订一家餐厅", "帮我整理闲鱼商品描述", "release Bill's Executor"],
+      coordinator: closed.fixtureTextOutbox, jobs: closed.agentDispatch, outboxes: closed.agentFixtureOutboxes }));
+    // Bill's application is closed with the deletion, so its outbox is gone from the fixture state; the request's record shows
+    // that the closing was accepted under Bill's identity, not cancelled for a sender that had left, and keeps that identity.
+    const history = await running.get<{ agents: Record<string, { name: string; teamName: string }>; teams: Array<{ id: string }>;
+      requests: Array<{ lead: string; status: string; posts: Array<{ agentId: string; text: string; state: string }> }> }>("/api/overview");
+    expect(history.teams.map(({ id }) => id)).toEqual(["alice", "jack"]);
+    expect(history.agents.bill).toEqual({ name: "Bill", teamName: "生活团队" });
+    const record = history.requests.find(({ lead }) => lead === "bill")!;
+    expect(record.posts.map(({ agentId, text, state }) => [agentId, text, state]))
+      .toEqual([["bill", "我安排执行者 1（能力档 1）处理：规划周末一日行程。完成后会在本群汇报。", "accepted"], ["bill", "这是 fixture Codex 回复。", "accepted"]]);
+    expect(closed.agentDispatch?.jobs.map(({ agentId, status }) => [agentId, status])).toEqual([["bill", "completed"], ["alice", "completed"]]);
+    expect(announcements(closed)).toEqual(["Bill（生活团队）已离开本群，不再接新的事务；进行中的事务会做完。"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// Scheduled tasks that send with a team's identity hold its removal (team-management::US-004/AC-03, REQ-005). Each of the three
+// tasks takes one of the ways out: moved to another team, deleted, or run. The last one's run is what completes the removal,
+// with no console action after it.
+it("holds a removal for the team's scheduled tasks: a moved one is sent by the other team, a deleted one is never sent, and the removal completes when the last one has run", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-removal-tasks-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    // The tasks must fall due only after the removal steps below. Their due time is wall-clock time in another process, so it
+    // leaves those steps a wide margin, and the case fails with a reason if they still outlast it.
+    const due = Date.now() + 20_000, at = new Date(due).toISOString();
+    const names = ["带伞提醒", "订票提醒", "对账提醒"], asked = (name: string) => `稍后在本群提醒，原文：${name}`;
+    for (const [index, name] of names.entries()) {
+      await running.post("/api/fixture/inbound", groupMessage(`om_bill_task_${index}`, asked(name), decision("bill", name), {
+        modelToolCalls: [{ namespace: "schedules", tool: "create", arguments: { name, instruction: name, reminderText: name, reminderMode: "verbatim", at, sourceText: asked(name) } }] }));
+      await running.until((state) => state.agentDispatch?.jobs[index]?.status === "completed");
+    }
+    const view = await running.get<View>("/api/teams");
+    const { view: draining } = await running.post<{ view: View }>("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, groups: [] })) });
+    const held = team(draining, "bill").bindings[0]!;
+    expect(held).toMatchObject({ chatId: "oc_alpha", state: "draining", removal: { active: 0, awaitingRequester: 0, closing: 0, waiting: [] } });
+    // Tasks are listed in the order of their IDs, which are random.
+    expect(held.removal!.tasks.map(({ name }) => name).sort()).toEqual([...names].sort());
+    const taskId = (name: string) => held.removal!.tasks.find((task) => task.name === name)!.id;
+    await running.post("/api/teams/tasks/move", { teamId: "bill", taskId: taskId("带伞提醒"), to: "alice" });
+    const { view: left } = await running.post<{ view: View }>("/api/teams/tasks/delete", { teamId: "bill", taskId: taskId("订票提醒") });
+    expect(team(left, "bill").bindings.map(({ state, removal }) => [state, removal!.tasks.map(({ name }) => name)])).toEqual([["draining", ["对账提醒"]]]);
+    expect(Date.now(), "the removal steps outlasted the tasks' due time, so the tasks would run before they were moved or deleted").toBeLessThan(due - 2_000);
+    const sent = (state: State, id: string) => (state.agentFixtureOutboxes?.[id]?.text ?? []).map(({ chatId, message }) => [chatId, message]);
+    const ran = await running.until((state) => sent(state, "alice").length === 1 && sent(state, "bill").length === 7, Math.max(0, due - Date.now()) + processWaitLimitMs);
+    expect(sent(ran, "alice")).toEqual([["oc_alpha", "带伞提醒"]]);
+    expect(sent(ran, "bill").at(-1)).toEqual(["oc_alpha", "对账提醒"]);
+    const unbound = await viewUntil(running, (current) => team(current, "bill").bindings.length === 0);
+    const settled = await running.state();
+    console.log(JSON.stringify({ kind: "team_removal_tasks", commands: [...names.map(asked), "uncheck Bill oc_alpha", "move 带伞提醒 to Alice", "delete 订票提醒"],
+      coordinator: settled.fixtureTextOutbox, jobs: settled.agentDispatch, outboxes: settled.agentFixtureOutboxes, bill: team(unbound, "bill") }));
+    expect(Object.values(settled.agentFixtureOutboxes ?? {}).flatMap((outbox) => outbox?.text ?? []).filter(({ message }) => message === "订票提醒")).toEqual([]);
+    expect(announcements(settled)).toEqual(["Bill（生活团队）已离开本群，不再接新的事务；进行中的事务会做完。"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 60000);
+
+// Requests that wait for their requester hold a removal (team-management::US-004/AC-04). The owner sees whose answer each one
+// waits for and what it waits on; the removal completes when both requesters have answered, with no console action.
+it("holds a removal for requests waiting for their requesters, lists each with its requester and what it waits for, and completes when they end", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-removal-waiting-")), business = mkdtempSync(join(tmpdir(), "team-removal-waiting-files-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory, true);
+    running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await allowNotes(running);
+    const from = (sender: string, message: ReturnType<typeof groupMessage>) => ({ ...message, event: { ...message.event, sender: { sender_type: "user", sender_id: { open_id: sender } } } });
+    const choose = { modelToolCalls: [
+      { namespace: "files", tool: "find", arguments: { scopeRefs: [{ $fixtureScopeLabel: "demo-vault" }], query: "Agent", include: ["**/*.md"], kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 2 } },
+      { namespace: "weixin", tool: "send_files", arguments: { disposition: "needs_choice", allowMultiple: true,
+        candidateRefs: [0, 1].map((index) => ({ $fixtureToolResult: { call: 0, path: ["entries", index, "fileRef"] } })) } }] };
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_owner_choice", "列出 Agent 笔记让我选发哪个", decision("alice", "选择并发送运营笔记"), choose));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "waiting");
+    await running.post("/api/fixture/feishu/inbound", from("ou_colleague", groupMessage("om_member_choice", "也列出 Agent 笔记让我选", decision("alice", "为同事选择运营笔记"), choose)));
+    const waiting = await running.until((state) => state.agentDispatch?.jobs.length === 2 && state.agentDispatch.jobs.every(({ status }) => status === "waiting"));
+    const [mine, theirs] = waiting.agentDispatch!.jobs;
+    const view = await running.get<View>("/api/teams");
+    const { view: draining } = await running.post<{ view: View }>("/api/teams/save", { basedOn: view.version, team: editOf(view, "alice", (alice) => ({ ...alice, groups: [] })) });
+    // A waiting Assignment is counted with the waiting requests, not with the Assignments still being worked on.
+    expect(team(draining, "alice").bindings).toEqual([{ chatId: "oc_alpha", state: "draining", removal: { active: 0, awaitingRequester: 2, closing: 0, tasks: [], waiting: [
+      { requestId: mine!.id, label: mine!.id.slice(0, 8), summary: "选择并发送运营笔记", requester: "owner", waitingFor: ["选择并发送运营笔记"] },
+      { requestId: theirs!.id, label: theirs!.id.slice(0, 8), summary: "为同事选择运营笔记", requester: "member", waitingFor: ["为同事选择运营笔记"] }] } }]);
+    const ignore = { kind: "ignore", agentId: null, requestId: null, summary: "", message: "" };
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_owner_cancel", "取消", ignore));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "cancelled");
+    expect(team(await running.get<View>("/api/teams"), "alice").bindings.map(({ state, removal }) => [state, removal!.waiting.map(({ requestId }) => requestId)])).toEqual([["draining", [theirs!.id]]]);
+    await running.post("/api/fixture/feishu/inbound", from("ou_colleague", groupMessage("om_member_cancel", "取消", ignore)));
+    await viewUntil(running, (current) => team(current, "alice").bindings.length === 0);
+    const settled = await running.state();
+    console.log(JSON.stringify({ kind: "team_removal_waiting", commands: ["列出 Agent 笔记让我选发哪个", "ou_colleague: 也列出 Agent 笔记让我选", "uncheck Alice oc_alpha", "取消", "ou_colleague: 取消"],
+      coordinator: settled.feishuFixtureTextOutbox, jobs: settled.agentDispatch, outboxes: settled.agentFixtureOutboxes }));
+    expect(settled.agentDispatch?.jobs.map(({ agentId, status }) => [agentId, status])).toEqual([["alice", "cancelled"], ["alice", "cancelled"]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 45000);
+
+// Availability for new work follows the current roster, for a request admitted earlier too (agent-dispatch::REQ-017/AC-03,
+// REQ-015/AC-01): a retry would give the removed team new work, so nothing is requeued and Sam says so (decision 2026-11-11 (a)).
+// The case next to it in this file retries the same failed request with the team still accepting, and that one runs again.
+it("does not rerun a failed request for a team removed from the group since: Sam answers that it cannot continue", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-removed-retry-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_removed_first", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelReply: failedReply("规划周末一日行程") }));
+    const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed" && state.agentFixtureOutboxes?.bill?.text.length === 2);
+    const view = await running.get<View>("/api/teams");
+    await running.post("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, groups: [] })) });
+    await viewUntil(running, (current) => team(current, "bill").bindings.length === 0);
+    const requests = failed.fixtureModelRequests?.length;
+    await running.post("/api/fixture/inbound", groupMessage("om_removed_retry", "重试", { kind: "retry", agentId: null, requestId: failed.agentDispatch!.jobs[0]!.id, summary: "", message: "" },
+      { modelReply: completedReply("规划周末一日行程") }));
+    const refused = await running.until((state) => (state.fixtureTextOutbox?.length ?? 0) === 2);
+    console.log(JSON.stringify({ kind: "team_removed_retry", commands: ["请帮我规划周末一日行程", "uncheck Bill oc_alpha", "重试"], coordinator: refused.fixtureTextOutbox,
+      jobs: refused.agentDispatch, outboxes: refused.agentFixtureOutboxes }));
+    expect(refused.fixtureTextOutbox?.map(({ message }) => message)).toEqual(["Bill（生活团队）已离开本群，不再接新的事务；进行中的事务会做完。", "无法继续这项请求，请说明需要处理的事务。"]);
+    expect(refused.agentDispatch?.jobs.map(({ agentId, status, attempt }) => [agentId, status, attempt])).toEqual([["bill", "failed", 0]]);
+    expect(refused.fixtureModelRequests?.length).toBe(requests);
+    expect(refused.agentFixtureOutboxes?.bill?.text.length).toBe(2);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// A removal outlives the process (team-management::US-004/AC-02). The Assignment that held it is cut off by the shutdown, so
+// nothing of the team's runs after the restart: its Team Leader reports the interruption with its own application, and the
+// removal completes from the start-up alone, with no console action and no new message.
+it("completes a removal held at shutdown after the restart: the team reports its interrupted work with its own application and is unbound", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "team-removal-restart-"));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_restart_held", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    await running.until((state) => state.agentDispatch?.jobs[0]?.status === "running" && (state.fixtureModelRequests?.length ?? 0) === 1);
+    const view = await running.get<View>("/api/teams");
+    const { view: draining } = await running.post<{ view: View }>("/api/teams/save", { basedOn: view.version, team: editOf(view, "bill", (bill) => ({ ...bill, groups: [] })) });
+    expect(team(draining, "bill").bindings.map(({ state, removal }) => [state, removal!.active])).toEqual([["draining", 1]]);
+    await running.close(); running = await start(directory);
+    await viewUntil(running, (current) => team(current, "bill").bindings.length === 0);
+    const settled = await running.state();
+    console.log(JSON.stringify({ kind: "team_removal_restart", commands: ["请帮我规划周末一日行程", "uncheck Bill oc_alpha", "restart"], coordinator: settled.fixtureTextOutbox,
+      jobs: settled.agentDispatch, outboxes: settled.agentFixtureOutboxes }));
+    expect(settled.agentDispatch?.jobs.map(({ agentId, status, assignments }) => [agentId, status, assignments.map((assignment) => assignment.status)])).toEqual([["bill", "failed", ["interrupted"]]]);
+    // The fixture outboxes start empty with each process: these are the posts made after the restart, and Sam announces nothing again.
+    expect(settled.agentFixtureOutboxes?.bill?.text.map(({ chatId, message }) => [chatId, message])).toEqual([
+      ["oc_alpha", "服务中断，执行者 1（能力档 1）的分工「规划周末一日行程」已中断，无法确认已完成的内容，不会自动重放。"], ["oc_alpha", "服务中断，本次处理已停止。"]]);
+    expect(settled.fixtureTextOutbox).toEqual([]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 45000);
 
 // A team can move to another application and back (ticket 11, decision D5). Going back used to fail the save after it was stored,
 // because the old application's media route was still registered.

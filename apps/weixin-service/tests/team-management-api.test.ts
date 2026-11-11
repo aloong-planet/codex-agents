@@ -17,7 +17,7 @@ import { AUDIT_FILE, ConsoleAudit } from "../src/console-audit.js";
 import { createConsoleRoutes } from "../src/console-routes.js";
 import { McpCatalog } from "../src/mcp-catalog.js";
 import { TeamAnnouncements } from "../src/team-announcements.js";
-import { TeamManagement } from "../src/team-management.js";
+import { TeamManagement, type TeamManagementOptions, type TeamsView } from "../src/team-management.js";
 import { FixtureOnboardingPlatform } from "../src/team-onboarding.js";
 import { TeamRegistry } from "../src/team-registry.js";
 import { PRODUCTION_TOOL_IDS } from "./support/production-tools.js";
@@ -29,7 +29,7 @@ const SECRET_SENTINEL = "api-secret-SENTINEL-41c9";
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const step of cleanup.splice(0).reverse()) await step(); });
 
-async function start(options: { now?: () => number } = {}) {
+async function start(options: Partial<Pick<TeamManagementOptions, "now" | "work" | "tasks">> = {}) {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "team-api-"));
   cleanup.push(() => fs.rmSync(work, { recursive: true, force: true }));
   const state = path.join(work, "state");
@@ -54,7 +54,8 @@ async function start(options: { now?: () => number } = {}) {
   const platform = new FixtureOnboardingPlatform();
   platform.configure({ chats: { oc_alpha: { name: "银河护卫队" } } });
   const teams = new TeamManagement({ registry, coordinator: SAM, platform, announcements, audit, catalogToolIds: PRODUCTION_TOOL_IDS,
-    moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => ({}), rosterChanged: () => {}, report: () => {}, ...options });
+    moduleScopes: () => [{ read: true, write: false }], activeAssignments: () => ({}), rosterChanged: () => {}, report: () => {},
+    work: () => [], tasks: { sentBy: () => [], move: () => "unknown", delete: () => "unknown" }, ...options });
   const server: Server = createChannelStatusServer(() => ({}), undefined, access, createConsoleRoutes({ catalog, teams }));
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -72,8 +73,20 @@ async function start(options: { now?: () => number } = {}) {
     return { status: response.status, body: text ? JSON.parse(text) : undefined };
   };
   const auditEntries = () => fs.readFileSync(path.join(state, AUDIT_FILE), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-  return { request, bodies, auditEntries, state, platform };
+  return { request, bodies, auditEntries, state, platform, teams, announcements };
 }
+
+const ALICE_APP = "cli_1111111111111111", BILL_APP = "cli_2222222222222222";
+type View = Pick<TeamsView, "version" | "teams" | "preview">;
+const teamOf = (view: View, id: string) => view.teams.find((team) => team.id === id);
+/** The team as the console saves it, bound to the given groups. */
+const editOf = (view: View, id: string, groups: string[]) => {
+  const team = teamOf(view, id)!;
+  return { id, teamName: team.teamName, responsibility: team.responsibility, leader: team.leader, groups,
+    executorProfiles: team.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools })) };
+};
+const removalAudit = (entries: Array<Record<string, unknown>>) => entries.filter(({ event }) => ["team_delete_started", "team_deleted", "team_binding_changed", "team_task_moved", "team_task_deleted"].includes(String(event)))
+  .map(({ event, by, team, group, from, to, groups, task }) => [event, by, team, ...[group, from, to, groups, task].filter((value) => value !== undefined)]);
 
 const daisy = { teamName: "设计团队", responsibility: "视觉方案", groups: ["oc_alpha"], leader: { name: "Daisy", appId: "cli_dddddddddddddddd", instructions: "" },
   executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: ["files.read", "files.write", "schedules.list"] }] };
@@ -101,7 +114,7 @@ describe("team management API", () => {
     expect(ours.map(({ event, by }) => [event, by])).toEqual(expect.arrayContaining([["team_changed", "browser"], ["team_secret_written", "browser"],
       ["team_binding_changed", "browser"], ["team_profile_saved", "browser"], ["team_onboarding_checked", "browser"]]));
     expect(ours.filter(({ event }) => event === "team_binding_changed").map(({ group, from, to }) => [group, from, to]))
-      .toEqual([["oc_alpha", null, "onboarding"], ["oc_alpha", "accepting", "draining"], ["oc_beta", null, "onboarding"]]);
+      .toEqual([["oc_alpha", null, "onboarding"], ["oc_alpha", "accepting", "draining"], ["oc_beta", null, "onboarding"], ["oc_alpha", "draining", "removed"]]);
     for (const entry of ours.filter(({ by }) => by === "browser")) expect(entry.browser).toMatchObject({ id: expect.any(String), label: expect.any(String) });
   });
 
@@ -124,6 +137,111 @@ describe("team management API", () => {
     expect((await request("/api/teams/save", { basedOn: view.version, team: { ...daisy, executorProfiles: [{ ...daisy.executorProfiles[0]!, hostTools: ["shell.exec"] }] } })).body)
       .toEqual({ error: "工具格式无效" });
     expect((await request("/api/teams", undefined, {})).status).toBe(401);
+  });
+
+  it("deletes a team nothing holds at once: it leaves the list, each group gets its leave announcement, and Sam cannot be deleted", async () => {
+    const { request, auditEntries, announcements } = await start();
+    expect(await request("/api/teams/delete", { teamId: "sam" })).toEqual({ status: 400, body: { error: "Sam 只能修改职责与提示词" } });
+    expect(await request("/api/teams/delete", { teamId: "nobody" })).toEqual({ status: 400, body: { error: "这个团队已不存在，请刷新页面。" } });
+    const deleted = await request("/api/teams/delete", { teamId: "alice" });
+    expect(deleted.status).toBe(200);
+    const view = deleted.body.view as View;
+    expect(view.teams.map(({ id }) => id)).toEqual(["bill", "jack"]);
+    expect(view.preview).toEqual({ oc_alpha: ["bill", "jack"], oc_beta: ["bill", "jack"] });
+    expect(announcements.list().map(({ chatId, teamId, kind, text }) => [chatId, teamId, kind, text])).toEqual(["oc_alpha", "oc_beta"].map((chatId) =>
+      [chatId, "alice", "leave", "Alice（运营团队）已离开本群，不再接新的事务；进行中的事务会做完。"]));
+    expect(removalAudit(auditEntries())).toEqual([
+      ["team_delete_started", "browser", "alice", ["oc_alpha", "oc_beta"]],
+      ["team_binding_changed", "browser", "alice", "oc_alpha", "accepting", "draining"], ["team_binding_changed", "browser", "alice", "oc_beta", "accepting", "draining"],
+      ["team_binding_changed", "service", "alice", "oc_alpha", "draining", "removed"], ["team_binding_changed", "service", "alice", "oc_beta", "draining", "removed"],
+      ["team_deleted", "service", "alice"]]);
+    // Deleting it again finds no such team, and announces nothing more.
+    expect((await request("/api/teams/delete", { teamId: "alice" })).status).toBe(400);
+    expect(announcements.list()).toHaveLength(2);
+  });
+
+  it("keeps a team being deleted until its work in each group has ended, showing what each removal waits for, and saves it no more", async () => {
+    const held = {
+      work: [
+        { chatId: "oc_alpha", requestId: "req-running", label: "R-1", summary: "写上架文案", requester: "owner" as const, active: 2, awaitingRequester: 0, waitingFor: null },
+        { chatId: "oc_alpha", requestId: "req-waiting", label: "R-2", summary: "做经营分析", requester: "member" as const, active: 0, awaitingRequester: 2, waitingFor: ["确认预算", "选择文件"] },
+        { chatId: "oc_alpha", requestId: "req-closing", label: "R-3", summary: "整理素材", requester: "owner" as const, active: 0, awaitingRequester: 0, waitingFor: null },
+      ],
+      tasks: [{ id: "task-1", name: "周报提醒", when: "每周五 17:00", chatId: "oc_alpha" }],
+    };
+    const { request, auditEntries, teams } = await start({ work: (teamId) => teamId === "alice" ? held.work : [],
+      tasks: { sentBy: (appId) => appId === ALICE_APP ? held.tasks : [], move: () => "unknown", delete: () => "unknown" } });
+    const view = (await request("/api/teams/delete", { teamId: "alice" })).body.view as View;
+    // Nothing holds the removal from oc_beta, so only oc_alpha is left; Sam assigns to it in neither.
+    expect(teamOf(view, "alice")).toMatchObject({ deleting: true, bindings: [{ chatId: "oc_alpha", state: "draining", removal: { active: 2, awaitingRequester: 2, closing: 1,
+      tasks: [{ id: "task-1", name: "周报提醒", when: "每周五 17:00" }],
+      waiting: [{ requestId: "req-waiting", label: "R-2", summary: "做经营分析", requester: "member", waitingFor: ["确认预算", "选择文件"] }] } }] });
+    expect(view.preview).toEqual({ oc_alpha: ["bill", "jack"], oc_beta: ["bill", "jack"] });
+    expect(teamOf(view, "bill")).toMatchObject({ deleting: false });
+    expect(await request("/api/teams/save", { basedOn: view.version, team: editOf(view, "alice", ["oc_alpha", "oc_beta"]) }))
+      .toEqual({ status: 409, body: { error: "这个团队正在删除，本次保存没有生效。", stale: true } });
+    // One thing left is enough to hold it.
+    held.work = [];
+    teams.settle();
+    expect(teamOf((await request("/api/teams")).body, "alice")).toMatchObject({ bindings: [{ chatId: "oc_alpha", removal: { active: 0, awaitingRequester: 0, closing: 0, waiting: [] } }] });
+    held.tasks = [];
+    teams.settle();
+    expect(((await request("/api/teams")).body as View).teams.map(({ id }) => id)).toEqual(["bill", "jack"]);
+    expect(removalAudit(auditEntries()).slice(-2)).toEqual([["team_binding_changed", "service", "alice", "oc_alpha", "draining", "removed"], ["team_deleted", "service", "alice"]]);
+  });
+
+  it("moves a scheduled task a removal lists only to a team accepting work in its group, or deletes it, and the removal completes with the last one", async () => {
+    let tasks = [{ id: "task-1", name: "周报提醒", when: "每周五 17:00", chatId: "oc_alpha" }, { id: "task-2", name: "文档巡检", when: "每月 1 日 10:00", chatId: "oc_alpha" },
+      { id: "task-3", name: "晨报", when: "每天 08:00", chatId: "oc_beta" }];
+    const calls: unknown[][] = [];
+    let busy = true;
+    const change = <Result extends "moved" | "deleted">(result: Result) => (taskId: string, ...apps: string[]) => {
+      calls.push([result, taskId, ...apps]);
+      if (busy) return "busy" as const;
+      tasks = tasks.filter(({ id }) => id !== taskId);
+      return result;
+    };
+    const { request, auditEntries } = await start({ tasks: { sentBy: (appId) => appId === ALICE_APP ? tasks : [], move: change("moved"), delete: change("deleted") } });
+    let view = (await request("/api/teams")).body as View;
+    expect((await request("/api/teams/save", { basedOn: view.version, team: editOf(view, "jack", ["oc_beta"]) })).status).toBe(200);
+    view = (await request("/api/teams")).body;
+    expect((await request("/api/teams/save", { basedOn: view.version, team: editOf(view, "alice", ["oc_beta"]) })).status).toBe(200);
+    const move = (taskId: string, to: string) => request("/api/teams/tasks/move", { teamId: "alice", taskId, to });
+    // Jack no longer accepts work in the task's group, Alice is the one leaving, and task-3 is in a group Alice stays in.
+    // The page shows each refusal after naming the action, so each says what the owner can do about it.
+    for (const [to, name] of [["jack", "Jack"], ["alice", "Alice"]]) expect(await move("task-1", to!)).toEqual({ status: 400, body: { error: `${name} 已不在该群接单，请重新选择。` } });
+    expect(await move("task-1", "nobody")).toEqual({ status: 400, body: { error: "所选团队已不存在，请重新选择。" } });
+    for (const taskId of ["task-3", "task-9"]) expect(await move(taskId, "bill")).toEqual({ status: 400, body: { error: "这项定时任务已不存在，请刷新页面。" } });
+    expect(await request("/api/teams/tasks/delete", { teamId: "alice", taskId: "task-3" })).toEqual({ status: 400, body: { error: "这项定时任务已不存在，请刷新页面。" } });
+    for (const route of ["move", "delete"]) expect(await request(`/api/teams/tasks/${route}`, { teamId: "nobody", taskId: "task-1", to: "bill" }))
+      .toEqual({ status: 400, body: { error: "这个团队已不存在，请刷新页面。" } });
+    expect(calls).toEqual([]);
+    expect(await move("task-1", "bill")).toEqual({ status: 409, body: { error: "这项定时任务正在执行或发送，稍后再试。" } });
+    expect(await request("/api/teams/tasks/delete", { teamId: "alice", taskId: "task-2" })).toEqual({ status: 409, body: { error: "这项定时任务正在执行或发送，稍后再试。" } });
+    busy = false;
+    const moved = (await move("task-1", "bill")).body.view as View;
+    expect(teamOf(moved, "alice")!.bindings).toMatchObject([{ chatId: "oc_alpha", state: "draining", removal: { tasks: [{ id: "task-2" }] } }, { chatId: "oc_beta", state: "accepting" }]);
+    const removed = (await request("/api/teams/tasks/delete", { teamId: "alice", taskId: "task-2" })).body.view as View;
+    expect(teamOf(removed, "alice")).toMatchObject({ deleting: false, bindings: [{ chatId: "oc_beta", state: "accepting" }] });
+    expect(calls).toEqual([["moved", "task-1", ALICE_APP, BILL_APP], ["deleted", "task-2", ALICE_APP], ["moved", "task-1", ALICE_APP, BILL_APP], ["deleted", "task-2", ALICE_APP]]);
+    expect(removalAudit(auditEntries()).filter(([, , team]) => team === "alice")).toEqual([
+      ["team_binding_changed", "browser", "alice", "oc_alpha", "accepting", "draining"],
+      ["team_task_moved", "browser", "alice", "oc_alpha", "bill", "task-1"], ["team_task_deleted", "browser", "alice", "oc_alpha", "task-2"],
+      ["team_binding_changed", "service", "alice", "oc_alpha", "draining", "removed"]]);
+  });
+
+  // The page shows a refusal's text to the owner, so a failure that is not one of the service's own sentences reaches it as
+  // 「请求失败」 and never as the code or message it was raised with (decision 2026-11-11).
+  it("answers a task action that fails with an internal error with 「请求失败」, and gives the page none of the error's own text", async () => {
+    const tasks = [{ id: "task-1", name: "周报提醒", when: "每周五 17:00", chatId: "oc_alpha" }];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    cleanup.push(() => stderr.mockRestore());
+    const { request } = await start({ tasks: { sentBy: (appId) => appId === ALICE_APP ? tasks : [],
+      move: () => { throw new Error("task_busy at ScheduledTasks.move (scheduled-tasks.ts:1)"); }, delete: () => { throw new TypeError("schedule_store_closed"); } } });
+    const view = (await request("/api/teams")).body as View;
+    expect((await request("/api/teams/save", { basedOn: view.version, team: editOf(view, "alice", ["oc_beta"]) })).status).toBe(200);
+    expect(await request("/api/teams/tasks/move", { teamId: "alice", taskId: "task-1", to: "bill" })).toEqual({ status: 500, body: { error: "请求失败" } });
+    expect(await request("/api/teams/tasks/delete", { teamId: "alice", taskId: "task-1" })).toEqual({ status: 500, body: { error: "请求失败" } });
   });
 
   // Group names (ticket 11, decision D4): a name the platform cannot give is asked for again after 10 minutes, concurrent views share

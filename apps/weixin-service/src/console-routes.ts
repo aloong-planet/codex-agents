@@ -8,7 +8,7 @@ import type { ConsoleOverview } from "./console-overview.js";
 import { DispatchGroupRefusal, type DispatchGroupSettings } from "./dispatch-group-settings.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpConfigError } from "./mcp-catalog-rules.js";
-import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team-management.js";
+import { TeamDefinitionError, TeamInputError, type TeamManagement, TeamTaskBusyError } from "./team-management.js";
 
 /**
  * The console's pages and APIs, mounted by both local servers (the settings demo server and the Feishu status
@@ -20,7 +20,9 @@ import { TeamDefinitionError, TeamInputError, type TeamManagement } from "./team
  *   browser (agent-console::REQ-004).
  * - `/console/teams` and its assets: the 团队管理 page (team-management spec).
  * - `/api/teams/...`: team management. Without Feishu dispatch the view says so and team saves are refused.
- *   No response carries an App Secret (team-management::CON-001); every change is audited.
+ *   No response carries an App Secret (team-management::CON-001); every change is audited. `/api/teams/delete` starts deleting a
+ *   team, and `/api/teams/tasks/move` and `/api/teams/tasks/delete` handle a scheduled task one of its removals lists
+ *   (team-management::US-004).
  * - `/api/teams/dispatch-groups`: the dispatch-group form (agent-console::US-009), with or without dispatch. A save writes the
  *   channel configuration file and applies at the next start; a refusal answers 409 with its kind and leaves the file unchanged.
  * - `/console` and its assets: the 团队总览 page, the console's home (agent-console::US-003 to US-005).
@@ -101,6 +103,7 @@ const TEAM_REFUSALS: Record<string, [number, string]> = {
   team_registry_version_stale: [409, "这个团队已在其他页面保存过新版本；为避免覆盖，本次保存没有生效。"],
   team_registry_coordinator_fixed: [400, "Sam 只能修改职责与提示词"],
   team_registry_team_unknown: [404, "团队不存在"],
+  team_registry_team_deleting: [409, "这个团队正在删除，本次保存没有生效。"],
   team_registry_group_unknown: [400, "所属群不在派单群里"],
 };
 
@@ -172,10 +175,20 @@ export function createConsoleRoutes(options: { catalog: McpCatalog; teams?: Team
       } else if (pathname === "/api/teams/recheck") {
         await teams.recheck(input.teamId, actor);
         json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/delete") {
+        teams.deleteTeam(input.teamId, actor);
+        json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/tasks/move") {
+        teams.moveTask(input.teamId, input.taskId, input.to, actor);
+        json(res, 200, { view: await teams.view() });
+      } else if (pathname === "/api/teams/tasks/delete") {
+        teams.deleteTask(input.teamId, input.taskId, actor);
+        json(res, 200, { view: await teams.view() });
       } else throw new RequestError(404, "未找到");
     } catch (error) {
       if (error instanceof TeamDefinitionError) { json(res, 400, { error: "无法保存", reasons: error.reasons }); return; }
       if (error instanceof TeamInputError) throw new RequestError(400, error.message);
+      if (error instanceof TeamTaskBusyError) throw new RequestError(409, "这项定时任务正在执行或发送，稍后再试。");
       const refusal = error instanceof Error ? TEAM_REFUSALS[error.message] : undefined;
       if (refusal) { json(res, refusal[0], { error: refusal[1], ...(refusal[0] === 409 ? { stale: true } : {}) }); return; }
       throw error;

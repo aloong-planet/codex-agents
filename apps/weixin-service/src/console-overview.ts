@@ -47,8 +47,9 @@ export type OverviewView = {
   /**
    * The current teams; `groups` are those they are bound to, `counts` their requests per group (agent-console::US-003/AC-02) and
    * `frames` the requests under their card per group, each with the team's running and waiting Assignments (US-003/AC-03, AC-04).
+   * `deleting` marks a team that is being deleted (US-003/AC-02).
    */
-  teams: Array<{ id: string; responsibility: string; groups: string[]; counts: Record<string, TeamCounts>;
+  teams: Array<{ id: string; responsibility: string; deleting: boolean; groups: string[]; counts: Record<string, TeamCounts>;
     frames: Record<string, Array<{ request: string; assignments: string[] }>> }>;
   requests: OverviewRequest[];
   /** Penny's state only; nothing of its ledger reaches the console (agent-console::REQ-003). */
@@ -124,7 +125,7 @@ export class ConsoleOverview {
       teams: definitions.teams.map((team) => {
         const bound = team.bindings.filter(({ chatId, state }) => state !== "removed" && groups.includes(chatId)).map(({ chatId }) => chatId);
         const inGroup = (chatId: string) => requests.filter((request) => request.chatId === chatId);
-        return { id: team.id, responsibility: team.responsibility, groups: bound,
+        return { id: team.id, responsibility: team.responsibility, deleting: team.deleting === true, groups: bound,
           counts: Object.fromEntries(bound.map((chatId) => [chatId, counts(inGroup(chatId), team.id)])),
           frames: Object.fromEntries(bound.map((chatId) => [chatId, frames(inGroup(chatId), team.id)])) };
       }),

@@ -1,8 +1,8 @@
 // 团队管理 (docs/specs/team-management.md), drawn after the owner-confirmed team management prototype. The page shows the
 // team view the service reports and sends one team's edit at a time; the service validates it, derives binding states,
 // runs onboarding and audits every change. Every value from the service is inserted as text (agent-console::REQ-005/AC-04).
-// Not built yet (ticket 11, decision D1): QR creation and the test message, MCP binding, skills, and team deletion with its
-// removal panel. An existing application is the only onboarding method, so the editor shows its two steps.
+// Not built yet (ticket 11, decision D1): QR creation and the test message, MCP binding and skills. An existing application
+// is the only onboarding method, so the editor shows its two steps.
 // The dispatch-group form (agent-console::US-009) fills the 未配置 panel and, with dispatch, the 派单群设置 drawer; a save writes
 // the channel configuration file and applies after the service restarts.
 (() => {
@@ -21,7 +21,9 @@
   const label = (id) => LABELS[id] ?? id;
   const TONES = new Set(["sam", "alice", "bill", "jack"]);
   const STEP = { done: ["已完成", "acv2-badge acv2-completed"], todo: ["未开始", "acv2-badge"], review: ["等待审核", "acv2-badge acv2-waiting"], blocked: ["需处理", "acv2-badge acv2-failed"] };
-  const STATUS = { fixed: ["固定", "acv2-badge"], active: ["正常接单", "acv2-badge acv2-completed"], onboarding: ["接入未完成", "acv2-badge acv2-waiting"] };
+  const STATUS = { fixed: ["固定", "acv2-badge"], active: ["正常接单", "acv2-badge acv2-completed"], onboarding: ["接入未完成", "acv2-badge acv2-waiting"],
+    draining: ["停止接单 · 做完后移除", "acv2-badge acv2-waiting"], removed: ["已删除 · 历史保留", "acv2-badge"] };
+  const REMOVAL = { done: ["已完成", "acv2-badge acv2-completed"], wait: ["等待中", "acv2-badge acv2-waiting"], block: ["需处理", "acv2-badge acv2-failed"] };
   const ANNOUNCED = { accepted: "飞书已接收", failed: "发送失败 · 不会自动重发", unknown: "发送结果未知 · 不会自动重发", pending: "正在发送", sending: "正在发送" };
   const SAVEBAR = { clean: "保存后新事务立即使用新配置。", dirty: "有未保存的修改", saved: "已保存：新事务使用新配置，进行中的事务保持原配置。", reloaded: "已重新载入最新版本，请再修改。" };
   const SAM = "sam";
@@ -38,6 +40,15 @@
   /** The dispatch-group form: the service's view of the file, the checked groups while edited, the save bar state and a refusal. */
   const dc = { view: null, open: false, checked: null, state: "clean", refusal: null };
   const DC_BAR = { clean: "保存后重启服务才生效。", dirty: "有未保存的修改", saved: "已保存，重启服务后生效", reloaded: "已重新载入最新的配置，请再修改。" };
+  /** A team whose deletion completed while its editor was open: its last view, shown until another entry is opened. */
+  let gone = null;
+  /** Per team, what its removals last did: the groups it was unbound from, and the result of the last action on a scheduled task. */
+  const removalNotes = new Map();
+  /** The team whose deletion, and the scheduled task whose deletion, waits for the owner's confirmation. */
+  let deleteConfirm = null;
+  let taskConfirm = null;
+  /** The last refused deletion or task action; a task action's line shows in its group's panel. The next action replaces it. */
+  let actionError = null;
 
   async function api(path, payload) {
     const response = await fetch(path, payload === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
@@ -47,6 +58,12 @@
   }
 
   const teamOf = (id) => view.teams.find((team) => team.id === id);
+  /** The team an editor shows: one in the view, or the one whose deletion just completed. */
+  const shownTeam = (id) => teamOf(id) ?? (gone?.id === id ? gone : undefined);
+  function notesOf(id) {
+    if (!removalNotes.has(id)) removalNotes.set(id, { unbound: [], task: null });
+    return removalNotes.get(id);
+  }
   const groupName = (chatId) => view.groups.find((group) => group.chatId === chatId)?.name ?? chatId;
   const tone = (id) => `atm-tone atm-tone-${TONES.has(id) ? id : "other"}`;
   /** The catalog's host tools by group, in the order the editor lists them. */
@@ -64,7 +81,7 @@
       return { teamName: "", responsibility: "", leader: { name: "", appId: "", instructions: "" }, groups: [], secretEditing: false, secret: "",
         profiles: [{ name: "能力档 1", noun: "执行者", instructions: "", hostTools: ["files.find", "files.read"].filter((tool) => tool in view.tools) }] };
     }
-    const team = teamOf(id);
+    const team = shownTeam(id);
     return { id, teamName: team.teamName, responsibility: team.responsibility, leader: { ...team.leader }, secretEditing: false, secret: "",
       groups: team.bindings.filter(({ state }) => state !== "draining").map(({ chatId }) => chatId),
       profiles: team.profiles.map(({ id: profileId, name, noun, instructions, hostTools }) => ({ id: profileId, name, noun, instructions, hostTools: [...hostTools] })) };
@@ -74,8 +91,9 @@
   function entryFor(id, note = "clean") { return { value: fromView(id), basedOn: view.version, note, refusal: null }; }
 
   // ---- list ----
-  /** A team's state: taking work in every group it is not leaving, or not yet. */
+  /** A team's state: being deleted, taking work in every group it is not leaving, or not yet. */
   function stateOf(team) {
+    if (team.deleting) return "draining";
     const live = team.bindings.filter(({ state }) => state !== "draining");
     if (live.length) return live.every(({ state }) => state === "accepting") ? "active" : "onboarding";
     return team.credentials?.status === "done" ? "active" : "onboarding";
@@ -181,7 +199,7 @@
       const leaving = binding?.state === "accepting" && !draft.groups?.includes(chatId);
       const checked = fixed || (draft.groups.includes(chatId) && !draining);
       const announcement = !fixed && team?.announcements[chatId];
-      return `<span class="atm-group-row"><label class="acf-check"><input type="checkbox" data-group="${esc(chatId)}" ${checked ? "checked" : ""} ${fixed || draining ? "disabled" : ""}>${esc(name)}</label>`
+      return `<span class="atm-group-row"><label class="acf-check"><input type="checkbox" data-group="${esc(chatId)}" ${checked ? "checked" : ""} ${fixed || draining || team?.deleting ? "disabled" : ""}>${esc(name)}</label>`
         + (draining ? '<span class="acv2-badge acv2-waiting">移除中 · 停止接单</span>' : leaving ? '<span class="acv2-badge">保存后移除</span>' : "")
         + (announcement ? `<p class="atm-announce" data-state="${esc(announcement.state)}">Sam 的公告：「${esc(announcement.text)}」 · ${ANNOUNCED[announcement.state] ?? ""}</p>` : "")
         + "</span>";
@@ -189,28 +207,74 @@
     const preview = view.groups.map(({ chatId, name }) => `${esc(name)}：Sam 可分派给 ${(view.preview[chatId] ?? []).map((id) => esc(teamOf(id)?.leader.name ?? id)).join("、") || "暂无团队"}`).join("<br>");
     const help = fixed ? "Sam 是每个派单群固定的总协调。"
       : "团队在该群能接单时，Sam 在群里公告它加入；开始移除时公告它离开，同时更新该群各负责人的团队通讯录。\n· 接入完成前不会出现在 Sam 的分派名单里。\n· 取消勾选并保存即在该群移除：先停止接单，进行中的做完、定时任务处理完再解绑。";
-    return `<section class="acf-section"><div class="acv-tip-row"><h3>所属群</h3>${tip(help)}</div><div class="atm-group-list">${rows}</div><div class="atm-roster-preview">${preview}</div></section>`;
+    // A deleting team's removals are listed with its deletion; a group it was unbound from is said once, until its groups are edited.
+    const removals = team && !team.deleting ? team.bindings.filter(({ removal }) => removal).map((binding) => removalHtml(team, binding)).join("")
+      + (removalNotes.get(team.id)?.unbound ?? []).map((chatId) => `<p class="atm-done-note" role="status">已从${esc(groupName(chatId))}移除并解绑，历史记录保留。</p>`).join("") : "";
+    return `<section class="acf-section"><div class="acv-tip-row"><h3>所属群</h3>${tip(help)}</div><div class="atm-group-list">${rows}</div>${removals}<div class="atm-roster-preview">${preview}</div></section>`;
+  }
+
+  /** What one group's removal still waits for (team-management::US-004): four steps, with the actions on its scheduled tasks. */
+  function removalHtml(team, { chatId, removal }) {
+    const group = esc(groupName(chatId)), leader = esc(team.leader.name);
+    const targets = (view.preview[chatId] ?? []).filter((id) => id !== team.id).map(teamOf).filter(Boolean);
+    const step = (state, title, note, items = "") => `<li><div>${title}<small>${note}</small></div><span class="${REMOVAL[state][1]}">${REMOVAL[state][0]}</span>${items}</li>`;
+    const tasks = removal.tasks.map(({ id, name, when }) => {
+      const key = `data-chat="${esc(chatId)}" data-name="${esc(name)}"`;
+      return `<li><span>${esc(name)}<small>${esc(when)} · 用 ${leader} 的身份发送</small></span>${taskConfirm === id
+        ? `<div class="acf-inline-confirm">删除后不再执行，已有的执行记录保留。<div class="acf-row-actions"><button class="acv2-button acf-danger-button" type="button" data-task-del-ok="${esc(id)}" ${key}>确认删除</button><button class="acv2-button" type="button" data-task-del-cancel>取消</button></div></div>`
+        : `<select class="acv2-input" data-task-move="${esc(id)}" ${key} aria-label="把「${esc(name)}」转给其他团队"><option value="">转给…</option>${targets.map((target) => `<option value="${esc(target.id)}" data-name="${esc(target.leader.name)}">${esc(target.leader.name)} · ${esc(target.teamName)}</option>`).join("")}</select><button class="acv2-button" type="button" data-task-del="${esc(id)}">删除</button>`}</li>`;
+    }).join("");
+    const waiting = removal.waiting.map(({ requestId, label: number, summary, requester, waitingFor }) => `<li><span><a class="atm-link" href="/console?request=${esc(encodeURIComponent(requestId))}">${esc(`${number} ${summary}`)}</a><small>发起人：${requester === "owner" ? "本人" : "群成员"} · ${esc(waitingFor.join("、"))}</small></span></li>`).join("");
+    const note = removalNotes.get(team.id)?.task;
+    // Step 2 counts what the list row and the deletion confirmation count: the team's own queued, running and waiting Assignments.
+    const held = removal.awaitingRequester, heldNote = held ? `其中 ${held} 项在等发起人回复，见第 4 步。` : "";
+    return `<div class="atm-removal"><div class="atm-removal-h">${group} · 移除进行中</div><ol class="atm-removal-steps">`
+      + step("done", "停止接单", `Sam 已不再分派给 ${leader}，并在${group}公告它离开；各负责人的团队通讯录已更新。`)
+      + step(removal.active || held || removal.closing ? "wait" : "done", `进行中的分工 · ${removal.active + held} 项`,
+        removal.active ? `做完后由 ${leader} 在群里收尾。${heldNote}` : held ? heldNote : removal.closing ? `分工已做完，${leader} 正在群里收尾。` : "已全部结束。")
+      + step(removal.tasks.length ? "block" : "done", `用 ${leader} 身份发送的定时任务 · ${removal.tasks.length} 项`, removal.tasks.length ? `每项转给${group}里其他接单的团队，或删除，才能完成移除。转给后只换发送身份，计划和内容不变。` : "已全部处理。", removal.tasks.length ? `<ul class="atm-removal-items">${tasks}</ul>` : "")
+      + step(removal.waiting.length ? "wait" : "done", `等待发起人确认的事务 · ${removal.waiting.length} 项`, removal.waiting.length ? "只有发起人能确认或取消；本人发起的请在群里回复，其他成员的等他们回复。" : "已全部结束。", removal.waiting.length ? `<ul class="atm-removal-items">${waiting}</ul>` : "")
+      + "</ol>"
+      + (note ? `<p class="atm-done-note" role="status">${esc(note)}</p>` : "")
+      + (actionError?.team === team.id && actionError.chatId === chatId ? `<p class="atm-action-err" role="alert">${esc(actionError.text)}</p>` : "")
+      + `<p class="atm-removal-note">以上都结束后自动从${group}解绑，历史记录保留。</p></div>`;
+  }
+
+  /** Deleting the team (team-management::US-004/AC-01): the confirmation, the removals a deletion waits for, and its completion. */
+  function dangerHtml(team, removed) {
+    const leader = esc(team.leader.name);
+    const body = removed ? `<p class="atm-done-note" role="status">删除完成：${leader} 已从所有群移除，Sam 不再分派给它；历史记录保留。</p>`
+      : team.deleting ? `<p class="acf-section-note atm-deleting-note">已停止接单：Sam 不再分派给 ${leader}。下面各群的阻塞都处理完后，团队才会被移除。</p>${team.bindings.filter(({ removal }) => removal).map((binding) => removalHtml(team, binding)).join("")}`
+        : deleteConfirm === team.id ? `<div class="acf-inline-confirm">删除后 Sam 立即停止分派给 ${leader}；${team.activeAssignments ? `进行中的 ${team.activeAssignments} 项分工做完后` : "没有进行中的分工，"}从所有群移除，并在群里公告。用它身份发送的定时任务要先转给其他团队或删除。历史记录保留。<div class="acf-row-actions"><button class="acv2-button acf-danger-button" type="button" data-delete-confirm>确认删除</button><button class="acv2-button" type="button" data-delete-cancel>取消</button></div></div>`
+          : '<p class="acf-section-note">删除后先停止接单，进行中的分工做完再移除。</p><button class="acv2-button acf-danger-button" type="button" data-delete>删除团队</button>';
+    const refused = actionError?.team === team.id && !actionError.chatId ? `<p class="atm-action-err" role="alert">${esc(actionError.text)}</p>` : "";
+    return `<section class="acf-section acf-danger"><h3>删除团队</h3>${body}${refused}</section>`;
   }
 
   function savebarHtml() {
     const entry = current();
+    // A deleted team is saved no more.
+    const saveButton = `<button class="acv2-button acv2-primary" type="button" data-save ${gone?.id === selected ? "disabled" : ""}>保存</button>`;
     if (entry.refusal) {
       return `<div class="acf-savebar" id="atm-savebar" data-state="error"><div class="atm-save-err" role="alert"><b>无法保存</b><ul>${entry.refusal.reasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul></div>`
-        + `<div class="acf-row-actions">${entry.refusal.stale ? '<button class="acv2-button acv2-primary" type="button" data-reload>重新载入</button>' : '<button class="acv2-button acv2-primary" type="button" data-save>保存</button>'}</div></div>`;
+        + `<div class="acf-row-actions">${entry.refusal.stale ? '<button class="acv2-button acv2-primary" type="button" data-reload>重新载入</button>' : saveButton}</div></div>`;
     }
-    return `<div class="acf-savebar" id="atm-savebar" data-state="${entry.note === "reloaded" ? "clean" : entry.note}"><span>${SAVEBAR[entry.note]}</span><button class="acv2-button acv2-primary" type="button" data-save>保存</button></div>`;
+    return `<div class="acf-savebar" id="atm-savebar" data-state="${entry.note === "reloaded" ? "clean" : entry.note}"><span>${SAVEBAR[entry.note]}</span>${saveButton}</div>`;
   }
 
   function editorHtml() {
     const fixed = selected === SAM;
     const draft = current().value;
-    const team = fixed || selected === NEW ? undefined : teamOf(selected);
+    const team = fixed || selected === NEW ? undefined : shownTeam(selected);
+    const removed = Boolean(team) && gone?.id === selected;
     const c = view.coordinator;
     const leader = fixed ? c.name : draft.leader.name || "新团队";
     const teamName = fixed ? c.teamName : draft.teamName || "待命名";
-    const state = fixed ? "fixed" : team ? stateOf(team) : "onboarding";
+    const state = fixed ? "fixed" : removed ? "removed" : team ? stateOf(team) : "onboarding";
+    // A group the team is being removed from stays bound until its removal completes.
+    const bound = fixed ? [] : view.groups.map(({ chatId }) => chatId).filter((chatId) => draft.groups.includes(chatId) || team?.bindings.some((binding) => binding.chatId === chatId && binding.state === "draining"));
     const head = `<div class="atm-editor-title ${tone(selected)}"><div><h2>${esc(leader)} · ${esc(teamName)}</h2><small>${fixed ? "每个派单群固定的总协调，只能修改职责与提示词"
-      : `绑定在 ${esc(draft.groups.map(groupName).join("、") || "尚未绑定的群")} · ${draft.profiles.length} 个执行者能力档`}</small></div>${badge(state)}</div>`;
+      : `绑定在 ${esc(bound.map(groupName).join("、") || "尚未绑定的群")} · ${draft.profiles.length} 个执行者能力档`}</small></div>${badge(state)}</div>`;
     const stored = fixed || Boolean(team?.secretStored);
     const secret = fixed ? '<div class="acf-secret">已保存 · 不显示</div>'
       : draft.secretEditing ? '<div class="atm-secret-input"><input class="acv2-input" type="password" data-field="secret" placeholder="粘贴 App Secret，保存后不再显示" autocomplete="off" aria-label="App Secret"><button class="acv2-button" type="button" data-secret-cancel>取消</button></div>'
@@ -221,13 +285,13 @@
       + '<div class="atm-mode">接入方式：已有应用，手动填写</div>'
       + `<div class="acf-fields atm-field-gap"><label class="acf-field">App ID<input class="acv2-input" data-field="appId" value="${esc(fixed ? c.appId : draft.leader.appId)}" placeholder="cli_…" ${fixed ? "disabled" : ""}></label><div class="acf-field">App Secret${secret}</div></div>`
       + onboardingHtml(team, fixed)
-      + (team ? '<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button></div>' : "")
+      + (team && !removed ? '<div class="acf-row-actions"><button class="acv2-button" type="button" data-recheck>重新检查</button></div>' : "")
       + "</section>";
     const duty = `<section class="acf-section"><div class="acv-tip-row"><h3>职责与提示词</h3>${tip(`职责会出现在 Sam 的分派名单和各负责人的团队通讯录里。\n· 提示词只给${fixed ? " Sam" : "这位负责人"}自己。`)}</div>`
       + `<label class="acf-field">职责<textarea class="acf-textarea" data-field="responsibility">${esc(draft.responsibility)}</textarea></label>`
       + `<label class="acf-field atm-field-gap">${fixed ? "Sam" : "负责人"}提示词<textarea class="acf-textarea" data-field="instructions">${esc(fixed ? draft.instructions : draft.leader.instructions)}</textarea></label></section>`;
     const profiles = fixed ? '<section class="acf-section"><h3>执行者能力档</h3><p class="acf-section-note">Sam 不执行具体事务，没有执行者能力档。</p></section>' : profilesHtml(draft);
-    return `<div data-editor>${head}${basics}${duty}${profiles}${groupsHtml(draft, team, fixed)}${savebarHtml()}</div>`;
+    return `<div data-editor>${head}${basics}${duty}${profiles}${groupsHtml(draft, team, fixed)}${team ? dangerHtml(team, removed) : ""}${savebarHtml()}</div>`;
   }
 
   function renderEditor() {
@@ -339,6 +403,8 @@
   }
 
   function open(id) {
+    if (gone && gone.id !== id) { drafts.delete(gone.id); gone = null; }
+    deleteConfirm = null; taskConfirm = null; actionError = null;
     selected = id;
     if (!drafts.has(id)) drafts.set(id, entryFor(id));
     renderList();
@@ -347,16 +413,35 @@
     $("atm-editor").closest(".atm-scroll").scrollTop = 0;
   }
 
-  /** Takes a new view; clean drafts follow it, while an edit in progress keeps its own copy and its base version. */
-  function accept(next) {
+  /**
+   * Takes a new view; clean drafts follow it, while an edit in progress keeps its own copy and its base version. `deleted` is
+   * the team this page just deleted. The page reads from two views in a row what a removal completed: a group the team accepted
+   * work or drained in and is no longer bound to, and a deleted team that left the view while its editor was open.
+   */
+  function accept(next, deleted) {
+    const before = view;
     view = next;
+    for (const team of before?.teams ?? []) {
+      const now = teamOf(team.id);
+      if (!now) {
+        removalNotes.delete(team.id);
+        if (selected === team.id && (team.deleting || team.id === deleted)) {
+          gone = { ...team, deleting: true, bindings: [], activeAssignments: 0, announcements: Object.fromEntries(Object.entries(team.announcements).filter(([, { kind }]) => kind === "leave")) };
+        }
+        continue;
+      }
+      if (now.deleting) continue;
+      const unbound = team.bindings.filter(({ chatId, state }) => (state === "accepting" || state === "draining")
+        && view.groups.some((group) => group.chatId === chatId) && !now.bindings.some((binding) => binding.chatId === chatId)).map(({ chatId }) => chatId);
+      if (unbound.length) notesOf(team.id).unbound = unbound;
+    }
     for (const [id, entry] of drafts) {
       if (id === NEW || entry.note === "dirty" || entry.refusal) continue;
-      if (id !== SAM && !teamOf(id)) { drafts.delete(id); continue; }
+      if (id !== SAM && !shownTeam(id)) { drafts.delete(id); continue; }
       entry.value = fromView(id);
       entry.basedOn = view.version;
     }
-    if (selected === null || (selected !== SAM && selected !== NEW && !teamOf(selected))) selected = view.teams[0]?.id ?? SAM;
+    if (selected === null || (selected !== SAM && selected !== NEW && !shownTeam(selected))) selected = view.teams[0]?.id ?? SAM;
     if (!drafts.has(selected)) drafts.set(selected, entryFor(selected));
   }
 
@@ -373,8 +458,8 @@
     if (JSON.stringify(view) === before) return;
     renderFilter();
     renderList();
-    // An edit in progress, or a field the owner is in, is not redrawn under them.
-    const focused = document.activeElement?.closest?.("[data-editor]") && document.activeElement.matches("input,textarea");
+    // An edit in progress, or a field or task choice the owner is in, is not redrawn under them.
+    const focused = document.activeElement?.closest?.("[data-editor]") && document.activeElement.matches("input,textarea,select");
     if (current().note !== "dirty" && !current().refusal && !focused) renderEditor();
   }
 
@@ -398,6 +483,7 @@
     }
     const id = selected === NEW ? body.teamId : selected;
     drafts.delete(NEW === selected ? NEW : id);
+    if (removalNotes.has(id)) notesOf(id).task = null;
     accept(body.view);
     drafts.set(id, entryFor(id, "saved"));
     selected = id;
@@ -423,6 +509,34 @@
     if (!ok) { current().refusal = { reasons: [body.error ?? "请求失败"], stale: false }; renderEditor(); return; }
     accept(body.view);
     renderList();
+    renderEditor();
+  }
+
+  /** A refused action's line: what did not happen, then the service's sentence for the owner. */
+  const refusedLine = (prefix, body) => `${prefix}${typeof body.error === "string" ? body.error : "请求失败"}`;
+
+  async function deleteTeam(teamId) {
+    deleteConfirm = null;
+    const { ok, body } = await api("/api/teams/delete", { teamId });
+    if (ok) { actionError = null; accept(body.view, teamId); renderFilter(); renderList(); }
+    else actionError = { team: teamId, text: refusedLine("没有开始删除：", body) };
+    renderEditor();
+  }
+
+  /** Moves a removal's scheduled task to the team `to`, or deletes it when no team is given. */
+  async function taskAction(teamId, { chat: chatId, name }, taskId, to) {
+    taskConfirm = null;
+    const { ok, body } = to ? await api("/api/teams/tasks/move", { teamId, taskId, to: to.id }) : await api("/api/teams/tasks/delete", { teamId, taskId });
+    const notes = notesOf(teamId);
+    if (ok) {
+      actionError = null;
+      notes.task = to ? `已把「${name}」转给 ${to.name}：之后用 ${to.name} 的身份发送，计划和内容不变。` : `已删除定时任务「${name}」，执行记录保留。`;
+      accept(body.view);
+      renderFilter(); renderList();
+    } else {
+      notes.task = null;
+      actionError = { team: teamId, chatId, text: refusedLine(to ? `没有转交「${name}」：` : `没有删除「${name}」：`, body) };
+    }
     renderEditor();
   }
 
@@ -457,7 +571,15 @@
     const recheckButton = target.closest("[data-recheck]");
     if (recheckButton) { void recheck(recheckButton); return; }
     if (target.closest("[data-save]")) { void save(); return; }
-    if (target.closest("[data-reload]")) { void reload(); }
+    if (target.closest("[data-reload]")) { void reload(); return; }
+    if (target.closest("[data-delete]")) { deleteConfirm = selected; actionError = null; renderEditor(); return; }
+    if (target.closest("[data-delete-cancel]")) { deleteConfirm = null; renderEditor(); return; }
+    if (target.closest("[data-delete-confirm]")) { void deleteTeam(selected); return; }
+    const taskDelete = target.closest("[data-task-del]");
+    if (taskDelete) { taskConfirm = taskDelete.dataset.taskDel; renderEditor(); return; }
+    if (target.closest("[data-task-del-cancel]")) { taskConfirm = null; renderEditor(); return; }
+    const taskDeleteOk = target.closest("[data-task-del-ok]");
+    if (taskDeleteOk) void taskAction(selected, taskDeleteOk.dataset, taskDeleteOk.dataset.taskDelOk);
   });
 
   document.addEventListener("input", (event) => {
@@ -495,6 +617,12 @@
     }
     if (target.id === "atm-filter") { filter = target.value; renderList(); return; }
     if (!target.closest("[data-editor]")) return;
+    // Moving a removal's task acts at once; it is no edit of the team.
+    if (target.dataset.taskMove) {
+      const option = target.selectedOptions[0];
+      if (target.value) void taskAction(selected, target.dataset, target.dataset.taskMove, { id: target.value, name: option.dataset.name });
+      return;
+    }
     const draft = current().value;
     const tool = target.dataset.tool;
     if (tool) {
@@ -505,6 +633,7 @@
     const group = target.dataset.group;
     if (group) {
       draft.groups = target.checked ? [...draft.groups, group] : draft.groups.filter((chatId) => chatId !== group);
+      if (removalNotes.has(selected)) notesOf(selected).unbound = [];
       edited(); renderEditor();
     }
   });

@@ -82,4 +82,20 @@
 .atm-link:hover{text-decoration:underline}
 /* An unfinished request in the dispatch-group refusal links to its record on the team overview. */
 a.atm-link{text-decoration:none}
+/* Removal of a team from a group (team-management::US-004): four steps, each with its state; the items of a step span the row. */
+.atm-removal{margin-top:10px;padding:10px 12px;border:1px solid var(--acv-warning);border-radius:9px;font-size:11px;color:var(--acv-ink)}
+.atm-removal-h{font-weight:650;margin-bottom:6px}
+.atm-removal-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.atm-removal-steps>li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px;align-items:start;padding:7px 9px;border:1px solid var(--acv-line);border-radius:7px}
+.atm-removal-steps>li small{display:block;font-size:10px;color:var(--acv-muted);line-height:1.6}
+.atm-removal-items{grid-column:1/-1;list-style:none;margin:2px 0 0;padding:0;display:flex;flex-direction:column;gap:5px}
+.atm-removal-items li{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:6px 8px;border-radius:6px;background:var(--acv-raise)}
+.atm-removal-items li>span{flex:1;min-width:140px}
+.atm-removal-items select{width:auto;height:26px}
+.atm-removal-items .acv2-button{min-height:26px;padding:2px 8px;font-size:10px}
+.atm-removal-items .acf-inline-confirm{flex-basis:100%}
+.atm-removal-note{margin:8px 0 0;font-size:10px;color:var(--acv-muted);line-height:1.6}
+.atm-done-note{margin:8px 0 0;font-size:11px;color:var(--acv-success)}
+.atm-action-err{margin:8px 0 0;font-size:11px;line-height:1.7;color:var(--acv-error)}
+.acf-section-note.atm-deleting-note{margin:0 0 4px}
 @media(max-width:899px){.atm-a{grid-template-columns:1fr;grid-template-rows:200px minmax(0,1fr)}}

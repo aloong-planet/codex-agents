@@ -336,7 +336,7 @@ describe("console saves and binding states", () => {
   it("starts onboarding in a newly checked group, drains an accepting one that is unchecked and drops an onboarding one", () => {
     const { registry, seeded: first } = seeded();
     try {
-      // Bill accepts in oc_alpha and oc_beta (seeded). Unchecking oc_beta drains it; checking it again keeps it draining (ticket 13 completes drains).
+      // Bill accepts in oc_alpha and oc_beta (seeded). Unchecking oc_beta drains it; checking it again keeps it draining until the drain completes.
       const drained = registry.saveTeam({ ...editOf(first.definitions, "bill"), groups: ["oc_alpha"] }, { basedOn: 1 }).version;
       expect(team(drained, "bill").bindings).toEqual([{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "draining" }]);
       const again = registry.saveTeam({ ...editOf(drained.definitions, "bill"), groups: ["oc_alpha", "oc_beta"] }, { basedOn: drained.version }).version;
@@ -371,6 +371,96 @@ describe("console saves and binding states", () => {
       expect(saved.definitions.teams).toEqual(first.definitions.teams);
       expect(() => registry.saveTeam({ ...editOf(first.definitions, "bill"), id: "sam" }, { basedOn: saved.version })).toThrow(/^team_registry_coordinator_fixed$/);
       expect(() => registry.saveCoordinator({ responsibility: "再改", instructions: "" }, { basedOn: 1 })).toThrow(/^team_registry_version_stale$/);
+    } finally { registry.close(); }
+  });
+
+  // team-management::US-004/AC-02: a drain completes per group, once that group is reported cleared of the team's work.
+  it("unbinds the draining groups reported cleared and leaves the others draining", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      registry.saveTeam({ ...editOf(first.definitions, "bill"), groups: [] }, { basedOn: 1 });
+      const asked: string[] = [];
+      const settled = registry.settleRemovals((teamId, chatId) => { asked.push(`${teamId}:${chatId}`); return chatId === "oc_beta"; });
+      // Only draining bindings are asked about: Alice and Jack accept work in both groups.
+      expect([settled, asked]).toEqual([{ unbound: [{ teamId: "bill", chatId: "oc_beta" }], deleted: [] }, ["bill:oc_alpha", "bill:oc_beta"]]);
+      const current = registry.current()!;
+      expect([team(current, "bill").bindings, current.source]).toEqual([[{ chatId: "oc_alpha", state: "draining" }, { chatId: "oc_beta", state: "removed" }], "removal"]);
+      expect(registry.settleRemovals(() => false)).toEqual({ unbound: [], deleted: [] });
+      expect(registry.current()!.version).toBe(current.version);
+      // An unbound team keeps its application and its secret: only its work in that group ended.
+      expect(registry.roster(SAM).agents.map(({ id }) => id)).toEqual(["sam", "alice", "bill", "jack"]);
+    } finally { registry.close(); }
+  });
+
+  it.each([
+    ["checked again starts onboarding", ["oc_beta"], [{ chatId: "oc_alpha", state: "draining" }, { chatId: "oc_beta", state: "onboarding" }]],
+    ["left unchecked is dropped at the next save", [], [{ chatId: "oc_alpha", state: "draining" }]],
+  ] as const)("an unbound group %s", (_name, groups, bindings) => {
+    const { registry, seeded: first } = seeded();
+    try {
+      registry.saveTeam({ ...editOf(first.definitions, "bill"), groups: [] }, { basedOn: 1 });
+      registry.settleRemovals((_teamId, chatId) => chatId === "oc_beta");
+      const current = registry.current()!;
+      const saved = registry.saveTeam({ ...editOf(current.definitions, "bill"), groups: [...groups] }, { basedOn: current.version }).version;
+      expect(team(saved, "bill").bindings).toEqual(bindings);
+    } finally { registry.close(); }
+  });
+
+  // team-management::US-004/AC-01 and AC-02: deletion drains every group the team accepts work in and completes with its last drain.
+  it("deletes a team by draining its groups, refuses to save it meanwhile and removes it when the last drain completes", () => {
+    const { registry, seeded: first } = seeded();
+    try {
+      // Alice already drains in oc_beta; deleting her starts a drain only in oc_alpha.
+      const unchecked = registry.saveTeam({ ...editOf(first.definitions, "alice"), groups: ["oc_alpha"] }, { basedOn: 1 }).version;
+      const started = registry.deleteTeam("alice");
+      expect({ started: started.started, removed: started.removed, source: started.version.source, alice: team(started.version, "alice") }).toEqual({
+        started: ["oc_alpha"], removed: false, source: "console",
+        alice: { ...team(unchecked, "alice"), deleting: true, bindings: [{ chatId: "oc_alpha", state: "draining" }, { chatId: "oc_beta", state: "draining" }] } });
+      expect(() => registry.saveTeam({ ...editOf(started.version.definitions, "alice"), responsibility: "新职责" }, { basedOn: started.version.version }))
+        .toThrow(/^team_registry_team_deleting$/);
+      // A second deletion of the same team starts nothing.
+      const again = registry.deleteTeam("alice");
+      expect([again.started, again.removed, again.version.version]).toEqual([[], false, started.version.version]);
+      // Her application keeps posting until the last drain completes.
+      expect(registry.settleRemovals((_teamId, chatId) => chatId === "oc_beta")).toEqual({ unbound: [{ teamId: "alice", chatId: "oc_beta" }], deleted: [] });
+      expect([registry.roster(SAM).agents.map(({ id }) => id), registry.hasSecret("cli_1111111111111111")]).toEqual([["sam", "alice", "bill", "jack"], true]);
+      expect(registry.settleRemovals(() => true)).toEqual({ unbound: [{ teamId: "alice", chatId: "oc_alpha" }], deleted: ["alice"] });
+      const current = registry.current()!;
+      expect([current.definitions.teams.map(({ id }) => id), registry.roster(SAM).agents.map(({ id }) => id), registry.hasSecret("cli_1111111111111111")])
+        .toEqual([["bill", "jack"], ["sam", "bill", "jack"], false]);
+      // History resolves her identity through the versions her requests were frozen at.
+      expect(team(registry.version(started.version.version)!, "alice").leader).toEqual(team(first, "alice").leader);
+      // A restart with the local configuration that seeded her does not bring her back.
+      expect(registry.importLocalConfiguration(local(), { executorHostTools: HOST_TOOLS }).definitions.teams.map(({ id }) => id)).toEqual(["bill", "jack"]);
+      expect(() => registry.deleteTeam("alice")).toThrow(/^team_registry_team_unknown$/);
+    } finally { registry.close(); }
+  });
+
+  it("drops the groups a deleted team was still onboarding in, and removes at once a team that accepts work nowhere", () => {
+    const { registry } = seeded();
+    try {
+      const daisy: TeamEdit = { teamName: "设计团队", responsibility: "视觉方案", leader: { name: "Daisy", appId: "cli_5555555555555555", instructions: "" },
+        executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: [] }], groups: ["oc_alpha", "oc_beta"] };
+      const half = registry.saveTeam(daisy, { basedOn: 1, secret: "daisy-secret" }).teamId;
+      registry.recordOnboarding("cli_5555555555555555", { step: "credentials" }, { status: "done", at: 1 });
+      registry.recordOnboarding("cli_5555555555555555", { step: "join", chatId: "oc_alpha" }, { status: "done", at: 1 });
+      registry.settleOnboarding();
+      const draining = registry.deleteTeam(half);
+      expect([draining.started, draining.removed, team(draining.version, half).bindings]).toEqual([["oc_alpha"], false, [{ chatId: "oc_alpha", state: "draining" }]]);
+      const fresh = registry.saveTeam({ ...daisy, teamName: "内容团队", leader: { ...daisy.leader, name: "Eve", appId: "cli_6666666666666666" } },
+        { basedOn: draining.version.version, secret: "eve-secret" }).teamId;
+      const gone = registry.deleteTeam(fresh);
+      expect([gone.started, gone.removed, gone.version.definitions.teams.map(({ id }) => id), registry.hasSecret("cli_6666666666666666")])
+        .toEqual([[], true, ["alice", "bill", "jack", half], false]);
+    } finally { registry.close(); }
+  });
+
+  // team-management::REQ-001/AC-01: Sam has no delete action.
+  it.each([["sam", /^team_registry_coordinator_fixed$/], ["team-unknown", /^team_registry_team_unknown$/]] as const)("refuses to delete %s", (id, refusal) => {
+    const { registry, seeded: first } = seeded();
+    try {
+      expect(() => registry.deleteTeam(id)).toThrow(refusal);
+      expect(registry.current()).toEqual(first);
     } finally { registry.close(); }
   });
 });

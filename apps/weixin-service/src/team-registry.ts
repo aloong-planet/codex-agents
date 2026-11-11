@@ -39,6 +39,8 @@ export type TeamDefinition = Readonly<{
   leader: Readonly<{ name: string; appId: string; profile: AgentProfile }>;
   executorProfiles: readonly ExecutorProfile[];
   bindings: readonly TeamBinding[];
+  /** Set from the moment the owner deletes the team until its last drain completes and it leaves the definitions. */
+  deleting?: true;
 }>;
 export type CoordinatorDefinition = Readonly<{
   id: typeof COORDINATOR_ID; name: string; teamName: string; responsibility: string;
@@ -48,7 +50,7 @@ export type CoordinatorDefinition = Readonly<{
 }>;
 /** Everything one definitions version holds. Application secrets are never part of it. */
 export type TeamDefinitions = Readonly<{ coordinator: CoordinatorDefinition; dispatchGroups: readonly string[]; teams: readonly TeamDefinition[] }>;
-export type DefinitionsVersion = Readonly<{ version: number; basedOn: number | null; source: "local_configuration" | "console" | "onboarding"; definitions: TeamDefinitions }>;
+export type DefinitionsVersion = Readonly<{ version: number; basedOn: number | null; source: "local_configuration" | "console" | "onboarding" | "removal"; definitions: TeamDefinitions }>;
 /** An Executor profile as the console edits it; a profile without `id` is new. */
 export type ExecutorProfileEdit = Readonly<{ id?: string; name: string; noun: string; instructions: string; hostTools: readonly string[] }>;
 /**
@@ -146,6 +148,7 @@ export class TeamRegistry {
    * editable fields changed since `basedOn`, so another team's save or an onboarding step never refuses it. Binding states
    * follow the checked groups: a newly checked group starts onboarding; an unchecked group drains when the team accepts work
    * there and is dropped otherwise; a changed application starts onboarding again in every group it does not drain.
+   * A team that is being deleted is not saved.
    * `secret` is written beside the versions, never into one, and the application's credentials are then checked again
    * (ticket 11, decision D7). Returns the saved version and the team's ID.
    */
@@ -160,6 +163,7 @@ export class TeamRegistry {
         if (edit.id === COORDINATOR_ID) throw new Error("team_registry_coordinator_fixed");
         const before = base.definitions.teams.find(({ id }) => id === edit.id);
         if (!existing || !before) throw new Error("team_registry_team_unknown");
+        if (existing.deleting) throw new Error("team_registry_team_deleting");
         if (JSON.stringify(editable(before)) !== JSON.stringify(editable(existing))) throw new Error("team_registry_version_stale");
       }
       if (edit.groups.some((chatId) => !definitions.dispatchGroups.includes(chatId))) throw new Error("team_registry_group_unknown");
@@ -246,6 +250,61 @@ export class TeamRegistry {
       if (started.length) this.append({ ...latest.definitions, teams }, latest.version, "onboarding");
     });
     return started;
+  }
+
+  /**
+   * Starts deleting a team (team-management::US-004/AC-01): every group it accepts work in drains, its other bindings are
+   * dropped, and saves of it are refused from then on. A team that drains nowhere leaves the definitions at once; otherwise
+   * `settleRemovals` takes it out with its last drain. Returns the groups that started draining, for their leave
+   * announcements. Deleting a team that is already being deleted changes nothing.
+   */
+  deleteTeam(teamId: string): Readonly<{ version: DefinitionsVersion; started: readonly string[]; removed: boolean }> {
+    const started: string[] = [];
+    let removed = false;
+    this.transaction(() => {
+      if (teamId === COORDINATOR_ID) throw new Error("team_registry_coordinator_fixed");
+      const latest = this.current(), existing = latest?.definitions.teams.find(({ id }) => id === teamId);
+      if (!latest || !existing) throw new Error("team_registry_team_unknown");
+      const bindings = existing.bindings.flatMap((binding): TeamBinding[] => {
+        if (binding.state === "draining") return [binding];
+        if (binding.state !== "accepting") return [];
+        started.push(binding.chatId);
+        return [{ ...binding, state: "draining" }];
+      });
+      removed = !bindings.length;
+      const teams = latest.definitions.teams.flatMap((team): TeamDefinition[] => team.id !== teamId ? [team] : removed ? [] : [{ ...team, bindings, deleting: true }]);
+      // A console-originated version, so a restart no longer seeds the teams from the local configuration.
+      this.append({ ...latest.definitions, teams }, latest.version, "console");
+      this.forgetUnusedApplications();
+    });
+    return { version: this.current()!, started, removed };
+  }
+
+  /**
+   * Completes removals (team-management::US-004/AC-02): every draining binding that `cleared` reports free of the team's
+   * active Assignments, waiting requests and scheduled tasks becomes removed, and a team being deleted leaves the definitions
+   * once it drains nowhere, with its application's secret. One new version holds all of it. Returns what completed.
+   */
+  settleRemovals(cleared: (teamId: string, chatId: string) => boolean): Readonly<{ unbound: ReadonlyArray<Readonly<{ teamId: string; chatId: string }>>; deleted: readonly string[] }> {
+    const unbound: Array<{ teamId: string; chatId: string }> = [], deleted: string[] = [];
+    this.transaction(() => {
+      const latest = this.current();
+      if (!latest) return;
+      const teams = latest.definitions.teams.flatMap((team): TeamDefinition[] => {
+        const bindings = team.bindings.map((binding): TeamBinding => {
+          if (binding.state !== "draining" || !cleared(team.id, binding.chatId)) return binding;
+          unbound.push({ teamId: team.id, chatId: binding.chatId });
+          return { ...binding, state: "removed" };
+        });
+        if (!team.deleting || bindings.some(({ state }) => state === "draining")) return [{ ...team, bindings }];
+        deleted.push(team.id);
+        return [];
+      });
+      if (!unbound.length && !deleted.length) return;
+      this.append({ ...latest.definitions, teams }, latest.version, "removal");
+      this.forgetUnusedApplications();
+    });
+    return { unbound, deleted };
   }
 
   /** Whether a secret is stored for `appId`; the secret itself is never read back through the console (team-management::CON-001). */

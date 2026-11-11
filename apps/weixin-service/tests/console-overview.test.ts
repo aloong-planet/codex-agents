@@ -25,6 +25,9 @@ const definitions: TeamDefinitions = {
       bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "accepting" }] },
     { id: "bill", teamName: "生活团队", responsibility: "衣食住行", leader: { name: "Bill", appId: "cli_bill", profile: { instructions: "", hostTools: [] } },
       executorProfiles: [profile("executor-1", "行程规划", "行程执行者")], bindings: [{ chatId: "oc_alpha", state: "accepting" }, { chatId: "oc_beta", state: "removed" }] },
+    // Being deleted, with its removal from oc_beta still pending.
+    { id: "eve", teamName: "内容团队", responsibility: "内容创作", leader: { name: "Eve", appId: "cli_eve", profile: { instructions: "", hostTools: [] } },
+      executorProfiles: [profile("executor-1", "写稿", "写稿执行者")], bindings: [{ chatId: "oc_beta", state: "draining" }], deleting: true },
   ],
 };
 const teamView = (id: string) => {
@@ -143,17 +146,20 @@ it("counts each team's requests in a group once, as running, waiting or history,
   expect(view.requests.map(({ id }) => id).sort()).toEqual(["alice-beta", "alice-done", "alice-run", "alice-wait", "bill-done", "proposal"]);
   expect(view.groups).toEqual([{ chatId: "oc_alpha", name: "银河护卫队" }, { chatId: "oc_beta", name: "oc_beta" }]);
   // Two running Assignments of Alice in one request count once; Bill's cross-team Assignment counts the request for Bill too.
-  expect(Object.fromEntries(view.teams.map(({ id, groups, counts }) => [id, { groups, counts }]))).toEqual({
-    alice: { groups: ["oc_alpha", "oc_beta"], counts: { oc_alpha: { running: 1, waiting: 2, history: 1 }, oc_beta: { running: 0, waiting: 0, history: 1 } } },
-    bill: { groups: ["oc_alpha"], counts: { oc_alpha: { running: 1, waiting: 0, history: 1 } } } });
+  // A team being deleted keeps its card, marked, in the groups it has yet to leave (US-003/AC-02).
+  expect(Object.fromEntries(view.teams.map(({ id, groups, counts, deleting }) => [id, { groups, counts, deleting }]))).toEqual({
+    alice: { groups: ["oc_alpha", "oc_beta"], counts: { oc_alpha: { running: 1, waiting: 2, history: 1 }, oc_beta: { running: 0, waiting: 0, history: 1 } }, deleting: false },
+    bill: { groups: ["oc_alpha"], counts: { oc_alpha: { running: 1, waiting: 0, history: 1 } }, deleting: false },
+    eve: { groups: ["oc_beta"], counts: { oc_beta: { running: 0, waiting: 0, history: 0 } }, deleting: true } });
   // Under each leader, a frame per request with the team's running and waiting Executors: ended ones and other teams' stay out.
   const titles = (id: string) => request(view, id).assignments.map((a) => [a.id, a.title] as const);
   const named = (pairs: ReadonlyArray<readonly [string, string]>, wanted: string[]) => pairs.filter(([, title]) => wanted.includes(title)).map(([id]) => id);
   expect(Object.fromEntries(view.teams.map(({ id, frames }) => [id, frames]))).toEqual({
     alice: { oc_alpha: [{ request: "alice-wait", assignments: named(titles("alice-wait"), ["选方案"]) }, { request: "alice-run", assignments: named(titles("alice-run"), ["写长文案", "拍主图"]) }],
       oc_beta: [] },
-    bill: { oc_alpha: [{ request: "alice-run", assignments: named(titles("alice-run"), ["订行程"]) }] } });
-  expect(view.agents).toEqual({ sam: { name: "Sam", teamName: "总协调" }, alice: { name: "Alice", teamName: "运营团队" }, bill: { name: "Bill", teamName: "生活团队" } });
+    bill: { oc_alpha: [{ request: "alice-run", assignments: named(titles("alice-run"), ["订行程"]) }] }, eve: { oc_beta: [] } });
+  expect(view.agents).toEqual({ sam: { name: "Sam", teamName: "总协调" }, alice: { name: "Alice", teamName: "运营团队" }, bill: { name: "Bill", teamName: "生活团队" },
+    eve: { name: "Eve", teamName: "内容团队" } });
 });
 
 it("takes a request's delivery from its report: a cancellation reply, or a refused closing resent and accepted", async () => {

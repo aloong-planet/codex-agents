@@ -112,11 +112,14 @@ There is a checkbox for each group, with a preview of whom Sam can dispatch to i
 After confirmation, the team stops taking work in all its groups. The section then shows a removal panel for each group:
 
 1. 停止接单: done; Sam has announced the departure, and the Team Directories are updated.
-2. Active assignments: waiting until they finish; the leader closes them.
+2. Active assignments: waiting until they finish; the leader closes them. The heading counts the same Assignments as the list row and the deletion confirmation: queued, running and waiting for their requester. While some of them wait for their requester, the note says 「其中 <k> 项在等发起人回复，见第 4 步。」, after 「做完后由 <负责人> 在群里收尾。」 when others are still queued or running. 「已全部结束。」 appears only when the count is 0. While the assignments are done and only the leader's closing posts are still going out, the step stays waiting, counts 0, and says 「分工已做完，<负责人> 正在群里收尾。」
 3. Scheduled tasks that send with the team's identity. They block the removal. Each offers:
    - "转给…": a choice among the teams taking work in that group. Moving a task changes only its sending identity.
    - 删除, behind an inline confirmation.
-4. Requests waiting for their requester. Each links to the records. Only the requester can confirm or cancel; others wait for their own requester.
+   - A refused move or deletion leaves the task in place and shows one line in error color under the steps: 「没有转交「<任务名>」：<原因>」 for a move, 「没有删除「<任务名>」：<原因>」 for a deletion. A move refused because the chosen team no longer takes work in the group names that team's leader: 「没有转交「<任务名>」：<负责人> 已不在该群接单，请重新选择。」 The result of the next task action replaces the line.
+4. Requests waiting for their requester. Each links to the records. Only the requester can confirm or cancel, by replying in the group; the panel has no confirm or cancel control.
+
+A refused deletion closes the confirmation and shows one line in error color under 删除团队, 「没有开始删除：这个团队已不存在，请刷新页面。」
 
 The removal completes when all four are clear. A deleted team then leaves the team list; its editor stays open with a line saying it left every group and that history is kept, until another team is selected. The sample Eve has one active assignment, two scheduled tasks and two waiting requests, one of them from another member.
 
@@ -147,7 +150,8 @@ A save based on an outdated version is refused with "重新载入", which reload
 - **Onboarding progress switch.** When the new unnamed team is selected, the floating `Demo ·` bar switches its onboarding progress between four states: waiting for the scan, waiting for review, blocked when joining a group, and complete. In the product, the results Feishu returns decide this progress, and there is no such control. The bar is not part of the design and must not be implemented.
 - **Onboarding states.** The onboarding switch includes "二维码过期".
 - **已有应用接入进度.** 未检查 / 凭证无效 / 等待审核 / 进群受阻 / 全部完成 appears while a team entered as an existing application is still being checked (Frank, or the new team switched to 已有应用). In the product, the credential check and the group-joining results decide this, and there is no such control.
-- **移除中的分工与待确认.** 未结束 / 已结束 appears while the selected team has a removal in progress. 已结束 simulates the active assignments finishing and the waiting requests being answered. In the product, the assignments and the requesters decide this.
+- **移除中的分工与待确认.** 未结束 / 只剩待确认 / 收尾中 / 已结束 appears while the selected team has a removal in progress. 只剩待确认 simulates the queued and running assignments finishing while others still wait for their requester; 收尾中 simulates every assignment finishing and the waiting requests being answered while the leader's closing posts are still going out; 已结束 simulates the closing posts going out as well. In the product, the assignments, the delivery of the closing posts and the requesters decide this.
+- **移除操作结果.** 按实际处理 / 被拒绝 appears for every team except Sam. With 被拒绝, moving or deleting a scheduled task and confirming a team's deletion are refused. In the product, a task that is running or being sent, a target team that no longer takes work in the group, or a team that no longer exists decides this.
 - **保存结果.** 按实际校验 / 校验不通过 / 版本已过期. 按实际校验 checks the edited team: try saving the new team with empty names, or entering Sam's App ID. The other two show those refusals for any team. In the product, validation and the version check decide this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
 - **派单配置.** 已配置 / 未配置 / 未接入飞书. In the product, whether the local channel configuration has Feishu paired and dispatch enabled decides it.
