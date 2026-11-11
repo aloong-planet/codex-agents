@@ -273,8 +273,8 @@ describe("Team Leader wrapper", () => {
 // - Compaction must not interleave with creating a runtime on the same home. The creation side has a case (a sweep that runs
 //   while a runtime is being created). The other side has none: finding a home superseded and removing its files run
 //   synchronously, so no case can place anything between them; code review covers that no await separates the two.
-// - The `compaction_failed` (session store unreadable) and `dispatch_leader_homes_unreadable` for an unreadable runtimes root
-//   have no case, as for Executor homes; both only report and remove nothing.
+// - `dispatch_leader_homes_unreadable` for an unreadable runtimes root has no case, as for Executor homes: listing a directory
+//   that cannot be read needs a file-permission setup the sweep's other cases do not share. It only reports and removes nothing.
 const session = (revision: string, definitionsVersion: number): LeaderSessionKey => ({ leaderId: input().leader.id, ...input(revision, definitionsVersion).session });
 const threadOf = (scope: string) => `thread-${scope.slice(-8)}`;
 const sha256 = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -288,12 +288,12 @@ function runtimeOn(root: string, scope: string, rollout = threadOf(scope)) {
   return { agent, cwd: join(home, "workspace") };
 }
 /** A Team Leader whose runtimes live only for their turn; `scopes` lists the homes its turns asked for, in order. */
-function homesLeader(inUse: () => readonly LeaderSessionKey[], options: { rollout?: string } = {}) {
+function homesLeader(inUse: () => readonly LeaderSessionKey[], options: { rollout?: string; compact?: typeof compactRuntimeHome } = {}) {
   const root = mkdtempSync(join(tmpdir(), "dispatch-leader-homes-")), state = mkdtempSync(join(tmpdir(), "dispatch-leader-")); directories.push(root, state);
   const reports: string[] = [], scopes: string[] = [];
   const leader = new CodexTeamLeader(join(state, "agent-sessions.sqlite"), { model: () => ({ model: "fixture-model", effort: "low" }),
     runtime: (scope, work) => { if (!scopes.includes(scope)) scopes.push(scope); const runtime = runtimeOn(root, scope, options.rollout); return work(runtime.agent, runtime.cwd); },
-    homes: { root, compact: compactRuntimeHome, inUse }, report: (code) => reports.push(code) });
+    homes: { root, compact: options.compact ?? compactRuntimeHome, inUse }, report: (code) => reports.push(code) });
   return { leader, root, reports, scopes };
 }
 
@@ -357,6 +357,17 @@ describe("Team Leader home compaction", () => {
     run.leader.compactSupersededHomes();
     expect(homeListing(home)).toEqual(before);
     expect(run.reports).toEqual([`dispatch_leader_home_kept:rollout_missing:${run.scopes[0]}`]);
+    run.leader.dispose();
+  });
+
+  it("reports a home whose compaction throws, and goes on with the turn that swept", async () => {
+    const run = homesLeader(() => [session("r1", 1)], { compact: () => { throw new Error("session_store_unreadable"); } });
+    const unrecorded = `dispatch-leader-${"b".repeat(64)}`;
+    seedExecutorHome(join(run.root, unrecorded), [{ threadId: "thread-unrecorded" }]);
+    // The plan turn starts a session, so it sweeps; the failure stays with the home it happened on.
+    await expect(run.leader.plan(input("r1", 1))).resolves.toEqual({ ...plan("trip"), help: [] });
+    expect(homeListing(join(run.root, unrecorded))).toContain(WHOLE);
+    expect(run.reports).toEqual([`dispatch_leader_home_kept:compaction_failed:${unrecorded}`]);
     run.leader.dispose();
   });
 
@@ -453,6 +464,34 @@ describe("Team Leader home compaction", () => {
     expect(homeListing(home)).toEqual(keptListing(threadOf(run.scopes[0]!)));
     expect([run.reports.length, restarted.reports]).toEqual([1, []]);
     await restarted.pool.close(); restarted.leader.dispose();
+  });
+
+  it("leaves a home alone at a later runtime's release too, once a process on it has not exited", async () => {
+    vi.useFakeTimers();
+    let released = 0;
+    // The first runtime's process never exits; the second runtime's exits at once.
+    const run = pooledLeader(() => [], { exited: () => released++ === 0 ? new Promise<void>(() => {}) : Promise.resolve() });
+    await run.leader.plan(input());
+    const home = join(run.root, run.scopes[0]!);
+    await vi.advanceTimersByTimeAsync(60_000 + DISPATCH_RUNTIME_EXIT_WAIT_MS);
+    // A later turn of the session gets a second runtime on the same home, which is released with its process gone.
+    await expect(run.leader.close(input(), CLOSED)).resolves.toBe("已收尾。");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(run.agents.map((agent) => agent.close.mock.calls.length)).toEqual([1, 1]);
+    // The first process may still run on the home, so it stays whole until the next start.
+    expect(homeListing(home)).toContain(WHOLE);
+    expect(run.reports).toEqual([`dispatch_leader_home_deferred:process_running:${run.scopes[0]}`]);
+    await run.pool.close(); run.leader.dispose();
+  });
+
+  it("stops treating a home as occupied when creating its runtime fails", async () => {
+    const run = pooledLeader(() => [], { creating: () => { throw new Error("isolated_runtime_catalog_unavailable"); } });
+    await expect(run.leader.plan(input())).rejects.toThrow("isolated_runtime_catalog_unavailable");
+    // No runtime exists on the home the failed creation left, so a sweep compacts it like any superseded home.
+    run.leader.compactSupersededHomes();
+    expect(homeListing(join(run.root, run.scopes[0]!))).toEqual(keptListing(threadOf(run.scopes[0]!)));
+    expect(run.reports).toEqual([]);
+    await run.pool.close(); run.leader.dispose();
   });
 
   it("does not compact a home from a sweep that runs while its runtime is being created", async () => {

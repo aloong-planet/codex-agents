@@ -707,7 +707,7 @@ it("ends only the Assignment whose choice the requester cancels, and closes the 
 // Which Team Leader sessions stored requests can still use (agent-dispatch::QR-003/AC-02): their runtime homes stay whole, and
 // every other Team Leader home is superseded. Each request below runs in its own group, so a session's group tells which
 // request keeps it.
-const GROUPS = ["running", "waiting", "failed", "partial", "completed", "cancelled"] as const;
+const GROUPS = ["running", "waiting", "failed", "partial", "unassigned", "completed", "cancelled"] as const;
 const group = (name: string) => `feishu.group.oc_${name}`;
 
 it("keeps in use the sessions of the current definitions version, and of an older one only while a request under it runs or waits", async () => {
@@ -719,14 +719,18 @@ it("keeps in use the sessions of the current definitions version, and of an olde
     if (job.event.target === group("failed") || (job.event.target === group("partial") && assignment.title === "核对价格")) return { status: "failed", message: "无法完成。" };
     return { status: "completed", message: "已完成。" };
   }, close: () => {} };
-  const dispatch = dispatchWith(directory(), dividingLeader(two), executor, [], { definitionsVersion: () => version, revision: () => revision,
-    teams: (definitionsVersion) => definitionsVersion === 1 ? ["alice", "bill"] : ["alice", "bill", "jack"] });
+  // One request asks for another team's help, and the Coordinator places the part with no team: it ends partially unassigned.
+  const leader: TeamLeader = { plan: async (input) => ({ ...structuredClone(two), help: input.session.target === group("unassigned") ? [HELP] : [] }),
+    supplement: affectFirst, close: async () => "已收尾。" };
+  const dispatch = dispatchWith(directory(), leader, executor, [], { definitionsVersion: () => version, revision: () => revision,
+    teams: (definitionsVersion) => definitionsVersion === 1 ? ["alice", "bill"] : ["alice", "bill", "jack"],
+    assign: async ({ parts }) => parts.map(({ part }) => ({ part, agentId: null, summary: "" })) });
   await dispatch.start();
   for (const name of GROUPS) dispatch.admit(event(name, "alice", { target: group(name) }));
   dispatch.admit(event("proposed", "propose:alice", { target: group("proposed") }));
   const statuses = () => Object.fromEntries(dispatch.getState().jobs.map(({ id, status }) => [id, status]));
-  await vi.waitFor(() => expect(statuses()).toEqual({ running: "running", waiting: "waiting", failed: "failed", partial: "partially_failed", completed: "completed",
-    cancelled: "waiting", proposed: "proposed" }), { timeout: 2000, interval: 10 });
+  await vi.waitFor(() => expect(statuses()).toEqual({ running: "running", waiting: "waiting", failed: "failed", partial: "partially_failed", unassigned: "partially_unassigned",
+    completed: "completed", cancelled: "waiting", proposed: "proposed" }), { timeout: 2000, interval: 10 });
   dispatch.admit(event("stop", "cancel:cancelled", { target: group("cancelled") }));
   await vi.waitFor(() => expect(statuses().cancelled).toBe("cancelled"), { timeout: 2000, interval: 10 });
   const sessions = () => dispatch.leaderSessions().map(({ leaderId, target, revision: used, definitionsVersion, accountId, bindingHash }) =>

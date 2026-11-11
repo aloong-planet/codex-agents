@@ -755,7 +755,10 @@ it("compacts the Executor homes left before the upgrade and a superseded Team Le
     // A Team Leader home no stored request can use, as an earlier access revision or definitions version left it.
     const superseded = `dispatch-leader-${"b".repeat(64)}`, others = ["dispatch-coordinator", "feishu.group.seeded-elsewhere"];
     for (const name of [superseded, ...others]) seedExecutorHome(home(name), [{ threadId: "thread-other" }]);
-    const unchanged = Object.fromEntries([scopes[1]!, ...others].map((name) => [name, homeListing(home(name))]));
+    // Another superseded Team Leader home, which holds no rollout: its records cannot be confirmed, so it is kept and named.
+    const unconfirmed = `dispatch-leader-${"c".repeat(64)}`;
+    seedExecutorHome(home(unconfirmed), []);
+    const unchanged = Object.fromEntries([scopes[1]!, unconfirmed, ...others].map((name) => [name, homeListing(home(name))]));
     // Main builds the real Team Leader, which sweeps its homes, only under the coordination seam.
     running = await start(directory, { WORKFLOW_FIXTURE_COORDINATION_RUNTIME: "1" });
     const diagnostics = running.output().split("\n").filter((line) => /^dispatch_(executor|leader)_home/u.test(line));
@@ -764,7 +767,7 @@ it("compacts the Executor homes left before the upgrade and a superseded Team Le
     expect(homeListing(home(`dispatch-${"0".repeat(64)}`))).toEqual(keptListing("thread-pre05"));
     expect(homeListing(home(superseded))).toEqual(keptListing("thread-other"));
     expect(Object.fromEntries(Object.keys(unchanged).map((name) => [name, homeListing(home(name))]))).toEqual(unchanged);
-    expect(diagnostics).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`]);
+    expect(diagnostics).toEqual([`dispatch_executor_home_kept:rollout_missing:${scopes[1]}`, `dispatch_leader_home_kept:rollout_missing:${unconfirmed}`]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
