@@ -14,6 +14,7 @@
 > The console's private conversations with the Coordinator and the Team Leaders are implemented; they only discuss, and private requests are specified in the agent console spec and not yet implemented.
 > Related: [channel boundaries](channel-switching.md), [team management](team-management.md), [MCP catalog](mcp-catalog.md), [skill library](skill-library.md), [agent console](agent-console.md), [ADR-0023](../adr/0023-isolate-feishu-group-authority.md), [ADR-0026](../adr/0026-coordinate-group-work-through-isolated-teams.md), [ADR-0027](../adr/0027-bind-host-enforced-agent-profiles.md), [ADR-0028](../adr/0028-manage-agent-teams-from-the-local-console.md), [ADR-0031](../adr/0031-compact-executor-runtime-homes-to-their-rollouts.md).
 > Pending: configure stable public ingress, deploy, and verify actual group receipt. Local fixture and model checks do not establish these outcomes.
+> Pending: an action an Executor made through an MCP server is kept as completed-effect evidence. Until it is, a retry of its Assignment can repeat that action, and agent-dispatch::REQ-008/AC-01 holds for host tools only.
 
 ## Problem Statement
 
