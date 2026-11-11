@@ -88,6 +88,8 @@ import type { FeishuDispatchConfiguration } from "./feishu-agent-config.js";
 import { CodexTeamLeader, type TeamLeader } from "./agent-dispatch-leader.js";
 import { FixtureTeamLeader, fixtureDefaultClosing, fixtureDefaultPlan, fixtureDefaultSupplement, withFixtureDependencies } from "./fixture-team-leader.js";
 import { recordDispatchTurns, type DispatchTurnRecord } from "./fixture-dispatch-recorder.js";
+import { FixturePrivateReplier } from "./fixture-private-replier.js";
+import { CodexPrivateReplier, PrivateConversations } from "./private-conversations.js";
 import type { LeaderAssignmentReport, LeaderAssignmentView } from "./agent-dispatch-leader.js";
 import { DISPATCH_MEMORY_ACCOUNT_PREFIX, executorCapabilities, memoryAccountId, ProfileToolHost, resolveAgentProfile, type AgentMemoryScope } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
@@ -786,8 +788,9 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
   tools: DynamicToolHost | undefined = ISOLATED_RUNTIME_KINDS[kind].hostTools ? workflowToolHost : undefined) => {
   if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
   const { hostTools } = ISOLATED_RUNTIME_KINDS[kind];
-  // Under the real-model seam the three dispatch kinds start the installed App Server with the Codex home's login, as production does.
-  const realModel = fixtureDispatchRealModel && (kind === "dispatchCoordinator" || kind === "dispatchLeader" || kind === "dispatchAgent");
+  // Under the real-model seam the three dispatch kinds and the private chats start the installed App Server with the Codex home's login,
+  // as production does.
+  const realModel = fixtureDispatchRealModel && (kind === "dispatchCoordinator" || kind === "dispatchLeader" || kind === "dispatchAgent" || kind === "privateChat");
   // Kinds with host tools always use the fixture App Server in fixture mode; Coordinator and Team Leader kinds only under the seam.
   const fixtureRuntime = fixtureMode && !fixtureLiveMainModel && !realModel &&
     (hostTools || (fixtureCoordinationRuntime && (kind === "dispatchCoordinator" || kind === "dispatchLeader")));
@@ -976,6 +979,9 @@ const codexService = conversationRouter ? new ConversationService(
 );
 let fixtureLeaderRequests: FixtureTeamLeader["requests"] | undefined;
 let fixtureDispatchTurns: (() => DispatchTurnRecord[]) | undefined;
+// The owner's private conversations with Sam and each Team Leader (agent-console::US-006); they exist only with dispatch.
+let privateConversations: PrivateConversations | undefined;
+let fixturePrivateTurns: FixturePrivateReplier["turns"] | undefined;
 const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   const configuration = feishuConfiguration, channel = feishuChannel;
   const teams = teamManagement!;
@@ -1241,6 +1247,28 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     bindFixtureApplications();
   };
   fixtureLeaderRequests = fixtureLeader?.requests;
+  // Each reply is a tool-free turn on the agent's own private-chat runtime, in the dispatch pool and apart from every group runtime,
+  // and reads no memory (agent-console::CON-002). In fixture mode the injected reply stands in for the model, except under the
+  // real-model seam.
+  const fixturePrivate = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel ? new FixturePrivateReplier(fixtureFeishu!) : undefined;
+  const replier = fixturePrivate ?? new CodexPrivateReplier((agentId, work) => runtimes.use(`private-chat-${agentId}`,
+    () => isolatedConversation("privateChat", { instance: agentId }), ({ agent, cwd }) => work(agent, cwd)), model);
+  privateConversations = new PrivateConversations(path.join(path.dirname(privateStatePath), "private-conversations.sqlite"), {
+    definitions: () => teams.current().definitions,
+    records: () => dispatch.records(),
+    scope: { groups: () => configuration.dispatch?.groupChatIds ?? [], chatIdOf: (accountId, target) => configuration.owner.deliveryTarget(accountId, target),
+      owner: (senderId) => configuration.owner.accepts({ ...configuration.owner.conversationAddress(), senderId, conversationType: "private" }) },
+    names: { label: displayId, groups: (chatIds) => groupNames?.of(chatIds) ?? Promise.resolve({}),
+      // A team that only older requests used keeps its leader's name from the definitions version the request ran under.
+      agent: (agentId, version) => {
+        const current = teams.current().definitions;
+        if (agentId === current.coordinator.id) return current.coordinator.name;
+        let team = current.teams.find(({ id }) => id === agentId);
+        if (!team && version !== undefined) { try { team = definitionsFor(version).teams.find(({ id }) => id === agentId); } catch { /* the version is gone: its ID */ } }
+        return team?.leader.name ?? agentId;
+      } },
+    replier, report: (code) => process.stderr.write(`${code}\n`) });
+  fixturePrivateTurns = fixturePrivate?.turns;
   return dispatch;
 })() : undefined;
 const workflowModulePermissionSettings = new WorkflowModulePermissionSettings(
@@ -1330,6 +1358,7 @@ if (pennyConfigured) {
 }
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
+  fixturePrivateTurns: structuredClone(fixturePrivateTurns ?? []),
   fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
   ...(fixtureDispatchTurns ? { fixtureDispatchTurns: fixtureDispatchTurns() } : {}),
   ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
@@ -1366,7 +1395,7 @@ const consoleOverview = new ConsoleOverview({ storageRoot: consoleStateDirectory
   } } : {}),
 });
 const consoleRoutes = createConsoleRoutes({ catalog: mcpCatalog, ...(teamManagement ? { teams: teamManagement } : {}), dispatchGroups: dispatchGroupSettings,
-  overview: consoleOverview, access: consoleAccess });
+  overview: consoleOverview, access: consoleAccess, ...(privateConversations ? { chats: privateConversations } : {}) });
 const server = service ? createDemoServer(service, { fixtureMode, channelState, access: consoleAccess, consoleRoutes, ...(fixtureFeishu ? { feishuFixture: fixtureFeishu } : {}) }) : createChannelStatusServer(
   () => ({ channel: "feishu", ready: channelReady && feishuChannel!.state({ ...feishuConfiguration!.owner.conversationAddress(), channel: "feishu" }).enabled, ...feishuChannel!.getSnapshot(), ...channelState(), codex: codexService.getPublicState(),
     ...(fixtureFeishu ? { fixtureTextOutbox: fixtureFeishu.getTextOutbox(), fixtureMediaOutbox: fixtureFeishu.getMediaOutbox(), workflows: workflowEngine.getPublicState() } : {}) }),
@@ -1498,6 +1527,8 @@ function shutdown(): Promise<void> {
     () => penny?.close(),
     // A QR code that waits for its scan keeps polling; ending the wait lets the process exit.
     () => teamManagement?.close(),
+    // Before the dispatch closes the runtime pool its reply turns use: a reply still running then is left interrupted.
+    () => privateConversations?.close(),
     () => agentDispatch?.close(),
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),

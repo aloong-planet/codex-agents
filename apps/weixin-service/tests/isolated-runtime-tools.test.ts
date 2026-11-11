@@ -82,7 +82,7 @@ describe.skipIf(!runsInstalledAppServer)("tool surface of isolated runtimes on t
 
   // Owner-selectable kinds run on every model track; the pending router and the memory curator use their profile's model.
   const rows: Array<[IsolatedConversationKind, string]> = [
-    ...(["feishuGroup", "dispatchAgent", "dispatchCoordinator", "dispatchLeader", "penny"] as const).flatMap((kind) =>
+    ...(["feishuGroup", "dispatchAgent", "dispatchCoordinator", "dispatchLeader", "privateChat", "penny"] as const).flatMap((kind) =>
       ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"].map((slug): [IsolatedConversationKind, string] => [kind, slug])),
     ["pendingRouter", "gpt-5.6-luna"], ["groupMemoryCurator", "gpt-5.6-terra"],
   ];

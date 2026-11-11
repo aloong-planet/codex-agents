@@ -2,6 +2,10 @@
 // state directory and starts the control channel, and the `console` command reaches it there.
 // The team overview's APIs (agent-console::US-003 to US-005, US-001/AC-03) through real main with Feishu dispatch in fixture mode:
 // the projection's rules are unit-tested in console-overview.test.ts; these cases show its inputs are wired to the running service.
+// The private conversations' APIs (agent-console::US-006, REQ-002/AC-03, CON-002) the same way: their rules are unit-tested in
+// private-conversations.test.ts, and these cases show the running service's definitions, records and memory reach them, or not.
+// The fixture replier stands in for the reply turn and records each turn's input; the model's own turn runs only in the opt-in
+// real-model suite.
 // Coverage gap: the real macOS default-browser launch is not exercised; the login case puts a stand-in `open`
 // (and `xdg-open`) first on PATH and checks that it received the printed link.
 import { execFile } from "node:child_process";
@@ -18,6 +22,7 @@ import { startFixtureServer } from "../e2e/fixture-server.js";
 import { parseChannelStartupConfiguration } from "../src/channel-startup-config.js";
 import { groupMemoryAccount, seedEvent, seedMemory } from "./support/memory.js";
 import { signalProcessGroup } from "./support/process-group.js";
+import { processWaitLimitMs } from "./support/process-wait.js";
 import { config, decision, groupMessage, start } from "./support/real-main.js";
 
 const SERVICE_DIRECTORY = fileURLToPath(new URL("../", import.meta.url));
@@ -160,7 +165,7 @@ describe("console login command against the running service", () => {
   }, 30_000);
 });
 
-describe("team overview APIs against the running service", () => {
+describe("team overview and private conversation APIs against the running service", () => {
   const cleanups: Array<() => Promise<void> | void> = [];
   afterEach(async () => {
     for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -248,5 +253,97 @@ describe("team overview APIs against the running service", () => {
     expect((await list(owner)).map(({ id }) => id)).not.toContain(otherId);
     const audit = fs.readFileSync(path.join(fs.realpathSync(directory), "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
     expect(audit.at(-1)).toMatchObject({ by: "browser", browser: { id: ownerId }, event: "browser_revoked", browsers: [{ id: otherId }] });
+  }, 60_000);
+
+  type Chat = { agent: { id: string; name: string }; pending: boolean; requests: string[];
+    messages: Array<{ role: "owner" | "agent"; text: string; requestId: string | null; state?: string; reason?: string }> };
+  /** The owner's conversation with `agentId` once its last message has its reply, polled like the console page polls it. */
+  async function answered(service: Awaited<ReturnType<typeof running>>, agentId: string): Promise<Chat> {
+    const deadline = Date.now() + processWaitLimitMs;
+    for (;;) {
+      const chat = await service.get<Chat>(`/api/private-chats/${encodeURIComponent(agentId)}`);
+      if (!chat.pending) return chat;
+      if (Date.now() > deadline) throw new Error(`no reply from ${agentId}: ${JSON.stringify(chat)}`);
+      await delay(30);
+    }
+  }
+
+  it("lets the owner chat with Sam and every defined Team Leader, before onboarding and while the team is being deleted, and with nobody else", async () => {
+    const directory = dispatchDirectory();
+    const service = await running(directory);
+    const cookie = await authorizeLocalService(directory), origin = service.url;
+    const chat = (agentId: string, message?: unknown) => fetch(`${origin}/api/private-chats/${encodeURIComponent(agentId)}${message === undefined ? "" : "/messages"}`,
+      message === undefined ? { headers: { cookie } } : { method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(message) });
+    // An Executor, Penny and anyone unknown have no conversation (agent-console::US-006/AC-01).
+    await service.post("/api/fixture/inbound", groupMessage("om_bill_held", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"), { modelHold: true }));
+    const executor = (await service.until((state) => state.agentDispatch?.jobs[0]?.assignments[0]?.status === "running")).agentDispatch!.jobs[0]!.assignments[0]!;
+    for (const agentId of ["penny", executor.executor, executor.id, "unknown"]) {
+      for (const response of [await chat(agentId), await chat(agentId, { text: "你好" })]) {
+        expect(response.status, agentId).toBe(404);
+        expect(await response.json()).toEqual({ error: "只能与 Sam 和各团队负责人私聊" });
+      }
+    }
+    // A team saved on 团队管理 whose application is not created yet, and Bill's team, deleted while its request runs (US-006/AC-04).
+    const { version } = await service.get<{ version: number }>("/api/teams");
+    const { teamId } = await service.post<{ teamId: string }>("/api/teams/save", { basedOn: version, team: { teamName: "设计团队", responsibility: "视觉方案", groups: [],
+      method: "qr", leader: { name: "Daisy", appId: "", instructions: "" }, executorProfiles: [{ name: "视觉方案", noun: "视觉执行者", instructions: "", hostTools: [] }] } });
+    const { view } = await service.post<{ view: { teams: Array<{ id: string; deleting: boolean }> } }>("/api/teams/delete", { teamId: "bill" });
+    expect(view.teams.find(({ id }) => id === "bill")?.deleting).toBe(true);
+    for (const [agentId, name] of [["sam", "Sam"], [teamId, "Daisy"], ["bill", "Bill"]] as const) {
+      expect(await service.post<Chat>(`/api/private-chats/${agentId}/messages`, { text: `你好，${name}` })).toMatchObject({ agent: { id: agentId, name }, pending: true });
+      const replied = await answered(service, agentId);
+      console.log(JSON.stringify({ kind: "console_private_chat", agent: agentId, command: `你好，${name}`, reply: replied.messages.at(-1)?.text }));
+      expect(replied.messages.map(({ role, text, state }) => [role, text, state])).toEqual([["owner", `你好，${name}`, "answered"], ["agent", `收到：你好，${name}`, undefined]]);
+    }
+  }, 60_000);
+
+  it("gives Sam the state, teams and reports of the owner's requests and a Team Leader its own results, recalls no memory and leaves nothing of the conversation anywhere else", async () => {
+    const directory = dispatchDirectory(), { alpha, personal } = accounts(directory);
+    await seedMemory(directory, alpha.account, alpha.target, "alpha-1", "群记忆：上新文案先发到上新话题");
+    await seedMemory(directory, personal.account, personal.target, "personal-1", "本人记忆：偏好晚上收提醒");
+    const service = await running(directory);
+    await service.post("/api/fixture/inbound", groupMessage("om_private_basis", "帮我写商品 D 的上新文案", decision("alice", "写商品 D 的上新文案"), {
+      leaderPlan: { assignments: [{ profileId: "executor-1", title: "写上新文案", brief: "交办：只给执行者看的要求" }], decisions: [] },
+      modelReply: JSON.stringify({ message: "执行结果：只给负责人看的文案", results: [{ subject: "写上新文案", status: "completed" }] }),
+      leaderClosing: { message: "收尾：商品 D 的文案已经写好" } }));
+    const settled = await service.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && state.agentFixtureOutboxes?.alice?.text.length === 2);
+    const requestId = settled.agentDispatch!.jobs[0]!.id;
+    const jobs = settled.agentDispatch!.jobs.length, posts = JSON.stringify([settled.fixtureTextOutbox, settled.feishuFixtureTextOutbox, settled.agentFixtureOutboxes]);
+
+    const said = { sam: "暗号甲：Sam，商品 D 现在怎样了？", alice: "暗号乙：Alice，文案写成什么样？" };
+    for (const [agentId, text] of Object.entries(said)) {
+      expect((await service.post<Chat>(`/api/private-chats/${agentId}/messages`, { text, requestId })).requests).toEqual([requestId]);
+      const replied = await answered(service, agentId);
+      console.log(JSON.stringify({ kind: "console_private_chat", agent: agentId, command: text, reply: replied.messages.at(-1)?.text }));
+      expect(replied.messages.at(-1)).toMatchObject({ role: "agent", text: `收到：${text}`, requestId });
+    }
+    const turns = (await service.state()).fixturePrivateTurns!;
+    expect(turns.map(({ agentId }) => agentId)).toEqual(["sam", "alice"]);
+    const [sam, alice] = turns.map(({ input }) => JSON.stringify(input));
+    // Sam reads the request's state, lead and posts, the closing included, and never the Brief or the Executor's result (REQ-002/AC-03).
+    expect(sam).toContain("\"state\":\"completed\"");
+    expect(sam).toContain("收尾：商品 D 的文案已经写好");
+    for (const hidden of ["交办：只给执行者看的要求", "执行结果：只给负责人看的文案"]) expect(sam).not.toContain(hidden);
+    // Alice reads her own Executor's result.
+    expect(alice).toContain("执行结果：只给负责人看的文案");
+    // Neither reply turn recalled any memory: not the group's, which Sam reads in the group, and not the owner's own (CON-002).
+    for (const input of [sam, alice]) for (const fact of ["群记忆：上新文案先发到上新话题", "本人记忆：偏好晚上收提醒"]) expect(input).not.toContain(fact);
+
+    // Nothing of the conversation became a request, a group post or a record, or entered any memory: every file of the service's
+    // state but the conversations' own store is searched for what the owner and the agents said (CON-002).
+    const after = await service.state();
+    expect(after.agentDispatch!.jobs).toHaveLength(jobs);
+    expect(JSON.stringify([after.fixtureTextOutbox, after.feishuFixtureTextOutbox, after.agentFixtureOutboxes])).toBe(posts);
+    const chats = await Promise.all(Object.keys(said).map((agentId) => service.get<Chat>(`/api/private-chats/${agentId}`)));
+    const spoken = chats.flatMap(({ messages }) => messages.map(({ text }) => text));
+    expect(spoken).toHaveLength(4);
+    const files = (fs.readdirSync(directory, { recursive: true }) as string[]).map((name) => path.join(directory, name))
+      .filter((file) => fs.lstatSync(file).isFile() && !path.basename(file).startsWith("private-conversations.sqlite"));
+    // The search reads memory's own text: it finds the seeded group fact, so the absence below is not the search missing the stores.
+    expect(files.filter((file) => fs.readFileSync(file).includes(Buffer.from("群记忆：上新文案先发到上新话题"))).some((file) => file.includes(`${path.sep}memory${path.sep}`))).toBe(true);
+    for (const file of files) {
+      const bytes = fs.readFileSync(file);
+      for (const text of spoken) expect(bytes.includes(Buffer.from(text)), `${text} in ${file}`).toBe(false);
+    }
   }, 60_000);
 });
