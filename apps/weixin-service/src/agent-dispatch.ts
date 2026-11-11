@@ -18,8 +18,12 @@ type Notice = { event: InboundContent; agentId: string; senderAccountId: string;
   requestId?: string; memory?: { attempt: number; event: InboundContent; text: string } };
 type NoticeRow = { id: string; payload: string; state: string; result: string | null };
 /** The trusted part of a team a request's Team Leader works with, from the request's definitions version. */
-/** A team as a request's definitions version has it. A profile's noun names its Executors (`<noun> <n>`); without one they are 执行者. */
-export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"]; profiles: ReadonlyArray<Readonly<{ id: string; name: string; noun?: string }>>; memoryScope: AgentMemoryScope }>;
+/**
+ * A team as a request's definitions version has it. A profile's noun names its Executors (`<noun> <n>`); without one they are 执行者.
+ * Its capabilities say, in plain words, what an Executor created from it can do when the view is taken.
+ */
+export type DispatchTeamView = Readonly<{ leader: LeaderTurnInput["leader"];
+  profiles: ReadonlyArray<Readonly<{ id: string; name: string; noun?: string; capabilities: readonly string[] }>>; memoryScope: AgentMemoryScope }>;
 /**
  * One group post of a request and its delivery: `queued` or `sending` until the platform answers, then `accepted`, `rejected` or
  * `unknown`; `cancelled` when it was never sent. `acceptedAt` is set only for an accepted post.
@@ -933,8 +937,9 @@ export class AgentDispatch {
   private teamName(job: DispatchJob, teamId: string): string { return this.options.team(teamId, job.definitionsVersion!)?.leader.teamName ?? teamId; }
 
   private leaderInput(job: DispatchJob, team: DispatchTeamView, relay?: LeaderRelay): LeaderTurnInput {
-    // The Team Leader chooses profiles by ID and name; the noun only names the Executors in the group.
-    return { requestId: job.id, leader: team.leader, profiles: team.profiles.map(({ id, name }) => ({ id, name })), brief: this.brief(job), ...(relay ? { relay } : {}),
+    // The Team Leader chooses profiles by ID, name and what their Executors can do; the noun only names the Executors in the group.
+    return { requestId: job.id, leader: team.leader, profiles: team.profiles.map(({ id, name, capabilities }) => ({ id, name, capabilities })), brief: this.brief(job),
+      ...(relay ? { relay } : {}),
       // The Team Leader's own memory in this conversation; never the group memory or an Executor's (agent-dispatch::REQ-012/AC-02).
       memory: this.options.memory.recall(team.memoryScope, job.event, job.executionEvent?.text ?? job.event.text),
       directory: this.options.roster(job.event).map(({ name, responsibility }) => ({ name, responsibility })),

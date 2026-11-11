@@ -74,6 +74,31 @@ export function effectiveHostTools(checked: readonly string[], scopes: ReadonlyA
   return { offered: checked.filter(granted), ungranted: checked.filter((tool) => !granted(tool)) };
 }
 
+/** What each host tool lets an Executor do, in the words its Team Leader is told and in the order they are listed. */
+const HOST_TOOL_WORDS: ReadonlyArray<readonly [tool: string, words: string]> = [
+  ["files.find", "按名称查找授权目录里的文件"], ["files.grep", "搜索授权目录里文件的内容"], ["files.read", "读取授权目录里的文件"],
+  ["files.write", "在授权目录里保存新文件或覆盖已有文件"], ["files.edit", "修改授权目录里已有的文件"],
+  ["weixin.send_files", "把授权目录里的文件发到本群"], ["media.send", "把图片发到本群"],
+  ["schedules.list", "查看定时任务列表"], ["schedules.inspect", "查看定时任务详情"], ["schedules.read_text", "读取定时任务正文"],
+  ["schedules.create", "创建定时任务"], ["schedules.edit", "修改定时任务"], ["schedules.enable", "启用定时任务"], ["schedules.disable", "停用定时任务"],
+  ["schedules.run_now", "立即执行定时任务"], ["schedules.retry_news", "重试日报任务"], ["schedules.delete", "删除定时任务"],
+];
+
+/**
+ * What an Executor created from a preset can do now, in plain words (agent-dispatch::REQ-011/AC-01). `hostTools` is the preset's
+ * resolved view in the request's definitions version. A tool is named when the preset still allows it (`stillAllowed`, undefined
+ * once the preset is gone; agent-dispatch::REQ-017/AC-02) and the current module permissions grant it
+ * (agent-dispatch::REQ-016/AC-02). Web search follows the Executor's runtime. A granted tool with no words is named by its ID.
+ */
+export function executorCapabilities(hostTools: readonly string[], stillAllowed: readonly string[] | undefined,
+  scopes: ReadonlyArray<Readonly<{ read: boolean; write: boolean }>>, webSearch: boolean): string[] {
+  const kept = new Set(stillAllowed ?? []);
+  const { offered } = effectiveHostTools(hostTools.filter((tool) => kept.has(tool)), scopes);
+  const worded = new Set(HOST_TOOL_WORDS.map(([tool]) => tool));
+  return [...HOST_TOOL_WORDS.filter(([tool]) => offered.includes(tool)).map(([, words]) => words), ...offered.filter((tool) => !worded.has(tool)),
+    ...(webSearch ? ["联网搜索"] : [])];
+}
+
 /**
  * The shared tool host as one agent sees it: only its resolved host tools are offered, and any other call is refused
  * before the shared host. Turn bindings stay on the shared host, which keeps checking module permissions on every call.
