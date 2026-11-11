@@ -22,6 +22,9 @@ export type FileSandboxAccessSnapshot = {
     directory: string;
     read: boolean;
     write: boolean;
+    /** Real paths of the directories below this scope that a scope saved there closes, or leaves read-only (workflow-module-permissions, failure mode 4). */
+    closedRoots?: string[];
+    readOnlyRoots?: string[];
   }>;
   spoolDirectory: string;
   deniedRoots?: string[];
@@ -501,7 +504,9 @@ function validateAccessSnapshot(input: FileSandboxAccessSnapshot): FileSandboxAc
     if (!scope || typeof scope.scopeRef !== "string" || !scope.scopeRef || seen.has(scope.scopeRef) ||
         typeof scope.scopeId !== "string" || !scope.scopeId || typeof scope.label !== "string" || !scope.label ||
         typeof scope.directory !== "string" || !path.isAbsolute(scope.directory) ||
-        typeof scope.read !== "boolean" || typeof scope.write !== "boolean") {
+        typeof scope.read !== "boolean" || typeof scope.write !== "boolean" ||
+        [scope.closedRoots, scope.readOnlyRoots].some((roots) => roots !== undefined &&
+          (!Array.isArray(roots) || roots.some((root) => typeof root !== "string" || !path.isAbsolute(root))))) {
       throw new Error("file_sandbox_access_invalid");
     }
     seen.add(scope.scopeRef);

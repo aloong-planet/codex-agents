@@ -1,10 +1,11 @@
 // Whole-application cases for file grants: a grant never reaches the service's own state, configuration and
-// credentials, on any entry. Driven through the fixture Weixin and Feishu inbound routes of the real main process.
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+// credentials, on any entry, nor a scope that is saved closed below it. Driven through the fixture Weixin and Feishu
+// inbound routes of the real main process.
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { config, start } from "./support/real-main.js";
+import { config, decision, dispatchConfig, groupMessage, start, type State } from "./support/real-main.js";
 
 it("protects main-owned state and configuration under broad grants and rechecks persisted group candidates", async () => {
   const business = mkdtempSync(join(tmpdir(), "channel-group-boundaries-"));
@@ -156,4 +157,72 @@ it("saves a private Weixin turn's file addressed by the grant's name at the gran
     expect(runs.map(({ workflowId, status }) => ({ workflowId, status }))).toEqual([{ workflowId: "weixin.send-files", status: "succeeded" }]);
     console.log(JSON.stringify({ kind: "grant_name_main_weixin", command, reply: sent.weixinFixtureReplies?.at(-1)?.message, runs, outbox: sent.fixtureOutbox }));
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(business, { recursive: true, force: true }); }
+}, 30000);
+
+// Production's layout: the notes vault lies under the Documents folder that local media grants (failure mode 4). The fixture
+// keeps its media folders under <business>/fixture-media-home, so the business directory is named Documents and
+// fixture-media-home links to its parent. The granted Documents folder is then the vault's parent by real paths.
+function vaultUnderDocuments(prefix: string) {
+  const home = mkdtempSync(join(tmpdir(), prefix)), business = join(home, "Documents"), vault = join(business, "demo-vault");
+  for (const folder of [join(vault, ".obsidian"), join(vault, "notes"), join(home, "Downloads"), join(home, "Pictures")]) mkdirSync(folder, { recursive: true });
+  symlinkSync(home, join(business, "fixture-media-home"), "dir");
+  // The vault's files sort before the ones beside it, by name and by path: a search that enters the vault returns them first.
+  writeFileSync(join(vault, "notes", "secret plan.md"), "vault plan");
+  writeFileSync(join(vault, "notes", "aa needle.md"), "NESTED_NEEDLE in the vault");
+  writeFileSync(join(business, "zz plan.md"), "documents plan");
+  writeFileSync(join(business, "zz notes.md"), "NESTED_NEEDLE in documents");
+  return { home, business };
+}
+// The first hit of a search by name and of a search by content, sent to the chat: what was sent shows what the searches saw.
+const documentsScope = { $fixtureScopeLabel: "Documents" };
+const sendFirstHits = [
+  { namespace: "files", tool: "find", arguments: { scopeRefs: [documentsScope], query: "plan", kind: "file", match: "fuzzy", sort: { field: "name", direction: "asc" }, limit: 20 } },
+  { namespace: "files", tool: "grep", arguments: { scopeRefs: [documentsScope], pattern: "NESTED_NEEDLE" } },
+  { namespace: "weixin", tool: "send_files", arguments: { disposition: "selected",
+    fileRefs: [{ $fixtureToolResult: { call: 0, path: ["entries", 0, "fileRef"] } }, { $fixtureToolResult: { call: 1, path: ["matches", 0, "fileRef"] } }] } },
+];
+/** Switches the vault's reading and writing off, as the owner would on the permissions page. */
+async function closeVault(running: Awaited<ReturnType<typeof start>>) {
+  const notes = (await running.state()).workflowModulePermissions!.modules.find((module) => module.moduleId === "notes")!;
+  await running.post("/api/workflows/module-permissions/configure", { moduleId: "notes", expectedRevision: notes.revision, confirmed: true,
+    scopes: notes.scopes.map((scope) => ({ scopeId: scope.scopeId, read: false, write: false })) });
+}
+/** The grants the last model turn was offered, by name. */
+const offeredGrants = (state: State) => [...JSON.stringify(state.fixtureModelRequests?.at(-1)?.input).matchAll(/scoperef_[a-f0-9]{32}: (.+?)（/gu)].map((match) => match[1]).sort();
+
+it("keeps a closed vault under the granted Documents folder out of a private Weixin turn's searches", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "nested-scope-main-")), { home, business } = vaultUnderDocuments("nested-scope-main-home-");
+  const command = "在 Documents 里找名字带 plan 的文件和内容带 NESTED_NEEDLE 的文件，各取第一个发给我";
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    writeFileSync(join(directory, "channel.json"), JSON.stringify(config("weixin")));
+    running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await closeVault(running);
+    const before = await running.state();
+    await running.post("/api/fixture/workflow/inbound", { text: command, modelToolCalls: sendFirstHits });
+    const sent = await running.until((s) => s.weixinFixtureReplies?.at(-1)?.message === "文件已发送，请查收。" && (s.fixtureOutbox?.length ?? 0) === 2);
+    const runs = sent.workflows!.runs.filter((run) => !before.workflows?.runs.some((earlier) => earlier.runRef === run.runRef));
+    console.log(JSON.stringify({ kind: "nested_scope_main_weixin", command, reply: sent.weixinFixtureReplies?.at(-1)?.message, offered: offeredGrants(sent), runs, outbox: sent.fixtureOutbox }));
+    expect(offeredGrants(sent)).toEqual(["Documents", "Downloads", "Pictures"]);
+    expect(sent.fixtureOutbox?.map(({ fileName }) => fileName)).toEqual(["zz plan.md", "zz notes.md"]);
+    expect(runs.map(({ workflowId, status }) => ({ workflowId, status }))).toEqual([{ workflowId: "weixin.send-files", status: "succeeded" }]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
+}, 30000);
+
+it("keeps a closed vault under the granted Documents folder out of an Executor's searches", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "nested-scope-executor-")), { home, business } = vaultUnderDocuments("nested-scope-executor-home-");
+  const command = "在 Documents 里找名字带 plan 的文件和内容带 NESTED_NEEDLE 的文件，各取第一个发到群里";
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory, true); running = await start(directory, { WORKFLOW_FIXTURE_BUSINESS_DIRECTORY: business });
+    await running.until((state) => state.channels?.feishu?.ready === true);
+    await closeVault(running);
+    await running.post("/api/fixture/feishu/inbound", groupMessage("om_nested_scope", command, decision("jack", "找出两个文件并发到群里"), { modelToolCalls: sendFirstHits }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && (state.agentFixtureOutboxes?.jack?.media.length ?? 0) === 2);
+    const runs = result.workflows?.runs.filter(({ workflowId }) => workflowId === "weixin.send-files") ?? [];
+    console.log(JSON.stringify({ kind: "nested_scope_executor", command, offered: offeredGrants(result), jobs: result.agentDispatch, outboxes: result.agentFixtureOutboxes, runs }));
+    expect(offeredGrants(result)).toEqual(["Documents", "Downloads", "Pictures"]);
+    expect(result.agentFixtureOutboxes?.jack?.media.map((item) => (item as { fileName: string }).fileName)).toEqual(["zz plan.md", "zz notes.md"]);
+    expect(runs.map(({ status }) => status)).toEqual(["succeeded"]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); }
 }, 30000);

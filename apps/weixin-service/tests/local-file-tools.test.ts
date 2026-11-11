@@ -1908,6 +1908,171 @@ describe("local_file_service_state_boundary", () => {
   });
 });
 
+// A scope saved below a grant narrows what the grant reaches there (workflow-module-permissions, failure mode 4).
+describe("local_file_nested_scope_boundary", () => {
+  type SavedScope = { scopeId: string; label: string; directory: string; read: boolean; write: boolean };
+  // What the store hands out. A case changes `modules` to play a save made while a turn is bound.
+  const savedModules = (modules: Record<string, { revision: number; scopes: SavedScope[] } | undefined>) => ({
+    get: (moduleId: string) => { const saved = modules[moduleId]; return saved ? { moduleId, saved: true, ...saved } : undefined; },
+  });
+  const layout = (prefix: string, files: Record<string, string>) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); temporaryDirectories.push(root);
+    const documents = path.join(root, "Documents");
+    for (const [relativePath, content] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(documents, relativePath)), { recursive: true });
+      fs.writeFileSync(path.join(documents, relativePath), content);
+    }
+    return { root, documents, vault: path.join(documents, "vault") };
+  };
+  const grant = (directory: string, read: boolean, write: boolean): SavedScope => ({ scopeId: path.basename(directory).toLowerCase(), label: path.basename(directory), directory, read, write });
+  const tree = (directory: string) => fs.readdirSync(directory, { recursive: true }).map(String).sort();
+
+  // Production's layout: the notes vault lies under the Documents folder that local media grants.
+  it("keeps a scope that another module saved closed out of the grant above it, while the rest of the grant reads and writes", async () => {
+    const { root, documents, vault } = layout("nested-scope-closed-", { "vault/secret.md": "needle secret", "vault/deep/secret.md": "needle deep",
+      "vault/item.md": "needle vault item", "work/keep.md": "needle keep", "swap/item.md": "needle swap" });
+    // A link elsewhere in the grant is no way into the closed scope either.
+    fs.symlinkSync(vault, path.join(documents, "shortcut"), "dir");
+    const tools = new LocalFileTools(savedModules({ "local-media": { revision: 1, scopes: [grant(documents, true, true)] }, notes: { revision: 1, scopes: [grant(vault, false, false)] } }),
+      { moduleIds: ["notes", "local-media"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    const trusted = turn("nested-scope-closed", "account-a"), binding = tools.bindTurn(trusted);
+    const execute = (toolId: string, toolVersion: number, args: Record<string, unknown>) => tools.execute({ toolId, toolVersion, arguments: args }, trusted);
+    try {
+      expect(binding.promptLines.map((line) => line.slice(line.indexOf(": ") + 2))).toEqual(["Documents（可读、可写）"]);
+      const scopeRef = binding.promptLines[0]!.split(":", 1)[0]!;
+      const found = await execute("files.find", 2, {}) as { entries: Array<{ fileRef: string; displayPath: string }>; scanComplete: boolean };
+      expect(found.entries.map((entry) => entry.displayPath).sort()).toEqual(["Documents/swap", "Documents/swap/item.md", "Documents/work", "Documents/work/keep.md"]);
+      expect(found.scanComplete).toBe(true);
+      const grep = await execute("files.grep", 2, { pattern: "needle" }) as { matches: Array<{ displayPath: string }>; skipped: unknown[]; scanComplete: boolean };
+      expect(grep.matches.map((match) => match.displayPath).sort()).toEqual(["Documents/swap/item.md", "Documents/work/keep.md"]);
+      expect(grep).toMatchObject({ skipped: [], scanComplete: true });
+      // An existing folder, a new one, a case variant (one folder on a case-insensitive volume) and the grant addressed by its name.
+      for (const relativePath of ["vault/new.md", "vault/deep/new.md", "vault/fresh/new.md", "VAULT/new.md", "Documents/vault/new.md"]) {
+        await expect(execute("files.write", 1, { scopeRef, relativePath, content: "planted", overwrite: false }), relativePath).rejects.toThrow(/^local_file_permission_denied$/u);
+      }
+      expect(tree(vault)).toEqual(["deep", "deep/secret.md", "item.md", "secret.md"]);
+      expect(fs.readdirSync(documents).filter((name) => name.toLowerCase() === "vault")).toEqual(["vault"]);
+
+      const created = await execute("files.write", 1, { scopeRef, relativePath: "work/new.md", content: "created", overwrite: false }) as { fileRef: string };
+      expect(await execute("files.read", 2, { fileRef: created.fileRef })).toMatchObject({ content: "created" });
+      const keep = found.entries.find((entry) => entry.displayPath === "Documents/work/keep.md")!;
+      const kept = await execute("files.read", 2, { fileRef: keep.fileRef }) as { sha256: string };
+      await execute("files.edit", 1, { fileRef: keep.fileRef, expectedSha256: kept.sha256, oldText: "needle keep", newText: "kept" });
+      expect(fs.readFileSync(path.join(documents, "work", "keep.md"), "utf8")).toBe("kept");
+
+      // A reference taken outside the closed scope must not follow its directory once that directory points into it.
+      const swapped = found.entries.find((entry) => entry.displayPath === "Documents/swap/item.md")!;
+      fs.rmSync(path.join(documents, "swap"), { recursive: true });
+      fs.symlinkSync(vault, path.join(documents, "swap"), "dir");
+      await expect(execute("files.read", 2, { fileRef: swapped.fileRef })).rejects.toThrow(/^local_file_permission_denied$/u);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  const bound = (tools: LocalFileTools, eventKey: string) => {
+    const trusted = turn(eventKey, "account-a"), binding = tools.bindTurn(trusted);
+    const grants = binding.promptLines.map((line) => ({ scopeRef: line.split(":", 1)[0]!, offered: line.slice(line.indexOf(": ") + 2) }));
+    return { trusted, binding, offered: grants.map((line) => line.offered), scopeRef: (label: string) => grants.find((line) => line.offered.startsWith(`${label}（`))!.scopeRef,
+      execute: (toolId: string, toolVersion: number, args: Record<string, unknown>) => tools.execute({ toolId, toolVersion, arguments: args }, trusted) };
+  };
+  const twoModules = (root: string) => ({ moduleIds: ["notes", "local-media"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+
+  it.each([
+    ["the grant's own module", false],
+    ["another module", true],
+  ])("searches and reads a read-only scope that %s saved below a grant, and refuses to write there", async (_kind, otherModule) => {
+    const { root, documents } = layout("nested-scope-read-only-", { "inbox/letter.md": "needle letter", "work/keep.md": "needle keep" });
+    const inbox = path.join(documents, "inbox");
+    const tools = new LocalFileTools(savedModules(otherModule
+      ? { notes: { revision: 1, scopes: [grant(documents, true, true)] }, "local-media": { revision: 1, scopes: [grant(inbox, true, false)] } }
+      : { notes: { revision: 1, scopes: [grant(documents, true, true), grant(inbox, true, false)] } }), twoModules(root));
+    const { binding, offered, scopeRef, execute } = bound(tools, `nested-scope-read-only-${otherModule}`);
+    try {
+      expect(offered).toEqual(["Documents（可读、可写）", "inbox（可读、不可写）"]);
+      const through = { scopeRefs: [scopeRef("Documents")] };
+      const found = await execute("files.find", 2, through) as { entries: Array<{ fileRef: string; displayPath: string }> };
+      expect(found.entries.map((entry) => entry.displayPath).sort()).toEqual(["Documents/inbox", "Documents/inbox/letter.md", "Documents/work", "Documents/work/keep.md"]);
+      const grep = await execute("files.grep", 2, { ...through, pattern: "needle" }) as { matches: Array<{ displayPath: string }> };
+      expect(grep.matches.map((match) => match.displayPath).sort()).toEqual(["Documents/inbox/letter.md", "Documents/work/keep.md"]);
+      const letter = found.entries.find((entry) => entry.displayPath === "Documents/inbox/letter.md")!;
+      const read = await execute("files.read", 2, { fileRef: letter.fileRef }) as { content: string; sha256: string };
+      expect(read.content).toBe("needle letter");
+
+      const write = { scopeRef: scopeRef("Documents"), content: "planted" };
+      await expect(execute("files.write", 1, { ...write, relativePath: "inbox/new.md", overwrite: false })).rejects.toThrow(/^local_file_permission_denied$/u);
+      await expect(execute("files.write", 1, { ...write, relativePath: "inbox/letter.md", overwrite: true, expectedSha256: read.sha256 })).rejects.toThrow(/^local_file_permission_denied$/u);
+      await expect(execute("files.edit", 1, { fileRef: letter.fileRef, expectedSha256: read.sha256, oldText: "needle", newText: "planted" })).rejects.toThrow(/^local_file_permission_denied$/u);
+      expect(tree(inbox)).toEqual(["letter.md"]);
+      expect(fs.readFileSync(path.join(inbox, "letter.md"), "utf8")).toBe("needle letter");
+      await execute("files.write", 1, { ...write, relativePath: "work/new.md", overwrite: false });
+      expect(fs.readFileSync(path.join(documents, "work", "new.md"), "utf8")).toBe("planted");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it("refuses a reference issued before a scope below its grant was closed, and every later call through that grant", async () => {
+    const { root, documents, vault } = layout("nested-scope-narrowed-", { "vault/secret.md": "needle secret", "work/keep.md": "needle keep" });
+    const modules: Parameters<typeof savedModules>[0] = { "local-media": { revision: 1, scopes: [grant(documents, true, true)] }, notes: { revision: 1, scopes: [grant(vault, true, true)] } };
+    const tools = new LocalFileTools(savedModules(modules), twoModules(root));
+    const { trusted, binding, scopeRef, execute } = bound(tools, "nested-scope-narrowed");
+    try {
+      const through = { scopeRefs: [scopeRef("Documents")] };
+      const found = await execute("files.find", 2, through) as { entries: Array<{ fileRef: string; displayPath: string }> };
+      const secret = found.entries.find((entry) => entry.displayPath === "Documents/vault/secret.md")!;
+      const read = await execute("files.read", 2, { fileRef: secret.fileRef }) as { content: string; sha256: string };
+      expect(read.content).toBe("needle secret");
+
+      // The owner closes the vault. Only its module is saved again; the grant's own module keeps its revision.
+      modules.notes = { revision: 2, scopes: [grant(vault, false, false)] };
+      const refused: Array<[string, number, Record<string, unknown>]> = [
+        ["files.read", 2, { fileRef: secret.fileRef }],
+        ["files.find", 2, through],
+        ["files.grep", 2, { ...through, pattern: "needle" }],
+        ["files.edit", 1, { fileRef: secret.fileRef, expectedSha256: read.sha256, oldText: "needle", newText: "planted" }],
+        ["files.write", 1, { scopeRef: scopeRef("Documents"), relativePath: "vault/new.md", content: "planted", overwrite: false }],
+      ];
+      for (const [toolId, toolVersion, args] of refused) await expect(execute(toolId, toolVersion, args), toolId).rejects.toThrow(/^local_file_permission_changed$/u);
+      // A send takes its snapshot under what is saved at that moment.
+      await expect(tools.snapshotForSend(trusted, [secret.fileRef])).rejects.toThrow(/^local_file_permission_denied$/u);
+      expect(tree(vault)).toEqual(["secret.md"]);
+      expect(fs.readFileSync(path.join(vault, "secret.md"), "utf8")).toBe("needle secret");
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it.each([
+    ["switched off", false, false],
+    ["widened to writing", true, true],
+  ])("refuses a read through an earlier reference once its grant's module is saved again: %s", async (_kind, read, write) => {
+    const { root, documents } = layout("nested-scope-resaved-", { "work/keep.md": "needle keep" });
+    const modules: Parameters<typeof savedModules>[0] = { notes: { revision: 1, scopes: [grant(documents, true, false)] } };
+    const tools = new LocalFileTools(savedModules(modules), twoModules(root));
+    const { binding, execute } = bound(tools, `nested-scope-resaved-${read}`);
+    try {
+      const found = await execute("files.find", 2, { kind: "file" }) as { entries: Array<{ fileRef: string }> };
+      expect(await execute("files.read", 2, { fileRef: found.entries[0]!.fileRef })).toMatchObject({ content: "needle keep" });
+      modules.notes = { revision: 2, scopes: [grant(documents, read, write)] };
+      await expect(execute("files.read", 2, { fileRef: found.entries[0]!.fileRef })).rejects.toThrow(/^local_file_permission_changed$/u);
+    } finally { await binding.release(); await tools.close(); }
+  });
+
+  it("reaches a readable scope saved inside a closed one through its own grant only", async () => {
+    const { root, documents, vault } = layout("nested-scope-inner-", { "vault/secret.md": "needle secret", "vault/shared/note.md": "needle note", "work/keep.md": "needle keep" });
+    const shared = path.join(vault, "shared");
+    const tools = new LocalFileTools(savedModules({ notes: { revision: 1, scopes: [grant(documents, true, true), grant(vault, false, false), grant(shared, true, false)] } }), twoModules(root));
+    const { binding, offered, scopeRef, execute } = bound(tools, "nested-scope-inner");
+    try {
+      expect(offered).toEqual(["Documents（可读、可写）", "shared（可读、不可写）"]);
+      const outer = await execute("files.find", 2, { scopeRefs: [scopeRef("Documents")] }) as { entries: Array<{ displayPath: string }> };
+      expect(outer.entries.map((entry) => entry.displayPath).sort()).toEqual(["Documents/work", "Documents/work/keep.md"]);
+      const grep = await execute("files.grep", 2, { pattern: "needle" }) as { matches: Array<{ fileRef: string; displayPath: string }> };
+      expect(grep.matches.map((match) => match.displayPath).sort()).toEqual(["Documents/work/keep.md", "shared/note.md"]);
+      const note = grep.matches.find((match) => match.displayPath === "shared/note.md")!;
+      expect(await execute("files.read", 2, { fileRef: note.fileRef })).toMatchObject({ content: "needle note" });
+      await expect(execute("files.write", 1, { scopeRef: scopeRef("Documents"), relativePath: "vault/shared/new.md", content: "planted", overwrite: false }))
+        .rejects.toThrow(/^local_file_permission_denied$/u);
+      expect(tree(shared)).toEqual(["note.md"]);
+    } finally { await binding.release(); await tools.close(); }
+  });
+});
+
 function turn(eventKey: string, accountId: string): TrustedWorkflowTurn {
   return {
     eventKey,

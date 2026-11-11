@@ -188,6 +188,34 @@ export class WorkflowModulePermissionStore {
   }
 }
 
+export type NarrowingRoots = { closedRoots: string[]; readOnlyRoots: string[] };
+
+/**
+ * The directories strictly below `directory` that a saved scope closes or leaves read-only. An access through a grant must not
+ * exceed what any scope saved below it allows, whichever module saved it (workflow-module-permissions, failure mode 4). A scope
+ * saved at `directory` itself is not below it. Spellings are compared after case and Unicode folding, because one directory
+ * has many spellings on a case-insensitive volume; folding can only narrow more.
+ */
+export function narrowingRootsBelow(
+  directory: string,
+  saved: ReadonlyArray<Pick<WorkflowModulePermissionScope, "directory" | "read" | "write">>,
+): NarrowingRoots {
+  const grant = foldSpelling(directory);
+  const closed = new Set<string>();
+  const readOnly = new Set<string>();
+  for (const scope of saved) {
+    const relative = path.relative(grant, foldSpelling(scope.directory));
+    if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) continue;
+    // Write includes read, so a scope that may write narrows nothing.
+    if (!scope.write) (scope.read ? readOnly : closed).add(scope.directory);
+  }
+  return { closedRoots: [...closed].sort(), readOnlyRoots: [...readOnly].sort() };
+}
+
+function foldSpelling(value: string): string {
+  return value.normalize("NFC").toLowerCase();
+}
+
 function normalizeDraftScopes(scopes: ScopeDraft[]): ScopeDraft[] {
   if (!Array.isArray(scopes) || scopes.length > 64) throw new Error("workflow_module_permission_invalid");
   const seenIds = new Set<string>();

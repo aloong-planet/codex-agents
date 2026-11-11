@@ -35,3 +35,4 @@
 | ADR-0029 | [Keep service state outside every file grant](0029-keep-service-state-outside-every-file-grant.md) | Accepted (2026-11-08) |
 | ADR-0030 | [Offer an isolated runtime only the tools its host grants](0030-offer-isolated-runtimes-only-granted-tools.md) | Proposed |
 | ADR-0031 | [Compact Executor runtime homes to their rollouts](0031-compact-executor-runtime-homes-to-their-rollouts.md) | Accepted (2026-11-08) |
+| ADR-0032 | [Narrow a file grant by every scope saved below it](0032-narrow-a-file-grant-by-every-scope-saved-below-it.md) | Accepted (2026-11-11) |
