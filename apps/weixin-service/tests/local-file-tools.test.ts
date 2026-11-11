@@ -1929,8 +1929,9 @@ describe("local_file_nested_scope_boundary", () => {
 
   // Production's layout: the notes vault lies under the Documents folder that local media grants.
   it("keeps a scope that another module saved closed out of the grant above it, while the rest of the grant reads and writes", async () => {
+    // The vault also holds a file over grep's size limit: a scan that entered the vault would report it as skipped.
     const { root, documents, vault } = layout("nested-scope-closed-", { "vault/secret.md": "needle secret", "vault/deep/secret.md": "needle deep",
-      "vault/item.md": "needle vault item", "work/keep.md": "needle keep", "swap/item.md": "needle swap" });
+      "vault/item.md": "needle vault item", "vault/large.txt": "a".repeat(1024 * 1024 + 1), "work/keep.md": "needle keep", "swap/item.md": "needle swap" });
     // A link elsewhere in the grant is no way into the closed scope either.
     fs.symlinkSync(vault, path.join(documents, "shortcut"), "dir");
     const tools = new LocalFileTools(savedModules({ "local-media": { revision: 1, scopes: [grant(documents, true, true)] }, notes: { revision: 1, scopes: [grant(vault, false, false)] } }),
@@ -1950,7 +1951,7 @@ describe("local_file_nested_scope_boundary", () => {
       for (const relativePath of ["vault/new.md", "vault/deep/new.md", "vault/fresh/new.md", "VAULT/new.md", "Documents/vault/new.md"]) {
         await expect(execute("files.write", 1, { scopeRef, relativePath, content: "planted", overwrite: false }), relativePath).rejects.toThrow(/^local_file_permission_denied$/u);
       }
-      expect(tree(vault)).toEqual(["deep", "deep/secret.md", "item.md", "secret.md"]);
+      expect(tree(vault)).toEqual(["deep", "deep/secret.md", "item.md", "large.txt", "secret.md"]);
       expect(fs.readdirSync(documents).filter((name) => name.toLowerCase() === "vault")).toEqual(["vault"]);
 
       const created = await execute("files.write", 1, { scopeRef, relativePath: "work/new.md", content: "created", overwrite: false }) as { fileRef: string };
@@ -2030,8 +2031,11 @@ describe("local_file_nested_scope_boundary", () => {
         ["files.write", 1, { scopeRef: scopeRef("Documents"), relativePath: "vault/new.md", content: "planted", overwrite: false }],
       ];
       for (const [toolId, toolVersion, args] of refused) await expect(execute(toolId, toolVersion, args), toolId).rejects.toThrow(/^local_file_permission_changed$/u);
-      // A send takes its snapshot under what is saved at that moment.
+      // A send takes its snapshot under what is saved at that moment: the vault's file is refused, the one beside it is sent.
       await expect(tools.snapshotForSend(trusted, [secret.fileRef])).rejects.toThrow(/^local_file_permission_denied$/u);
+      const beside = found.entries.find((entry) => entry.displayPath === "Documents/work/keep.md")!;
+      const [sent] = await tools.snapshotForSend(trusted, [beside.fileRef]);
+      expect(fs.readFileSync(sent!.snapshotPath, "utf8")).toBe("needle keep");
       expect(tree(vault)).toEqual(["secret.md"]);
       expect(fs.readFileSync(path.join(vault, "secret.md"), "utf8")).toBe("needle secret");
     } finally { await binding.release(); await tools.close(); }

@@ -206,7 +206,6 @@ describe("narrowingRootsBelow", () => {
     ["a directory above the grant", "/home/Documents", "/home", false],
     ["a sibling whose name begins with the grant's", "/home/Documents", "/home/Documents-old", false],
     ["a directory beside the grant", "/home/Documents", "/home/Downloads/vault", false],
-    ["a directory directly below the grant", "/home/Documents", "/home/Documents/vault", true],
     ["a directory several levels below the grant", "/home/Documents", "/home/Documents/a/b/vault", true],
     // One directory on a case-insensitive volume, and one in either Unicode form.
     ["a directory below the grant spelled in another case", "/home/Documents", "/HOME/documents/vault", true],

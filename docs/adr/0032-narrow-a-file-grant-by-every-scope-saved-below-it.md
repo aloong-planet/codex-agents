@@ -31,7 +31,7 @@ Before each call the host checks that the scopes saved now narrow the addressed 
 - Negative: a granted media folder below a writable vault cannot be written through the vault's grant.
 - Negative: once a scope below a grant is saved with different access under a running turn, that turn's later calls through the grant fail, also for paths outside that scope. A read through an earlier reference now fails after its grant's module is saved again, even when the save widened access.
 - Neutral: where the vault lies below a read-only media folder and is itself readable, nothing changes: reads through the folder pass, and writes through it were already refused.
-- Neutral: the local-image workflows scan a granted media folder through the image library, which is a separate path and does not apply saved scopes. This decision covers the `files.*` tools and the send snapshots taken from their references.
+- Neutral: a local image is sent from a `files.find` reference through the same send snapshot, so the rule covers it. The image library's own scan of a granted media folder does not apply saved scopes, and no entry of the current tool catalog reaches that scan.
 
 ## Sources
 
