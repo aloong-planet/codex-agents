@@ -866,6 +866,43 @@ describe("local_file_query_contract_regression", () => {
   });
 });
 
+// A search that cannot look anywhere must fail, because a complete empty scan reads as "not found".
+describe("local_file_query_fails_closed", () => {
+  const SEARCHES = [["files.find", { query: "inside" }], ["files.grep", { pattern: "needle" }]] as const;
+
+  it.each(SEARCHES)("refuses %s with a permission error when no scope is readable", async (toolId, args) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "search-no-scope-")); temporaryDirectories.push(root);
+    const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true, scopes: [] }) },
+      { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    const trusted = turn("search-no-scope", "account-a"), binding = files.bindTurn(trusted);
+    try {
+      expect(binding.promptLines).toEqual([]);
+      await expect(files.execute({ toolId, toolVersion: 2, arguments: args }, trusted)).rejects.toThrow(/^local_file_permission_denied$/u);
+    } finally { await binding.release(); await files.close(); }
+  });
+
+  it.each(SEARCHES.flatMap(([toolId, args]) => (["deleted", "replaced by a symlink to another directory"] as const).flatMap((change) =>
+    [true, false].map((searchedBefore) => [toolId, change, searchedBefore ? "after" : "without", args, searchedBefore] as const))),
+  )("fails %s once the granted directory is %s, %s an earlier search of the turn", async (toolId, change, _when, args, searchedBefore) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "search-scope-gone-")); temporaryDirectories.push(root);
+    const directory = path.join(root, "files"), outside = path.join(root, "outside");
+    for (const [folder, name] of [[directory, "inside.md"], [outside, "inside-elsewhere.md"]] as const) {
+      fs.mkdirSync(folder); fs.writeFileSync(path.join(folder, name), "needle\n");
+    }
+    const files = new LocalFileTools({ get: () => ({ moduleId: "files", revision: 1, saved: true,
+      scopes: [{ scopeId: "root", label: "Files", directory, read: true, write: false }] }) },
+    { moduleIds: ["files"], protectedRoots: unrelatedProtectedRoots, spoolDirectory: path.join(root, "spool") });
+    const trusted = turn("search-scope-gone", "account-a"), binding = files.bindTurn(trusted);
+    const search = () => files.execute({ toolId, toolVersion: 2, arguments: args }, trusted);
+    try {
+      if (searchedBefore) expect(JSON.stringify(await search())).toContain("Files/inside.md");
+      fs.rmSync(directory, { recursive: true });
+      if (change !== "deleted") fs.symlinkSync(outside, directory, "dir");
+      await expect(search()).rejects.toThrow(/^(?:file_sandbox|local_file)_[a-z_]+$/u);
+    } finally { await binding.release(); await files.close(); }
+  });
+});
+
 describe("local_file_mutation_contract_regression", () => {
   it("rejects an actual FIFO before create or overwrite without blocking or replacing it", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-weixin-fifo-"));
@@ -1732,12 +1769,16 @@ describe("local_file_grant_name_addressing", () => {
     const { directory, tools } = grant("grant-name-results-");
     fs.mkdirSync(path.join(directory, "discount-project", "src"), { recursive: true });
     fs.writeFileSync(path.join(directory, "discount-project", "src", "discount.ts"), "export const off = 1;\n");
+    fs.writeFileSync(path.join(directory, "blob.bin"), Buffer.from([0, 1, 2]));
     const trusted = turn("grant-name-results", "account-a"), binding = tools.bindTurn(trusted);
     const shown = { relativePath: "discount-project/src/discount.ts", displayPath: "demo-vault/discount-project/src/discount.ts" };
     try {
       const found = await tools.execute({ toolId: "files.find", toolVersion: 2, arguments: { query: "discount.ts", kind: "file" } }, trusted) as { entries: Array<{ fileRef: string }> };
       expect(found.entries).toMatchObject([shown]);
-      await expect(tools.execute({ toolId: "files.grep", toolVersion: 2, arguments: { pattern: "off" } }, trusted)).resolves.toMatchObject({ matches: [shown] });
+      const grepped = await tools.execute({ toolId: "files.grep", toolVersion: 2, arguments: { pattern: "off" } }, trusted) as { skipped: unknown[] };
+      expect(grepped).toMatchObject({ matches: [shown] });
+      // A skipped file cannot be acted on by path, so it is shown by its display path only.
+      expect(grepped.skipped).toEqual([{ scopeRef: binding.promptLines[0]!.split(":", 1)[0]!, displayPath: "demo-vault/blob.bin", reason: "binary" }]);
       const read = await tools.execute({ toolId: "files.read", toolVersion: 2, arguments: { fileRef: found.entries[0]!.fileRef } }, trusted) as { sha256: string };
       await expect(tools.execute({ toolId: "files.edit", toolVersion: 1,
         arguments: { fileRef: found.entries[0]!.fileRef, expectedSha256: read.sha256, oldText: "1", newText: "2" } }, trusted)).resolves.toMatchObject({ ...shown, changed: true });
