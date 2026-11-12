@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { closeDispatchRuntime, CodexDispatchExecutor, DISPATCH_RUNTIME_EXIT_WAIT_MS, DISPATCH_RUNTIME_IDLE_MS, DISPATCH_RUNTIME_LIMIT, executorEvent,
-  type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
+  unloadedSkills, type DispatchRuntime, type ExecutorToolHost } from "../src/agent-dispatch-executor.js";
 import type { DispatchAssignment, DispatchJob } from "../src/agent-dispatch-types.js";
 import type { ChannelTurnAdapter } from "../src/channel-turn-adapter.js";
 import type { InboundContent } from "../src/channel-contract.js";
@@ -21,6 +21,9 @@ import { homeListing, keptListing, rolloutPath, seedExecutorHome } from "./suppo
 // 5 minutes, so that wiring is exercised only by a live run or a fixture case that fills the pool.
 // Gap: home compaction's `compaction_failed` (session store unreadable) and `dispatch_executor_homes_unreadable` (runtimes
 // root unreadable) diagnostics have no case; both only report and remove nothing.
+// Gap: when the Skill Library cannot record what a runtime made of a skill, the Executor reports `dispatch_skill_listing_unrecorded`
+// and goes on; and when the App Server cannot be asked for its skill listing, the Assignment fails as for any runtime error. Neither
+// has a case: each needs a library or an App Server that fails on that one call, which no seam here offers.
 
 function job(id: string): DispatchJob {
   return { id, bindingHash: "binding-alpha", agentId: "alice", senderAccountId: "cli_alice", summary: "整理商品文案", status: "running", attempt: 0,
@@ -190,6 +193,8 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
       const runtime = createIsolatedRuntime("dispatchAgent", { stateDirectory: state, instance: scope, authHome: join(state, "no-auth"), environment: { PATH: "/usr/bin:/bin" },
         skills: (directory) => { written = library.materialize(skills, directory); } });
       const agent = conversation("thread-A");
+      // Its App Server lists what was written, as the installed one does (isolated-model-runtime.test.ts).
+      agent.listSkills.mockImplementation(async () => ({ skills: written.map(({ name, path }) => ({ name, path })), errors: [] }));
       agent.runTurn.mockImplementation(async (_threadId, turn) => {
         carried.push((await (turn as ChannelTurnAdapter).prepare()).input.filter((item) => item.type !== "text"));
         const loaded = join(home, "codex-home", "skills");
@@ -198,7 +203,7 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
         writeFileSync(join(home, rolloutPath("thread-A")), `${JSON.stringify({ type: "session_meta", payload: { id: "thread-A" } })}\n`);
         return { owner: "model_owned", finalText: '{"message":"已整理好商品文案。","results":[]}' };
       });
-      return { agent, cwd: runtime.cwd, skills: written };
+      return { agent, cwd: runtime.cwd, skills: written.map((skill, index) => ({ ...skill, ref: skills[index]! })) };
     },
     tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
     // The request's definitions version names version 1 of the one skill its profile selects.
@@ -224,6 +229,65 @@ it("gives an Executor's home exactly its profile's skills in the request's versi
     // The retry's runtime was created on a home compacted to its rollout: the skills were written again, not kept.
     expect(atCreation).toEqual([[], keptListing("thread-A")]);
     expect(reports).toEqual([]);
+  } finally { await executor.close(); }
+});
+
+// skill-library::REQ-002: a skill the runtime's App Server does not list is not loaded. The listing names each skill by the real
+// path of its SKILL.md, and each SKILL.md it refused by that path with a message.
+const tripRef = { ref: { id: "skill-aaaaaaaa", version: 1 }, name: "trip-check", path: "/state/home/codex-home/skills/skill-aaaaaaaa/SKILL.md" };
+const mealRef = { ref: { id: "skill-bbbbbbbb", version: 2 }, name: "meal-plan", path: "/state/home/codex-home/skills/skill-bbbbbbbb/SKILL.md" };
+it.each([
+  ["every written skill listed", { skills: [{ name: "meal-plan", path: mealRef.path }, { name: "trip-check", path: tripRef.path }], errors: [] }, []],
+  ["one refused with a message at its path", { skills: [{ name: "trip-check", path: tripRef.path }], errors: [{ path: mealRef.path, message: "invalid YAML: duplicate field `name`" }] },
+    [{ ref: mealRef.ref, name: "meal-plan", reason: "invalid YAML: duplicate field `name`" }]],
+  ["one missing with no message", { skills: [{ name: "meal-plan", path: mealRef.path }], errors: [] }, [{ ref: tripRef.ref, name: "trip-check" }]],
+  ["one missing while a message names another path", { skills: [{ name: "trip-check", path: tripRef.path }],
+    errors: [{ path: "/state/home/codex-home/skills/.system/other/SKILL.md", message: "missing field `description`" }] }, [{ ref: mealRef.ref, name: "meal-plan" }]],
+  ["a listed name at another path", { skills: [{ name: "trip-check", path: "/elsewhere/trip-check/SKILL.md" }, { name: "meal-plan", path: mealRef.path }], errors: [] },
+    [{ ref: tripRef.ref, name: "trip-check" }]],
+])("tells which written skills the runtime did not load: %s", (_case, listing, expected) => {
+  expect(unloadedSkills([tripRef, mealRef], listing)).toEqual(expected);
+});
+
+// skill-library::REQ-002 and US-004: when the runtime starts, a selected skill its App Server does not list fails the Assignment
+// before its first turn, naming that skill, and the library marks that version; a later runtime that lists the same version
+// clears the mark. The library is the real one, with both skills imported; only the App Server conversation is substituted.
+it("fails an Assignment before its first turn when its runtime did not load a skill its profile selects, and the library marks that version until a runtime loads it", async () => {
+  const state = scratch();
+  const library = new SkillLibrary({ directory: join(state, "skill-library"), audit: new ConsoleAudit({ directory: state }), needed: () => undefined });
+  const imported = async (name: string) => {
+    const source = join(scratch(), name);
+    mkdirSync(source);
+    writeFileSync(join(source, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} 的做法\n---\nbody\n`);
+    return library.import(source, (await library.read(source)).fingerprint, {});
+  };
+  const trip = await imported("trip-check"), meal = await imported("meal-plan");
+  const written = [{ ...tripRef, ref: { id: trip.id, version: 1 } }, { ...mealRef, ref: { id: meal.id, version: 1 } }];
+  const runtimes = new RuntimePool<DispatchRuntime>({ limit: 1, idleMs: 60_000, close: ({ agent }) => agent.close() });
+  const agents = [conversation("thread-C"), conversation("thread-D")];
+  agents[0]!.listSkills.mockResolvedValue({ skills: [{ name: "trip-check", path: tripRef.path }], errors: [{ path: mealRef.path, message: "invalid YAML: duplicate field `name`" }] });
+  agents[1]!.listSkills.mockResolvedValue({ skills: [{ name: "trip-check", path: tripRef.path }, { name: "meal-plan", path: mealRef.path }], errors: [] });
+  let created = 0;
+  const executor = new CodexDispatchExecutor(join(scratch(), "agent-sessions.sqlite"), {
+    agents: () => [{ id: "sam", name: "Sam", responsibility: "协调", senderAccountId: "cli_sam" },
+      { id: "alice", name: "Alice", responsibility: "商品运营", senderAccountId: "cli_alice" }],
+    runtimes, createRuntime: (_job, scope) => ({ agent: agents[created++]!, cwd: `/isolated/${scope}`, skills: written }),
+    tools: { bind: () => ({ promptLines: [], seal: () => {}, drain: async () => {}, snapshot: () => ({ owner: "model" }), release: () => {} }) as never },
+    profile: () => ({ instructions: "", memoryScope: { kind: "profile", teamId: "alice", profileId: "executor-1" }, skills: written.map(({ ref }) => ref),
+      tools: { definitions: () => [], contractHash: () => "contract-1", execute: async () => { throw new Error("tool calls are not part of this case"); } } }),
+    contextRevision: () => "revision-1", authorized: () => true, model: () => ({ model: "fixture-model", effort: "low" }),
+    memory: () => "", capture: async () => {}, existingResult: () => undefined, library,
+  });
+  const marks = async () => (await library.view()).map(({ name, refused }) => [name, refused]);
+  try {
+    const failed = executor.run(job("request-one"), assignment("assignment-a"), new AbortController().signal);
+    await expect(failed).rejects.toThrow(/^dispatch_skills_not_loaded$/u);
+    await expect(failed).rejects.toMatchObject({ names: ["meal-plan"] });
+    expect(agents[0]!.runTurn).not.toHaveBeenCalled();
+    expect(await marks()).toEqual([["meal-plan", { reason: "invalid YAML: duplicate field `name`" }], ["trip-check", undefined]]);
+    // The retry's runtime, on the same versions, lists both: it runs, and the mark goes.
+    await expect(executor.run(job("request-one"), assignment("assignment-a", 1), new AbortController().signal)).resolves.toMatchObject({ status: "completed" });
+    expect(await marks()).toEqual([["meal-plan", undefined], ["trip-check", undefined]]);
   } finally { await executor.close(); }
 });
 

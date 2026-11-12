@@ -21,6 +21,18 @@ export async function importSkill(server: ConsoleServer, folder: string): Promis
   return (await post<{ id: string }>(server, "/api/skills/import", { folder, confirmed: preview.fingerprint })).id;
 }
 
+/** The fixture Coordinator's decision to dispatch a request to `agentId`. */
+export const dispatchTo = (agentId: string, summary: string) => ({ kind: "dispatch", agentId, requestId: null, summary, message: "" });
+/**
+ * A text message in the dispatch group oc_alpha (银河护卫队), received by Sam's application, with the fixture Coordinator's decision
+ * for it; `extra` adds fixture inputs for the turns it starts.
+ */
+export const groupMessage = (server: ConsoleServer, messageId: string, text: string, dispatchDecision: unknown, extra: Record<string, unknown> = {},
+  from = { sender: "ou_owner", pathname: "/api/fixture/inbound" }) => post(server, from.pathname, {
+  event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: from.sender } },
+    message: { message_id: messageId, create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+      content: JSON.stringify({ text }), mentions: [] } }, dispatchDecision, ...extra });
+
 /** Registers an MCP server with the line its confirmation card shows, as setup for journeys that are not about registration, and returns that line. */
 export async function registerMcpServer(server: ConsoleServer, definition: Record<string, unknown>): Promise<string> {
   const { launchLine } = await post<{ launchLine: string }>(server, "/api/mcp/preview", { server: definition });

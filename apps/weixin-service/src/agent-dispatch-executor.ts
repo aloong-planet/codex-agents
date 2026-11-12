@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import path, { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { CodexConversation, CodexTurnModel } from "./codex-conversation.js";
+import type { CodexConversation, CodexTurnModel, SkillListing } from "./codex-conversation.js";
 import { ChannelTurnAdapter, type ConversationTurnToolControl } from "./channel-turn-adapter.js";
 import { DOMAIN_NEUTRAL_REPLY_INSTRUCTIONS, MAIN_REPLY_OUTPUT_SCHEMA, parseMainReply } from "./main-reply-result.js";
 import { AppServerTurnFailure } from "./app-server-turn-driver.js";
@@ -14,22 +14,41 @@ import { COORDINATOR_ID } from "./team-registry.js";
 import { isProfileToolRefusal, type ResolvedAgentProfile } from "./agent-profile.js";
 import type { DynamicToolHost } from "./dynamic-tool-host.js";
 import { type CompactionOutcome, type RuntimeHome, runtimeHomes } from "./runtime-home-compaction.js";
-import type { SkillRef } from "./skill-library.js";
+import type { SkillLibrary, SkillRef } from "./skill-library.js";
 
 export type DispatchRuntime = {
-  agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close">;
+  agent: Pick<CodexConversation, "startOrResume" | "runTurn" | "releaseThread" | "interruptThread" | "close" | "listSkills">;
   cwd: string;
   /** Settles once every App Server process the runtime started has exited. */
   exited?(): Promise<void>;
   /** Runs after the runtime closed, once its processes exited (`exited` true) or the wait for them ran out (false). */
   afterClose?(exited: boolean): void;
   /**
-   * The skills written into the runtime's home at its creation, each with the path of its SKILL.md there. Every turn carries
-   * them: the App Server only lists a skill by name and description, so this is how its model reads the SKILL.md of each skill
-   * its profile selects (agent-dispatch::REQ-016/AC-04). The skills' other files it reads with its own tool (skill-library::REQ-003).
+   * The skills written into the runtime's home at its creation, each with its library version and the real path of its SKILL.md
+   * there. Every turn carries them: the App Server only lists a skill by name and description, so this is how its model reads the
+   * SKILL.md of each skill its profile selects (agent-dispatch::REQ-016/AC-04). The skills' other files it reads with its own tool
+   * (skill-library::REQ-003).
    */
-  skills?: ReadonlyArray<Readonly<{ name: string; path: string }>>;
+  skills?: readonly WrittenSkill[];
 };
+export type WrittenSkill = Readonly<{ ref: SkillRef; name: string; path: string }>;
+/** A written skill the runtime's App Server did not list, with the message it refused the SKILL.md with, when it gave one. */
+export type UnloadedSkill = Readonly<{ ref: SkillRef; name: string; reason?: string }>;
+/**
+ * The written skills that `listing` does not name at the very path they were written to; a turn's skill item would put nothing of
+ * them before the model. The reason is the App Server's message for that path, when it gave one (skill-library::REQ-002).
+ */
+export function unloadedSkills(written: readonly WrittenSkill[], listing: SkillListing): UnloadedSkill[] {
+  const listed = new Set(listing.skills.map(({ path: file }) => file));
+  return written.filter(({ path: file }) => !listed.has(file)).map(({ ref, name, path: file }) => {
+    const reason = listing.errors.find((error) => error.path === file)?.message;
+    return { ref, name, ...(reason === undefined ? {} : { reason }) };
+  });
+}
+/** An Assignment that did not start because its runtime did not load skills its profile selects; `names` are theirs. */
+export class SkillsNotLoaded extends Error {
+  constructor(readonly names: readonly string[]) { super("dispatch_skills_not_loaded"); }
+}
 /** How long a closed runtime's App Server processes may take to exit before its home is left to the next start (agent-dispatch::QR-002). */
 export const DISPATCH_RUNTIME_EXIT_WAIT_MS = 10_000;
 /** The pool close of every dispatch runtime: close it, wait a bounded time for its processes to exit, then run its afterClose. */
@@ -113,6 +132,11 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     /** Where Executor runtime homes are, and how one is compacted to its records (agent-dispatch::QR-002); without it homes are kept whole. */
     homes?: { root: string; compact(home: string, recordedThread: string | undefined): CompactionOutcome };
     report?(code: string): void;
+    /**
+     * Told how each skill written into a runtime fared when the runtime started: listed by its App Server, or not, with the message
+     * it gave for that SKILL.md. The Skill Library keeps this per version (skill-library::REQ-002, US-004).
+     */
+    library?: Pick<SkillLibrary, "recordLoading">;
   }) {
     mkdirSync(dirname(databasePath), { recursive: true, mode: 0o700 });
     this.database = new DatabaseSync(databasePath); chmodSync(databasePath, 0o600);
@@ -187,6 +211,17 @@ export class CodexDispatchExecutor implements DispatchExecutor {
     const threadId = await runtime.agent.startOrResume(previous ? String(previous.thread_id) : undefined, runtime.cwd, []);
     this.database.prepare("INSERT INTO agent_session VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET thread_id = excluded.thread_id").run(scope, threadId);
     if (!eligible()) throw new Error("dispatch_authorization_changed");
+    // A skill the App Server does not list is not loaded: a turn's skill item would put nothing of it before the model. The
+    // Assignment fails before its first turn rather than run without it (skill-library::REQ-002).
+    if (runtime.skills?.length) {
+      const unloaded = unloadedSkills(runtime.skills, await runtime.agent.listSkills(runtime.cwd));
+      for (const { ref } of runtime.skills) {
+        const missing = unloaded.find((skill) => skill.ref === ref);
+        try { this.options.library?.recordLoading(ref, missing ? { loaded: false, ...(missing.reason === undefined ? {} : { reason: missing.reason }) } : { loaded: true }); }
+        catch { this.report("dispatch_skill_listing_unrecorded"); }
+      }
+      if (unloaded.length) throw new SkillsNotLoaded(unloaded.map(({ name }) => name));
+    }
     this.options.prepareThread?.(job, assignment, threadId);
     // The Executor sees its Brief with the triggering message, never the group's discussion (agent-dispatch::REQ-012/AC-03).
     const event = { ...executorEvent(job, assignment), agentId: role.id, dispatchRequestId: job.id, senderAccountId: role.senderAccountId, ...(job.retry ? { dispatchRetry: true } : {}) };

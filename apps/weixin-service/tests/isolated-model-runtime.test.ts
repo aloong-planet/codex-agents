@@ -266,7 +266,8 @@ describe.skipIf(!runsInstalledAppServer)("isolated runtimes on the installed Cod
   }, 60_000);
 
   // The library refuses at import what the App Server would not list, and accepts what it lists: a skill it accepted and the
-  // App Server did not list would reach an Executor and never be read (skill-library, failure modes). These are the shapes
+  // App Server did not list would fail every Assignment of a profile that selects it, when the Executor's runtime starts
+  // (skill-library, failure modes). These are the shapes
   // measured on 2026-11-11; after a Codex upgrade this case says whether the library's two refusals still match.
   it("lists exactly the SKILL.md shapes the Skill Library accepts", async () => {
     const shapes: Array<[folder: string, skillMd: string, listedAs: string | undefined]> = [

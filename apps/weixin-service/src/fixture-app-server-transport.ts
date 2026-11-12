@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppServerMessage, AppServerTransport } from "./codex-app-server-client.js";
 import type { CodexUserInput } from "./codex-conversation.js";
+import { frontMatter } from "./skill-library.js";
 
 export type FixtureModelToolCall = {
   namespace: string;
@@ -43,7 +44,7 @@ export class FixtureAppServerTransport implements AppServerTransport {
     /** Sees each started thread's service name and offered dynamic tool names, so cases can check what a runtime was given. */
     private readonly observeThreadStart?: (start: { threadId: string; serviceName: unknown; dynamicTools: string[] | null }) => void,
     /** A Codex home in which each started thread gets a rollout file named as the App Server names it, so homes compact as in
-     * production. Resuming does not read it. */
+     * production, and whose `skills` folder `skills/list` lists. Resuming does not read it. */
     private readonly rolloutHome?: string,
     /** Sees what each dynamic tool call answered, as the model receives it, so cases can check what a tool gave a runtime's model. */
     private readonly observeToolResult?: (call: { threadId: string; namespace: unknown; tool: unknown; success: boolean; result: unknown }) => void,
@@ -153,6 +154,9 @@ export class FixtureAppServerTransport implements AppServerTransport {
         this.emit({ method: "item/completed", params: { ...identity, item } });
         this.advance(turn);
       });
+    } else if (method === "skills/list") {
+      const cwds = Array.isArray(params.cwds) ? params.cwds.map(String) : [];
+      this.emit({ id, result: { data: cwds.map((cwd) => ({ cwd, ...listHomeSkills(this.rolloutHome) })) } });
     } else if (method === "turn/interrupt") {
       const turn = this.turns.get(String(params.turnId));
       this.emit({ id, result: {} });
@@ -203,6 +207,29 @@ export class FixtureAppServerTransport implements AppServerTransport {
     this.turns.delete(turn.turnId);
     this.emit({ method: "turn/completed", params: { threadId: turn.threadId, turn: { id: turn.turnId, status: "completed" } } });
   }
+}
+
+/**
+ * The skills of a Codex home's `skills` folder, one per folder with a SKILL.md, each by the real path of that file, as the App
+ * Server lists them. A SKILL.md whose front matter repeats a key is refused with the message the installed App Server gives that
+ * shape; no other refusal is modelled.
+ */
+function listHomeSkills(codexHome: string | undefined): { skills: unknown[]; errors: unknown[] } {
+  const root = codexHome === undefined ? undefined : path.join(codexHome, "skills");
+  const skills: unknown[] = [], errors: unknown[] = [];
+  if (root === undefined || !fs.existsSync(root)) return { skills, errors };
+  for (const folder of fs.readdirSync(root).sort()) {
+    const file = path.join(root, folder, "SKILL.md");
+    if (!fs.existsSync(file)) continue;
+    const real = fs.realpathSync(file), text = fs.readFileSync(file, "utf8");
+    const lines = text.split(/\r?\n/u), end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+    const keys = lines.slice(1, Math.max(end, 1)).flatMap((line) => /^([^\s:#][^:]*):/u.exec(line)?.[1] ?? []);
+    const repeated = keys.find((key, index) => keys.indexOf(key) !== index);
+    if (repeated !== undefined) { errors.push({ path: real, message: `invalid YAML: duplicate field \`${repeated}\`` }); continue; }
+    const { name = "", description = "" } = frontMatter(text);
+    skills.push({ name, description, path: real, scope: "user", enabled: true, pluginId: null });
+  }
+  return { skills, errors };
 }
 
 function dynamicToolNames(value: unknown): string[] | null {

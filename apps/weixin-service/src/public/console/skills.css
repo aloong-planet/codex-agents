@@ -8,5 +8,8 @@
 .asl-code.asl-wrap{max-width:none;white-space:normal;overflow-wrap:anywhere}
 .asl-error{padding:9px 10px;border:1px solid var(--acv-error);border-radius:7px;font-size:11px;line-height:1.7;color:var(--acv-error);margin-top:10px}
 .asl-error .asl-code{color:inherit}
+/* A skill Codex did not load: its badge under the name and description, and Codex's message in the drawer's error box. */
+.asl-refused{display:block;margin-top:4px}
+.asl-error code{font:10px/1.6 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}
 .asl-preview{margin-top:12px}
 .asl-flush{margin:0}

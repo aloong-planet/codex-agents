@@ -7,6 +7,7 @@ Can the owner maintain the console's Skill Library clearly? Skills enter the lib
 - what an import will copy;
 - when the source folder has changed and needs importing again;
 - which profiles use each skill;
+- which skill Codex did not load when an Executor started, and why;
 - why a skill in use cannot be deleted.
 
 Skills, folders, files, import times and usages are synthetic. The page reads no local files and saves nothing.
@@ -33,7 +34,7 @@ Skills, folders, files, import times and usages are synthetic. The page reads no
 The owner chose a table with an overlay drawer.
 
 - **Table.** One row per imported skill, with these columns:
-  - name with description;
+  - name with description; under them, a skill Codex did not load has the error-colored badge 「Codex 未加载」. No column is added for it, so the rows of skills that loaded, or that no Executor has used yet, look as before;
   - source folder;
   - file count, noting scripts;
   - import time;
@@ -47,7 +48,7 @@ The owner chose a table with an overlay drawer.
 
 The owner enters the folder path and reads the folder. The result is one of:
 
-- **Importable.** The name and description from SKILL.md, every file to be copied with scripts marked, and a confirmation card. The card says the files are copied, so later edits need a new import.
+- **Importable.** The name and description from SKILL.md, every file to be copied with scripts marked, and a confirmation card. The card says the files are copied, so later edits need a new import, and that an Executor reads only SKILL.md.
 - **Missing SKILL.md.** An error asking for the skill's root folder.
 - **Duplicate name.** An error pointing to re-import from the existing skill's details.
 - **Symbolic links.** An error listing the links: they may point outside the folder, so the folder cannot be imported until they are replaced by real files.
@@ -56,6 +57,7 @@ The folder tip says that file count and size are not limited and binary files ar
 
 ### Skill drawer
 
+0. **Codex 加载.** Only for a skill Codex did not load: an error box with Codex's reason in code style, or that Codex gave none, followed by what this means for the profiles that select it and that the fix is to edit SKILL.md and re-import. The sample 餐单规划 has a reason, and 视觉方案 has none.
 1. **Source.** The description from SKILL.md, the source folder and the imported files. Content cannot be edited on the page.
 2. **Comparison with the source folder.**
    - When files have changed, "重新导入" shows a confirmation card listing them. For a skill in use, the card says that new requests use the new content and requests in progress keep the old content.
@@ -72,6 +74,7 @@ The console shell, buttons, inputs, badges, form sections, confirmation cards, c
 
 - **Read result.** After a folder is read in the import drawer, the floating `Demo ·` bar switches the read result: importable, missing SKILL.md, duplicate name, or symbolic links. In the product the folder's contents decide this, and there is no such control. The bar is not part of the design and must not be implemented.
 - **本机登录.** 已授权 / 未登录 / 链接已失效; in the product, the browser's authorization decides it.
+- **Codex 加载记录.** 有未加载记录 / 之后已加载. In the product, the skills Codex lists when an Executor starts decide it: a selected skill it does not list is recorded, and a later Executor's runtime that lists the same version clears the record. There is no such control. A re-import also leaves the new version without a record.
 - **Visual-only actions.** Import, re-import, re-check and delete give visual feedback only. A refresh restores the mock data.
 
 ## Uncovered dimensions

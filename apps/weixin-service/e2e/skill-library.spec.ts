@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { expect, type Page } from "@playwright/test";
 
-import { type ConsoleServer, importSkill, post, read } from "./console-api.js";
+import { type ConsoleServer, dispatchTo, groupMessage, importSkill, post, read } from "./console-api.js";
 import { test } from "./fixtures.js";
 
 // Skill 管理 (docs/specs/skill-library.md) in a real browser, against the fixture service with Feishu dispatch and real
@@ -12,6 +12,10 @@ import { test } from "./fixtures.js";
 // running service by tests/skill-library.integration.test.ts; these journeys check that the page, the API and the library are
 // wired together, and that the page words each state as the owner confirmed it.
 // The profile's skill checkboxes belong to the team page and are driven in team-management.spec.ts.
+// Gap: the details' no-reason sentence for a skill Codex did not load (skill-library::US-004/AC-02, 「…也没有给出原因。」) is not
+// driven. The fixture App Server leaves a skill out only with a message, because a real App Server leaving one out without any
+// message has not been seen; the API's `refused: {}` for that case is covered in tests/skill-library.test.ts. To be added once such
+// a shape is measured on the installed App Server: model it in the fixture App Server and drive the page here.
 const SAM_APP = "cli_0123456789abcdef";
 const LONG = { timeout: 15_000 };
 // Feishu dispatch with the three seeded teams, so that a profile can select a skill.
@@ -233,6 +237,37 @@ test("shows a skill's source, files and the profiles that use it, keeps a skill 
   await expect(drawer(page)).toBeHidden();
   await expect(page.locator("#asl-rows .acv5-name")).toHaveText([/^trip-check/]);
   expect(fs.readFileSync(path.join(spareSource, "SKILL.md"), "utf8")).toBe(skillMd("meal-plan", "按预算安排菜单"));
+});
+
+// skill-library::US-004: a request whose Executor runtime did not load a selected skill leaves that skill marked on the page, with
+// Codex's reason. The fixture App Server refuses a SKILL.md that repeats a front matter key, with the installed App Server's
+// message; the key here carries markup, which the page shows as text (agent-console::REQ-005/AC-04).
+test("marks a skill Codex did not load when an Executor started, and says why in its details", async ({ page, fixtureServer }, testInfo) => {
+  const KEY = '<i data-markup="reason">tone</i>';
+  const trip = await importSkill(fixtureServer, folder("trip-check", "逐段核对站名与换乘"));
+  const meal = await importSkill(fixtureServer, folder("meal-plan", "按预算安排菜单", {
+    "SKILL.md": `---\nname: meal-plan\ndescription: 按预算安排菜单\n${KEY}: plain\n${KEY}: plain\n---\n\n# meal-plan\n\nbody-v1\n` }));
+  await billSelects(fixtureServer, [trip, meal]);
+  await groupMessage(fixtureServer, "om_skill_refused_e2e", "请帮我规划周末一日行程", dispatchTo("bill", "规划周末一日行程"));
+  await expect.poll(async () => (await read<{ agentDispatch?: { jobs: Array<{ status: string }> } }>(fixtureServer, "/api/state")).agentDispatch?.jobs.at(-1)?.status, LONG).toBe("failed");
+  await page.goto("/console/skills");
+
+  await expect(cells(page, "meal-plan").first()).toHaveText("meal-plan按预算安排菜单Codex 未加载");
+  await expect(cells(page, "trip-check").first()).toHaveText("trip-check逐段核对站名与换乘");
+  const badge = row(page, "meal-plan").locator(".asl-refused");
+  expect(await badge.evaluate((element) => [getComputedStyle(element).color, getComputedStyle(element).backgroundColor])).toEqual(["rgb(178, 58, 49)", "rgb(251, 230, 227)"]);
+  await testInfo.attach("refused-table", { body: await page.screenshot(), contentType: "image/png" });
+
+  await page.getByRole("button", { name: /^meal-plan/ }).click();
+  const sections = drawer(page).locator(".acf-section h3");
+  await expect(sections.first()).toHaveText("Codex 加载");
+  await expect(drawer(page).locator(".acf-section").first().locator(".asl-error")).toHaveText(
+    `执行者启动时，Codex 没有加载这个 skill：invalid YAML: duplicate field \`${KEY}\`。选了它的能力档，执行者会在开始前失败；请在来源文件夹里修改 SKILL.md 后重新导入。`);
+  await expect(page.locator("[data-markup]")).toHaveCount(0);
+  await testInfo.attach("refused-details", { body: await page.screenshot(), contentType: "image/png" });
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: /^trip-check/ }).click();
+  await expect(sections.first()).toHaveText("来源");
 });
 
 // agent-console::REQ-005/AC-04: a skill's name and description, its file names and a link's target are supplied by the folder.

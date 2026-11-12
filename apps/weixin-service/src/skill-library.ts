@@ -23,9 +23,14 @@ export type SkillFileChange = Readonly<{ path: string; change: "changed" | "adde
  */
 export type SourceState = Readonly<{ state: "same" } | { state: "changed"; files: readonly SkillFileChange[]; fingerprint: string } | { state: "missing" } | { state: "unreadable" }>;
 export type SkillActor = Readonly<{ browser?: ConsoleBrowser }>;
-/** A skill as the console's table and details show it (skill-library::US-002, US-003). It carries no file content. */
+/**
+ * A skill as the console's table and details show it (skill-library::US-002, US-003). It carries no file content. `refused` is
+ * there when an Executor's runtime did not load the current version, with Codex's message when it gave one (skill-library::REQ-002).
+ */
 export type SkillView = Readonly<{ id: string; name: string; description: string; source: string; importedAt: string;
-  files: ReadonlyArray<Readonly<{ path: string; script: boolean }>>; state: SourceState; usedBy: readonly SkillUse[] }>;
+  files: ReadonlyArray<Readonly<{ path: string; script: boolean }>>; state: SourceState; usedBy: readonly SkillUse[]; refused?: SkillLoadRefusal }>;
+/** That a runtime's App Server did not list a version when the runtime started, and its message for the SKILL.md, if any. */
+export type SkillLoadRefusal = Readonly<{ reason?: string }>;
 
 /**
  * Why the library refuses: `folder`, the path is missing, not a folder, not absolute or unreadable; `skill_md`, no SKILL.md
@@ -82,6 +87,8 @@ const NAME_LIMIT = 64;
  */
 const SOURCE_OPEN = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
 const MANIFEST = "manifest.json";
+/** Beside a version's copy and manifest: that the latest runtime to start with the version did not load it. */
+const REFUSED = "codex-refused.json";
 const DELETED = "deleted";
 const SCRIPT_EXTENSIONS = new Set([".sh", ".bash", ".zsh", ".fish", ".command", ".py", ".rb", ".pl", ".php", ".js", ".mjs", ".cjs", ".ts", ".ps1", ".bat", ".cmd"]);
 
@@ -100,6 +107,8 @@ export class SkillLibrary {
   /** Every stored version by skill, and the skills the owner deleted whose versions requests may still need. */
   private readonly versions = new Map<string, Map<number, StoredSkill>>();
   private readonly deleted = new Set<string>();
+  /** The versions (`skillKey`) the latest runtime to start with them did not load. */
+  private readonly refusals = new Map<string, SkillLoadRefusal>();
 
   constructor(private readonly options: SkillLibraryOptions) {
     this.directory = options.directory;
@@ -118,7 +127,12 @@ export class SkillLibrary {
         if (!/^[1-9][0-9]*$/u.test(version)) continue;
         // A version whose manifest cannot be read is not offered: whoever needs it is refused rather than given other content.
         try { stored.set(Number(version), JSON.parse(fs.readFileSync(path.join(location, version, MANIFEST), "utf8")) as StoredSkill); }
-        catch { process.stderr.write(`skill_library_version_unreadable: ${entry.name}@${version}\n`); }
+        catch { process.stderr.write(`skill_library_version_unreadable: ${entry.name}@${version}\n`); continue; }
+        // A record that cannot be read is dropped: the next runtime with this version records it again.
+        try {
+          const { reason } = JSON.parse(fs.readFileSync(path.join(location, version, REFUSED), "utf8")) as { reason?: unknown };
+          this.refusals.set(skillKey({ id: entry.name, version: Number(version) }), typeof reason === "string" ? { reason } : {});
+        } catch { /* No record. */ }
       }
       if (!stored.size) {
         // An import that stopped between creating the skill's directory and moving its first version in leaves it empty.
@@ -140,7 +154,33 @@ export class SkillLibrary {
   async view(): Promise<SkillView[]> {
     return Promise.all(this.list().map(async ({ id, name, description, source, importedAt, files }) => ({ id, name, description, source,
       importedAt: new Date(importedAt).toISOString(), files: files.map(({ path: file, script }) => ({ path: file, script })),
-      state: await this.compare(id), usedBy: this.options.usedBy?.(id) ?? [] })));
+      state: await this.compare(id), usedBy: this.options.usedBy?.(id) ?? [], ...this.refusalOf(id) })));
+  }
+
+  /**
+   * Records how a version fared when an Executor's runtime started with it: listed by its App Server, or not, with the message it
+   * gave for that SKILL.md. The latest outcome stands, so a runtime that lists the version clears an earlier refusal; a new
+   * version starts with none (skill-library::REQ-002). A version no longer stored is not recorded.
+   */
+  recordLoading(ref: SkillRef, outcome: Readonly<{ loaded: true } | { loaded: false; reason?: string }>): void {
+    if (!this.version(ref)) return;
+    const key = skillKey(ref), file = path.join(this.directory, ref.id, String(ref.version), REFUSED);
+    if (outcome.loaded) {
+      if (!this.refusals.delete(key)) return;
+      fs.rmSync(file, { force: true });
+      return;
+    }
+    const refusal: SkillLoadRefusal = outcome.reason === undefined ? {} : { reason: outcome.reason };
+    const staged = `${file}.${randomUUID()}.tmp`;
+    fs.writeFileSync(staged, JSON.stringify(refusal), { mode: 0o600 });
+    fs.renameSync(staged, file);
+    this.refusals.set(key, refusal);
+  }
+
+  private refusalOf(id: string): { refused?: SkillLoadRefusal } {
+    const current = this.latest(id);
+    const refusal = current && this.refusals.get(skillKey(current));
+    return refusal ? { refused: refusal } : {};
   }
 
   /** The current version of a skill in the library; undefined for an unknown or deleted one. */
@@ -391,6 +431,7 @@ export class SkillLibrary {
   private drop(ref: SkillRef): void {
     const stored = this.versions.get(ref.id);
     if (!stored?.delete(ref.version)) return;
+    this.refusals.delete(skillKey(ref));
     const location = path.join(this.directory, ref.id);
     if (stored.size) { fs.rmSync(path.join(location, String(ref.version)), { recursive: true, force: true }); return; }
     this.versions.delete(ref.id);

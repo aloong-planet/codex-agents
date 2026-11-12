@@ -34,6 +34,11 @@ export type CodexUserInput =
   | { type: "localImage"; path: string }
   /** A skill of the runtime's own home: the App Server puts its SKILL.md into the turn when `path` is one it lists. */
   | { type: "skill"; name: string; path: string };
+/**
+ * The skills an App Server lists for a workspace, each by the real path of its SKILL.md, and each SKILL.md it refused, by that
+ * path with its message (such as "invalid YAML: duplicate field `name`").
+ */
+export type SkillListing = Readonly<{ skills: ReadonlyArray<Readonly<{ name: string; path: string }>>; errors: ReadonlyArray<Readonly<{ path: string; message: string }>> }>;
 
 export interface TurnPermissionGuard {
   request(params: PermissionRequest): Promise<Record<string, unknown>>;
@@ -291,6 +296,33 @@ export class CodexConversation {
       cursor = typeof result?.nextCursor === "string" && result.nextCursor ? result.nextCursor : undefined;
     } while (cursor);
     return models;
+  }
+
+  /** The skills the App Server finds for `cwd` now, read from disk again rather than from its cache. */
+  listSkills(cwd: string): Promise<SkillListing> {
+    if (this.closing) return Promise.reject(new Error("Codex App Server 正在关闭"));
+    const operation = this.loadSkills(cwd);
+    this.sessions.add(operation);
+    void operation.then(() => this.sessions.delete(operation), () => this.sessions.delete(operation));
+    return operation;
+  }
+
+  private async loadSkills(cwd: string): Promise<SkillListing> {
+    const generation = this.generation;
+    await this.ensureTransport();
+    if (generation !== this.generation) throw new Error("Codex App Server 已关闭");
+    const data = asRecord(await this.request("skills/list", { cwds: [cwd], forceReload: true }))?.data;
+    if (!Array.isArray(data)) throw new Error("Codex App Server skill 目录格式无效");
+    const skills: Array<{ name: string; path: string }> = [], errors: Array<{ path: string; message: string }> = [];
+    for (const entry of data.map(asRecord)) {
+      for (const skill of Array.isArray(entry?.skills) ? entry.skills.map(asRecord) : []) {
+        if (typeof skill?.name === "string" && typeof skill.path === "string") skills.push({ name: skill.name, path: skill.path });
+      }
+      for (const error of Array.isArray(entry?.errors) ? entry.errors.map(asRecord) : []) {
+        if (typeof error?.path === "string" && typeof error.message === "string") errors.push({ path: error.path, message: error.message });
+      }
+    }
+    return { skills, errors };
   }
 
   async reply(threadId: string, text: string | CodexUserInput[]): Promise<string>;

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { AgentDispatch, boundedPrerequisites, failureCause, pendingChoiceResult, requestOutcome, teamInvolvement, type AssignmentFailure } from "../src/agent-dispatch.js";
-import { CodexDispatchExecutor, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
+import { CodexDispatchExecutor, SkillsNotLoaded, type DispatchRuntime } from "../src/agent-dispatch-executor.js";
 import { CodexTeamLeader, type TeamLeader } from "../src/agent-dispatch-leader.js";
 import type { CrossTeamInput, DispatchAgent, DispatchAssignment, DispatchClassificationInput, DispatchClassifier, DispatchDelivery, DispatchExecutionResult, DispatchExecutor, DispatchJob, DispatchPendingResult } from "../src/agent-dispatch-types.js";
 import { FixtureTeamLeader } from "../src/fixture-team-leader.js";
@@ -537,6 +537,8 @@ it.each([
   ["a changed authorization", { kind: "error", error: new Error("dispatch_authorization_changed") }, "权限或可用上下文发生变化"],
   ["a result report failing its schema", { kind: "error", error: new Error("main_reply_invalid_schema") }, "执行者未返回有效的结果报告"],
   ["an invalid result record", { kind: "error", error: new Error("main_reply_record_invalid") }, "执行者未返回有效的结果报告"],
+  ["a skill its runtime did not load", { kind: "error", error: new SkillsNotLoaded(["商品文案"]) }, "Codex 没有加载技能「商品文案」"],
+  ["several skills its runtime did not load", { kind: "error", error: new SkillsNotLoaded(["商品文案", "竞品定价"]) }, "Codex 没有加载技能「商品文案」「竞品定价」"],
   ["a stop of the service", { kind: "shutdown" }, "服务中断"],
   ["another error", { kind: "error", error: new Error("executor_connection_closed") }, "执行连接中断或处理出错"],
 ] satisfies Array<[string, AssignmentFailure, string]>)("names the host-known cause of %s", (_case, failure, cause) => {
