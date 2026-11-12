@@ -13,7 +13,7 @@ A second rule made the same loss reach posts. `deliverNotice` records any post a
 
 ## Why the existing checks did not catch it
 
-- The restart cases of the dispatch all stop the service the way a crash does. Real-main cases kill the process (`running.crash()`), and engine cases abandon an instance without closing it. Their outcome is the requeue at start, which a graceful stop never reaches.
+- The restart cases of the dispatch either killed the process (`running.crash()` in real-main cases) or closed the service while requests ran, waited or posted. A crash leaves a message in classification to the requeue at start, which a graceful stop never reaches, and no case stopped the service gracefully during a classification turn apart from the one engine case below.
 - The one engine case with a graceful stop during a classification, "does not classify a message again for a team that left when, meanwhile, the service began to stop" (`tests/agent-dispatch.test.ts` at e4306c6, lines 2711–2730), asserted only what that instance did: no second classification and no post. No later start checked whether the message was still waiting.
 - Real main had no way to hold a classification turn: the fixture classifier answered at once, so no real-main case could stop the service during one.
 
