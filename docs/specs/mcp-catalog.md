@@ -80,7 +80,7 @@ Changing a server's command, arguments, URL or transport shows a confirmation ca
 
 ### mcp-catalog::CON-001 Capability beyond module permissions only through owner grants (direct acceptance)
 
-Applies to: every agent. Capability beyond module permissions reaches an agent only through a server that the owner registered with confirmation (mcp-catalog::US-001/AC-06) and attached to that agent's profile with a second confirmation ([team-management::US-003/AC-03](team-management.md)).
+Applies to: every agent. Capability beyond module permissions reaches an agent only through a server that the owner registered with confirmation (mcp-catalog::US-001/AC-06) and attached to that agent's profile with a second confirmation ([team-management::US-003/AC-03](team-management.md)), apart from the read-only tool for a selected skill's own files ([skill-library::REQ-003](skill-library.md)).
 
 ## Failure modes and boundaries
 

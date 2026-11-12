@@ -84,9 +84,33 @@ Memory scopes:
   - Resident memory: 54–55 MiB after `initialize`; 67.3–80.6 MiB idle with a thread; 86.9–100.5 MiB after one turn; a peak of at most 120.3 MiB over those 20 starts, and at most 95.9 MiB with the candidate configuration. Ten turns of 64 KiB input each on one thread reached 100.2 MiB.
   - Not measured: memory during real model turns with tool calls.
 - Evidence (a) re-run with the fix, 2026-11-08, same executable and fake endpoint: each runtime kind that `main.ts` creates (Feishu group, dispatch coordinator, specialist, pending router, group memory curator, Penny) and group research through `codex exec` listed and injected only the skills in its own home. A planted host skill, a symbolic-linked one, one in the host's Codex home and the bundled skills were neither listed nor injected, also when named with `$` or given as a skill item, and the copied login still reached the endpoint. `pnpm --filter @aloong-planet/codex-weixin-service test:isolated-runtime` (`apps/weixin-service/tests/isolated-model-runtime.test.ts`) repeats the check.
-  - 2026-11-11: writing a profile's skills into the home makes the App Server list them by name and description, and it puts a SKILL.md into a turn only when the turn names or carries that skill, as the measurement above found. An Executor has no tool that opens the file, so the host puts every skill of the profile on each Executor turn as a skill input item ([skill library](../specs/skill-library.md), Implementation Decisions: runtime home). The same test file shows it for a runtime created with a profile's skills. Ticket 51 (2026-11-12) later gave an Executor a tool that reads its skills' files from the Skill Library's store, not from its home; the per-turn item stays.
+  - 2026-11-11: writing a profile's skills into the home makes the App Server list them by name and description, and it puts a SKILL.md into a turn only when the turn names or carries that skill, as the measurement above found. An Executor has no tool that opens the file, so the host puts every skill of the profile on each Executor turn as a skill input item ([skill library](../specs/skill-library.md), Implementation Decisions: runtime home). The same test file shows it for a runtime created with a profile's skills.
 - Pool limits, an owner decision on 2026-11-08 made through a delegate, adopted as the defaults of agent-dispatch::QR-001:
   - 256 MiB is planned per running runtime, about twice the measured peak, to cover real model turns;
   - the pool gets 1/8 of the 32 GiB host, 4 GiB, which allows 16 running runtimes, idle or busy. That is twice the widest request allowed without confirmation (agent-dispatch::REQ-011/AC-02): a Coordinator, 2 Team Leaders and 5 Executors;
     - 2026-11-08: the over-limit confirmation was removed (agent-dispatch::REQ-011/AC-02). A request now runs at most 10 Executors at once; with the Coordinator, and Team Leaders that hold a slot only for their own turns, it stays within 16, and work beyond the pool queues (agent-dispatch::QR-001/AC-02).
   - a runtime is released after 5 idle minutes, because a restart with resume costs under 0.25 s while an idle runtime keeps about 80 MiB and a pool slot.
+
+## Skill file amendment — Accepted (2026-11-12)
+
+Copied skill files never took effect, because an Executor had no tool that opens a file (the 2026-11-11 entry under Sources). Agent-teams ticket 51 gives an Executor whose profile selects a skill one read-only tool, `read_skill_file` ([skill-library::REQ-003](../specs/skill-library.md)). The tool lists and reads the files of the selected skills, in the versions of the request's snapshot. It reads them from the Skill Library's store, not from the runtime home. The skill item on each Executor turn stays.
+
+This amends two statements above. Each now holds apart from the read-only tool for a selected skill's own files (skill-library::REQ-003):
+- Decision, "Capability beyond module permissions arises only when the owner configures an MCP server in a profile."
+- Negative consequence, that an MCP server in a profile is a new owner grant outside module permissions.
+
+The exception is safe because it reaches nothing a grant governs:
+- The tool reads only the files of the skills the owner selected for the profile, in the versions the request was admitted with. It cannot write them or run them.
+- It reads them from the Skill Library's store, in the service's state directory, which no file grant reaches ([ADR-0029](0029-keep-service-state-outside-every-file-grant.md)).
+- A path the version's manifest does not list, a link and bytes that differ from the import are refused.
+
+Alternatives:
+- Leave the files unreadable, as before. Rejected by the ticket, because copied references, templates and examples never took effect.
+- Reach the files through a file grant (not recorded). No grant reaches the store under ADR-0029, and a grant would not be bound to the request's versions.
+
+Consequences:
+- Positive: a skill's references, templates and examples now take effect.
+- Negative: selecting a skill on a profile now also offers that profile's Executors a tool, which changes the profile's tool contract and so its session key.
+- Neutral: an Executor whose profile selects no skill is offered nothing new.
+
+Sources: agent-teams ticket 51 and its dispatcher decisions of 2026-11-12, made on the owner's behalf; `apps/weixin-service/src/skill-file-tool.ts` and `SkillLibrary.readFile` in `apps/weixin-service/src/skill-library.ts`.
