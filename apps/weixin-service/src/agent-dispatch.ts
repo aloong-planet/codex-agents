@@ -611,7 +611,7 @@ export class AgentDispatch {
               await this.closeChoices(job);
             } else {
               // A waiting request has no worker and nothing starts one, so nothing else changes it while its choice is closed. The choice
-              // is closed before the cancel is recorded: a stop between the two leaves a request that takes the cancel again, not a
+              // is closed before the cancel is recorded: a crash between the two leaves a request that takes the cancel again, not a
               // cancelled one whose choice is open. Any other request here can be started at any moment, so its cancel is recorded first.
               const waiting = job.status === "waiting";
               if (waiting) await this.closeChoices(job);
@@ -631,7 +631,7 @@ export class AgentDispatch {
             } else {
               // A request waiting for a choice: the supplement supersedes the waiting Assignments and its Team Leader decides what it affects.
               // Their choices are closed first, so that no answer to one resumes work the supplement replaced; like a waiting request's
-              // cancel, nothing else changes the request meanwhile, and a stop in between leaves the supplement to be taken in again.
+              // cancel, nothing else changes the request meanwhile, and a crash in between leaves the supplement to be taken in again.
               await this.closeChoices(job);
               this.transaction(() => {
                 // The superseded runs stay with the request: a choice that could not be closed is still open, and its Assignment
