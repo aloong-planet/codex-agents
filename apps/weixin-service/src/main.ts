@@ -99,6 +99,7 @@ import { ConsoleOverview, displayId } from "./console-overview.js";
 import { createConsoleRoutes } from "./console-routes.js";
 import { McpCatalog } from "./mcp-catalog.js";
 import { McpProxyToolHost } from "./mcp-proxy-tools.js";
+import { SkillFileToolHost } from "./skill-file-tool.js";
 import { skillKey, SkillLibrary } from "./skill-library.js";
 import { NewsArchive } from "./news-archive.js";
 import { NativeWriteGuard } from "./native-write-guard.js";
@@ -813,6 +814,9 @@ const fixtureHomeSkills = (codexHome: string) => {
 const fixtureCoordinationRequests: typeof fixtureModelRequests = [];
 const fixtureThreadStarts: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }> = [];
 const observeThreadStart = (start: (typeof fixtureThreadStarts)[number]) => { fixtureThreadStarts.push(start); if (fixtureThreadStarts.length > 40) fixtureThreadStarts.shift(); };
+// What each dynamic tool call of an isolated runtime answered its model, in fixture mode only.
+const fixtureToolResults: Array<{ threadId: string; namespace: unknown; tool: unknown; success: boolean; result: unknown }> = [];
+const observeToolResult = (call: (typeof fixtureToolResults)[number]) => { fixtureToolResults.push(call); if (fixtureToolResults.length > 40) fixtureToolResults.shift(); };
 const fixtureThreadQueues = new Map<string, FixtureModelToolCallQueue>();
 const codexAgent: CodexAgent = new CodexConversation(
   () => fixtureMode && !fixtureLiveMainModel
@@ -857,7 +861,7 @@ const isolatedConversation = (kind: IsolatedConversationKind, placement: { insta
           takeFixtureModelCompletion: (threadId) => fixtureThreadQueues.get(threadId!)?.takeFixtureModelCompletion?.() }, undefined, (request) => {
           // An Executor's request also records the skills its runtime home holds at that turn, as its App Server would load them.
           requests.push(kind === "dispatchAgent" ? { ...request, skills: fixtureHomeSkills(runtime.env.CODEX_HOME!) } : request); if (requests.length > 20) requests.shift();
-        }, undefined, observeThreadStart, kind === "dispatchAgent" || kind === "dispatchLeader" ? runtime.env.CODEX_HOME : undefined);
+        }, undefined, observeThreadStart, kind === "dispatchAgent" || kind === "dispatchLeader" ? runtime.env.CODEX_HOME : undefined, observeToolResult);
       }
       const transport = spawnIsolatedAppServer(codexExecutable, runtime);
       exits.push(transport.exited);
@@ -1109,7 +1113,9 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
     // admitted and still attaches; every call is checked again, and a refused one is audited (agent-dispatch::REQ-016/AC-03, REQ-017).
     const granted = new McpProxyToolHost(tools, mcpCatalog, { snapshot: resolved.mcpServers, current: () => currentProfile(assignment.teamId, assignment.profileId)?.mcpServers,
       agent: { team: assignment.teamId, profile: assignment.profileId, executor: assignment.executor, request: job.id }, audit: consoleAudit });
-    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: granted, skills: resolved.skills };
+    // Beside both, an Executor whose profile selects skills reads their files, in the request's versions, read-only (skill-library::REQ-003).
+    const offered = new SkillFileToolHost(granted, skillLibrary, resolved.skills, (code) => process.stderr.write(`${code}\n`));
+    return { instructions: resolved.instructions, memoryScope: resolved.memoryScope, tools: offered, skills: resolved.skills };
   };
   // One pool bounds the coordinator's and the specialists' runtimes together (agent-dispatch::QR-001).
   const runtimes = new RuntimePool<DispatchRuntime>({ limit: DISPATCH_RUNTIME_LIMIT, idleMs: DISPATCH_RUNTIME_IDLE_MS, close: closeDispatchRuntime });
@@ -1439,7 +1445,7 @@ if (pennyConfigured) {
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
   fixturePrivateTurns: structuredClone(fixturePrivateTurns ?? []), fixtureClassifications: fixtureFeishu?.getClassifications() ?? [],
-  fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
+  fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureToolResults: structuredClone(fixtureToolResults), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
   ...(fixtureDispatchTurns ? { fixtureDispatchTurns: fixtureDispatchTurns() } : {}),
   ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
   agentFixtureOutboxes: Object.fromEntries([...dispatchApplications.values()].map(({ agentId, transport }) =>

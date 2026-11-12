@@ -88,7 +88,7 @@ test("imports a folder typed in the import drawer only from its confirmation car
   await expect(preview.locator(".asl-desc")).toHaveText("逐段核对站名、换乘与开放时间");
   await expect(preview.locator(".acf-sub")).toHaveText("将导入 3 个文件其中 1 个是脚本文件");
   await expect(preview.locator(".acv5-list li")).toHaveText(["SKILL.md", "references/rules.md", "scripts/check.py脚本"]);
-  await expect(preview.locator(".acf-grant")).toHaveText("确认导入 这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。执行者只读取 SKILL.md；其他文件会一并复制，但执行者目前读不到，脚本也不会运行。");
+  await expect(preview.locator(".acf-grant")).toHaveText("确认导入 这些文件会复制进本系统的 Skill 库；之后修改来源文件夹，要重新导入才会生效。执行者按 SKILL.md 工作，需要时可以读取其他文件，但不能修改；脚本不会运行。");
   await testInfo.attach("import-confirmation", { body: await page.screenshot(), contentType: "image/png" });
 
   // Closing the card copies nothing.

@@ -25,8 +25,8 @@ export type DispatchRuntime = {
   afterClose?(exited: boolean): void;
   /**
    * The skills written into the runtime's home at its creation, each with the path of its SKILL.md there. Every turn carries
-   * them: the App Server only lists a skill by name and description, and an Executor has no tool that opens the file, so
-   * this is how its model reads the skills its profile selects (agent-dispatch::REQ-016/AC-04).
+   * them: the App Server only lists a skill by name and description, so this is how its model reads the SKILL.md of each skill
+   * its profile selects (agent-dispatch::REQ-016/AC-04). The skills' other files it reads with its own tool (skill-library::REQ-003).
    */
   skills?: ReadonlyArray<Readonly<{ name: string; path: string }>>;
 };
