@@ -46,6 +46,8 @@ export class FixtureAppServerTransport implements AppServerTransport {
     /** A Codex home in which each started thread gets a rollout file named as the App Server names it, so homes compact as in
      * production, and whose `skills` folder `skills/list` lists. Resuming does not read it. */
     private readonly rolloutHome?: string,
+    /** Sees what each dynamic tool call answered, as the model receives it, so cases can check what a tool gave a runtime's model. */
+    private readonly observeToolResult?: (call: { threadId: string; namespace: unknown; tool: unknown; success: boolean; result: unknown }) => void,
   ) {}
   private readonly rollouts = new Map<string, string>();
 
@@ -109,6 +111,8 @@ export class FixtureAppServerTransport implements AppServerTransport {
       // Both domain errors and success:false are observations, not model termination.
       // The explicit model script chooses its next call; the host never retries.
       turn.results.push(parseFixtureToolResult(message.result));
+      this.observeToolResult?.({ threadId: turn.threadId, namespace: item.namespace, tool: item.tool,
+        success: (message.result as { success?: boolean } | undefined)?.success !== false, result: structuredClone(turn.results.at(-1)) });
       this.emit({ method: "item/completed", params: {
         threadId: turn.threadId, turnId: turn.turnId,
         item: { ...item, status: (message.result as { success?: boolean } | undefined)?.success === false ? "failed" : "completed" },

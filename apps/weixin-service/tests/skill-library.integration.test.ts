@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
@@ -36,8 +36,10 @@ async function billSelects(running: Running, skills: string[]) {
     executorProfiles: bill.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, skills })) } });
 }
 const BILL_USE = { teamId: "bill", leader: "Bill", teamName: "生活团队", profile: "能力档 1" };
-const retry = (messageId: string, requestId: string, subject: string) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
-  { modelReply: completedReply(subject) });
+const retry = (messageId: string, requestId: string, subject: string, extra: Record<string, unknown> = {}) => groupMessage(messageId, "重试", { kind: "retry", agentId: null, requestId, summary: "", message: "" },
+  { modelReply: completedReply(subject), ...extra });
+/** The Executor's model reads a file of a skill its profile selects, as a real model calls the tool: with no namespace. */
+const readSkillFile = (skill: string, file: string) => ({ modelToolCalls: [{ namespace: "", tool: "read_skill_file", arguments: { skill, path: file } }] });
 const failedReply = (subject: string) => JSON.stringify({ message: "缺少日期，行程未完成。", results: [{ subject, status: "failed" }] });
 const completedReply = (subject: string) => JSON.stringify({ message: "行程已规划好。", results: [{ subject, status: "completed" }] });
 const skillLines = (state: State, brief: string) => (state.fixtureLeaderRequests ?? []).filter(({ teamId, input }) => teamId === "bill" && input.brief.message === brief)
@@ -65,30 +67,45 @@ it("gives each Executor exactly its profile's skills as its request was admitted
 
     // The owner edits the folder and imports it again while that request can still be retried.
     writeFileSync(join(tripSource, "SKILL.md"), skillMd("trip-check", "逐段核对站名、换乘与开放时间", "body-v2"));
+    writeFileSync(join(tripSource, "references", "rules.md"), "trip-check rules v2\n");
     const changed = (await running.get<SkillsView>("/api/skills")).skills.find(({ id }) => id === trip)!.state;
     expect(changed.state).toBe("changed");
     await running.post(`/api/skills/${trip}/reimport`, { confirmed: changed.fingerprint });
     // The failed request can still be retried, so the version it was admitted with stays stored beside the new one.
     expect(readdirSync(join(directory, "skill-library", trip)).sort()).toEqual(["1", "2"]);
 
-    await running.post("/api/fixture/inbound", retry("om_skill_retry", failed.agentDispatch!.jobs[0]!.id, "规划周末一日行程"));
+    // The retried request's Executor and the next request's each read the skill's reference file; Jack's preset selects no skill.
+    await running.post("/api/fixture/inbound", retry("om_skill_retry", failed.agentDispatch!.jobs[0]!.id, "规划周末一日行程", readSkillFile("trip-check", "references/rules.md")));
     await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
-    await running.post("/api/fixture/inbound", groupMessage("om_skill_second", "再帮我规划周日行程", decision("bill", "规划周日行程"), { modelReply: completedReply("规划周日行程") }));
-    const result = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_second", "再帮我规划周日行程", decision("bill", "规划周日行程"),
+      { modelReply: completedReply("规划周日行程"), ...readSkillFile("trip-check", "references/rules.md") }));
+    await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_jack", "请帮我看一段代码", decision("jack", "看一段代码"),
+      { modelReply: completedReply("看一段代码"), ...readSkillFile("trip-check", "references/rules.md") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[2]?.status === "completed");
     const audit = readFileSync(join(directory, "console-audit.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>)
       .filter(({ event }) => String(event).startsWith("skill_")).map(({ event, skill, version, by }) => ({ event, skill, version, by }));
     console.log(JSON.stringify({ kind: "skill_library_main", commands: ["import trip-check", "import meal-plan", "Bill 能力档 1 selects trip-check", "请帮我规划周末一日行程", "re-import trip-check", "重试", "再帮我规划周日行程"],
       jobs: result.agentDispatch, coordinator: result.fixtureTextOutbox, outboxes: result.agentFixtureOutboxes,
-      executorSkills: result.fixtureModelRequests?.map(({ skills }) => skills), leaderSkillLines: [skillLines(result, "请帮我规划周末一日行程"), skillLines(result, "再帮我规划周日行程")], audit }));
+      executorSkills: result.fixtureModelRequests?.map(({ skills }) => skills), skillFileReads: result.fixtureToolResults, leaderSkillLines: [skillLines(result, "请帮我规划周末一日行程"), skillLines(result, "再帮我规划周日行程")], audit }));
 
-    // Each Executor turn, in order: the first attempt, its retry after the re-import, and the request admitted afterwards.
+    // Each Executor turn, in order: the first attempt, its retry after the re-import, the request admitted afterwards, and Jack's.
     const loaded = (body: string, description: string) => [{ folder: trip, files: ["SKILL.md", "references/rules.md"], skillMd: skillMd("trip-check", description, body) }];
-    expect(result.fixtureModelRequests!.map(({ skills }) => skills)).toEqual([loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v2", "逐段核对站名、换乘与开放时间")]);
-    // Each of those turns carries the skill as an input item that names its SKILL.md in that home: the App Server only lists a
+    expect(result.fixtureModelRequests!.map(({ skills }) => skills)).toEqual([loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v1", "逐段核对站名与换乘"), loaded("body-v2", "逐段核对站名、换乘与开放时间"), []]);
+    // Each of Bill's turns carries the skill as an input item that names its SKILL.md in that home: the App Server only lists a
     // skill, and the item is what puts its text before the Executor's model (agent-dispatch::REQ-016/AC-04).
     const carried = result.fixtureModelRequests!.map(({ input }) => (input as Array<{ type: string; name?: string; path?: string }>).filter(({ type }) => type === "skill"));
-    expect(carried.map((items) => items.map(({ name }) => name))).toEqual([["trip-check"], ["trip-check"], ["trip-check"]]);
-    for (const [item] of carried) expect(item!.path).toMatch(new RegExp(`/group-model-runtimes/dispatch-[0-9a-f]{64}/codex-home/skills/${trip}/SKILL\\.md$`, "u"));
+    expect(carried.map((items) => items.map(({ name }) => name))).toEqual([["trip-check"], ["trip-check"], ["trip-check"], []]);
+    for (const [item] of carried.slice(0, 3)) expect(item!.path).toMatch(new RegExp(`/group-model-runtimes/dispatch-[0-9a-f]{64}/codex-home/skills/${trip}/SKILL\\.md$`, "u"));
+    // Bill's Executors are offered the tool that reads their skills' files, and each read the reference file of its own
+    // request's version: the retry the version it was admitted with, the later request the re-imported one. Jack's Executor,
+    // whose preset selects no skill, is offered no such tool, and its call is refused (skill-library::REQ-003).
+    const offered = (service: string) => result.fixtureThreadStarts!.filter(({ serviceName }) => serviceName === service).map(({ dynamicTools }) => (dynamicTools ?? []).includes("read_skill_file"));
+    // Bill's two requests started a thread each; the retry resumed the first attempt's thread with the tools it was started with.
+    expect(offered("feishu_agent_bill")).toEqual([true, true]);
+    expect(offered("feishu_agent_jack")).toEqual([false]);
+    expect(result.fixtureToolResults!.filter(({ tool }) => tool === "read_skill_file").map(({ success, result: read }) => ({ success, text: (read as { text?: string }).text })))
+      .toEqual([{ success: true, text: "trip-check rules\n" }, { success: true, text: "trip-check rules v2\n" }, { success: false, text: undefined }]);
     // Bill's Team Leader is told what the skill gives its preset, in the version of each request (agent-dispatch::REQ-011/AC-01).
     const first = skillLines(result, "请帮我规划周末一日行程"), second = skillLines(result, "再帮我规划周日行程");
     expect(first.length).toBeGreaterThan(0);
@@ -107,7 +124,7 @@ it("gives each Executor exactly its profile's skills as its request was admitted
 // Assignment before its first turn, naming it, and the library shows it as not loaded with Codex's reason. Two `name:` lines
 // are a shape the library imports and the installed App Server refuses with this very message (measured 2026-11-12).
 type RefusedView = { skills: Array<{ id: string; name: string; refused?: { reason?: string } }> };
-it("fails each Assignment before its first turn when its runtime does not load a selected skill, shows the skill as not loaded, and runs once it is fixed", async () => {
+it("fails each Assignment before its first turn when its runtime does not load a selected skill, so none of its files is read, shows the skill as not loaded, and runs and reads them once it is fixed", async () => {
   const directory = mkdtempSync(join(tmpdir(), "skill-library-refused-")), sources = realpathSync(mkdtempSync(join(tmpdir(), "skill-library-sources-")));
   let running: Running | undefined;
   try {
@@ -121,14 +138,15 @@ it("fails each Assignment before its first turn when its runtime does not load a
 
     // Two Assignments, so the first to fail is posted with its cause while the other is still unfinished.
     const plan = { assignments: [{ profileId: "executor-1", title: "规划周六行程", brief: "周六" }, { profileId: "executor-1", title: "规划周日行程", brief: "周日" }], decisions: [] };
-    await running.post("/api/fixture/inbound", groupMessage("om_skill_refused", "请帮我规划周末两天行程", decision("bill", "规划周末两天行程"), { leaderPlan: plan, modelReply: completedReply("规划行程") }));
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_refused", "请帮我规划周末两天行程", decision("bill", "规划周末两天行程"), { leaderPlan: plan, modelReply: completedReply("规划行程"), ...readSkillFile("meal-plan", "references/rules.md") }));
     const failed = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "failed");
     const posts = failed.agentFixtureOutboxes!.bill!.text.map(({ message }) => message);
     const refusedView = await running.get<RefusedView>("/api/skills");
     console.log(JSON.stringify({ kind: "skill_library_refused", commands: ["import trip-check", "import meal-plan (two name lines)", "Bill 能力档 1 selects both", "请帮我规划周末两天行程"],
       jobs: failed.agentDispatch, posts, executorTurns: failed.fixtureModelRequests?.length ?? 0, skills: refusedView.skills.map(({ name, refused }) => ({ name, refused })) }));
-    // No Executor turn ran.
+    // No Executor turn ran, so the model, scripted to read the refused skill's file, read nothing of it (skill-library::REQ-003).
     expect(failed.fixtureModelRequests ?? []).toEqual([]);
+    expect((failed.fixtureToolResults ?? []).filter(({ tool }) => tool === "read_skill_file")).toEqual([]);
     expect(posts).toContainEqual(expect.stringMatching(/^\S+ \d+（能力档 1）的分工「规划周[六日]行程」未能完成：Codex 没有加载技能「meal-plan」。其余分工继续处理。$/u));
     // The closing turn reads each Assignment's result; without an injected closing the fixture repeats them.
     const closing = failed.fixtureLeaderRequests!.filter(({ phase }) => phase === "close").at(-1)!.input.assignments!;
@@ -141,10 +159,42 @@ it("fails each Assignment before its first turn when its runtime does not load a
     const changed = (await running.get<SkillsView>("/api/skills")).skills.find(({ id }) => id === meal)!.state;
     await running.post(`/api/skills/${meal}/reimport`, { confirmed: changed.fingerprint });
     expect((await running.get<RefusedView>("/api/skills")).skills.map(({ refused }) => refused)).toEqual([undefined, undefined]);
-    await running.post("/api/fixture/inbound", groupMessage("om_skill_fixed", "再帮我规划下周六行程", decision("bill", "规划下周六行程"), { modelReply: completedReply("规划下周六行程") }));
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_fixed", "再帮我规划下周六行程", decision("bill", "规划下周六行程"),
+      { modelReply: completedReply("规划下周六行程"), ...readSkillFile("meal-plan", "references/rules.md") }));
     const done = await running.until((state) => state.agentDispatch?.jobs[1]?.status === "completed");
     expect(done.fixtureModelRequests!.map(({ input }) => (input as Array<{ type: string; name?: string }>).filter(({ type }) => type === "skill").map(({ name }) => name)))
       .toEqual([["trip-check", "meal-plan"]]);
+    // Once loaded, the skill's other files are read as any selected skill's are.
+    expect(done.fixtureToolResults!.filter(({ tool }) => tool === "read_skill_file").map(({ success, result: read }) => ({ success, text: (read as { text?: string }).text })))
+      .toEqual([{ success: true, text: "meal-plan rules\n" }]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
+}, 60000);
+
+// A stored version that no longer holds what was imported, here a folder of it replaced by a link to an outside copy, is changed
+// outside the service: the Executor's read is refused, and the service reports the skill on stderr with neither path nor content
+// (skill-library::REQ-003, failure modes). The runtime is created all the same, because the copy written into its home matches.
+it("refuses an Executor's read of a skill file whose stored folder was replaced by a link, and reports the skill without the path", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "skill-library-main-")), sources = realpathSync(mkdtempSync(join(tmpdir(), "skill-library-sources-")));
+  let running: Running | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    const trip = await importSkill(running, folder(sources, "trip-check", "逐段核对站名与换乘"));
+    await billSelects(running, [trip]);
+    const stored = join(directory, "skill-library", trip, "1", "files", "references"), outside = join(sources, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "rules.md"), "trip-check rules\n");
+    rmSync(stored, { recursive: true });
+    symlinkSync(outside, stored);
+
+    await running.post("/api/fixture/inbound", groupMessage("om_skill_link", "请帮我规划周末一日行程", decision("bill", "规划周末一日行程"),
+      { modelReply: completedReply("规划周末一日行程"), ...readSkillFile("trip-check", "references/rules.md") }));
+    const result = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed");
+    const reads = result.fixtureToolResults!.filter(({ tool }) => tool === "read_skill_file").map(({ success, result: read }) => ({ success, read }));
+    const reported = running.output().split("\n").filter((line) => line.includes("skill_file_integrity_failed"));
+    console.log(JSON.stringify({ kind: "skill_file_integrity_main", commands: ["import trip-check", "Bill 能力档 1 selects trip-check", "replace stored references/ by a link", "请帮我规划周末一日行程"], reads, reported }));
+    expect(reads).toEqual([{ success: false, read: { ok: false, error: { code: "skill_file_unavailable", message: "这个文件现在读不了。", retryable: false } } }]);
+    expect(reported).toEqual([`skill_file_integrity_failed:${trip}`]);
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); rmSync(sources, { recursive: true, force: true }); }
 }, 60000);
 

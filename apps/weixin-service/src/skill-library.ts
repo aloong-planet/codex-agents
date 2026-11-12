@@ -46,6 +46,11 @@ export class SkillRefusal extends Error {
   constructor(readonly refusal: SkillRefusalKind, cause?: unknown) { super(`skill_library_${refusal.kind}`, cause === undefined ? undefined : { cause }); }
 }
 
+/** Why a stored file cannot be read: the version does not list it, or the store no longer holds what was imported. */
+export class SkillFileUnavailable extends Error {
+  constructor(readonly reason: "not_found" | "integrity") { super(`skill_file_${reason}`); }
+}
+
 export type SkillLibraryOptions = Readonly<{
   /** The library's own directory under the service's state directory; no file grant reaches it (ADR-0029). */
   directory: string;
@@ -326,6 +331,50 @@ export class SkillLibrary {
       written.push({ name: skill.name, path: fs.realpathSync(path.join(directory, ref.id, SKILL_MD)) });
     }
     return written;
+  }
+
+  /**
+   * Reads one file of a stored version, as an Executor reads it (skill-library::REQ-003), giving `take` its bytes part by part:
+   * a skill's files have no size limit, so the file is never held whole and the service goes on serving while it is read.
+   * `file` must be a path the version's manifest lists, exactly as listed, so no other path of the store is ever opened. The
+   * file is opened without following a link, the folder it lies in must be the version's own, and the bytes must be those that
+   * were imported. That is known only once the last part was read, so the caller must use nothing `take` got unless this resolves.
+   * Rejects with `SkillFileUnavailable`: `not_found` for a path the version does not list; `integrity` when the store holds
+   * anything else, which only a change made outside the service can cause.
+   */
+  async readFile(ref: SkillRef, file: string, take: (part: Buffer) => void): Promise<void> {
+    const skill = this.version(ref);
+    if (!skill) throw new SkillFileUnavailable("integrity");
+    const listed = skill.files.find(({ path: stored }) => stored === file);
+    if (!listed) throw new SkillFileUnavailable("not_found");
+    const parts = file.split("/");
+    const target = path.join(this.directory, ref.id, String(ref.version), "files", ...parts);
+    let handle: fs.promises.FileHandle;
+    try {
+      // The store's own folder may be reached through a link, as a temporary directory is on macOS; nothing below it may be.
+      const own = path.join(await fs.promises.realpath(this.directory), ref.id, String(ref.version), "files", ...parts.slice(0, -1));
+      if (await fs.promises.realpath(path.dirname(target)) !== own) throw new SkillFileUnavailable("integrity");
+      handle = await fs.promises.open(target, SOURCE_OPEN);
+    } catch (error) {
+      if (error instanceof SkillFileUnavailable) throw error;
+      throw new SkillFileUnavailable("integrity");
+    }
+    try {
+      if (!(await handle.stat()).isFile()) throw new SkillFileUnavailable("integrity");
+      const hash = createHash("sha256");
+      for (;;) {
+        // A fresh buffer for each part, since `take` may keep what it is given.
+        const { bytesRead, buffer } = await handle.read(Buffer.alloc(1024 * 1024), 0, 1024 * 1024, null);
+        if (!bytesRead) break;
+        const part = buffer.subarray(0, bytesRead);
+        hash.update(part);
+        take(part);
+      }
+      if (hash.digest("hex") !== listed.sha256) throw new SkillFileUnavailable("integrity");
+    } catch (error) {
+      if (error instanceof SkillFileUnavailable) throw error;
+      throw new SkillFileUnavailable("integrity");
+    } finally { await handle.close(); }
   }
 
   private latest(id: string): StoredSkill | undefined {

@@ -25,7 +25,7 @@
     "test:e2e:production-parity": "WORKFLOW_SIMULATOR_MODEL=live playwright test e2e/demo.spec.ts -g \"production_file_matrix_|production_weixin_agent_loop_full_workflow|sends the latest modified local image without asking for a selection|keeps ordinary chat in the main Codex turn without creating a workflow run|continues a simulated Weixin file-send workflow after the user selects one fuzzy match\"",
     "test:app-server-protocol": "CODEX_APP_SERVER_PROTOCOL_TEST=live vitest run tests/app-server-workflow-protocol.integration.test.ts --maxWorkers=1",
     "test:isolated-runtime": "CODEX_ISOLATED_RUNTIME_TEST=1 vitest run tests/isolated-model-runtime.test.ts tests/isolated-runtime-tools.test.ts tests/isolated-runtime-compaction.test.ts tests/fixtures/isolated-runtime-probe.test.ts --maxWorkers=1",
-    "test:dispatch-real-model": "DISPATCH_REAL_MODEL_TEST=1 vitest run tests/agent-dispatch-real-model.test.ts --maxWorkers=1",
+    "test:dispatch-real-model": "DISPATCH_REAL_MODEL_TEST=1 vitest run tests/agent-dispatch-real-model.test.ts tests/skill-library-real-model.test.ts --maxWorkers=1",
     "benchmark:workflow-planner": "tsx scripts/workflow-planner-benchmark.ts",
     "probe:codex": "tsx src/probe-current-thread.ts",
     "diagnostics:read": "tsx scripts/read-diagnostics.ts",

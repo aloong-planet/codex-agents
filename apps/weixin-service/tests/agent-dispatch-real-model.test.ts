@@ -1,14 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { LeaderPlan } from "../src/agent-dispatch-leader.js";
-import type { DispatchDecision, DispatchExecutionResult, PrerequisiteResult } from "../src/agent-dispatch-types.js";
-import type { DispatchTurnRecord } from "../src/fixture-dispatch-recorder.js";
+import type { DispatchDecision } from "../src/agent-dispatch-types.js";
 import type { CoordinatorRequestView, LeaderRequestView, PrivateTurnInput } from "../src/private-conversations.js";
 import { runningPrograms, stopRunningPrograms, testServerArgs, testServerFiles, writeTools } from "./fixtures/mcp-test-server-control.js";
 import type { State } from "./support/real-main.js";
-import { atRest, deliveredFiles, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, type TeamId } from "./support/real-model-dispatch.js";
+import { atRest, deliveredFiles, type ExecutorRun, groupPosts, realModelDispatch, realModelScenario, type ScenarioRun, skilledPreset, type TeamId, type Turn, turns } from "./support/real-model-dispatch.js";
 
 // Dispatch on the real model (agent-dispatch Testing Decisions: real-model suite). Opt-in: `pnpm test:dispatch-real-model` sets
 // DISPATCH_REAL_MODEL_TEST=1; without it every scenario is skipped, so no default run and no CI run reaches a model. One scenario
@@ -108,12 +107,7 @@ description: ${BARGAIN_DESCRIPTION}
 2. 给出一个明确的价格，不低于挂牌价的 85%，并说明理由。
 3. 回复正文之后单独写一行口径编号：口径 ${BARGAIN_MARK}。交回的结果里必须原样保留这一行。
 `;
-type TeamsView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
-  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> }> };
 
-type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
-type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
-const turns = (state: State, turn: DispatchTurnRecord["turn"]) => (state.fixtureDispatchTurns ?? []).filter((item) => item.turn === turn);
 // The group's posts and files are read as the run record reads them, so what a scenario asserts is what its record shows.
 const posts = groupPosts;
 const textsBy = (state: State, identity: "sam" | TeamId) => groupPosts(state).filter((post) => post.identity === identity);
@@ -304,19 +298,7 @@ describe.skipIf(!realModelDispatch)("dispatch on the real model", () => {
       // The skill's folder is outside the granted directory: no file tool of an Executor can read it there.
       const sources = mkdtempSync(join(tmpdir(), "real-model-skill-"));
       try {
-        const source = join(sources, "bargain-reply");
-        mkdirSync(source);
-        writeFileSync(join(source, "SKILL.md"), BARGAIN_SKILL);
-        const { preview } = await run.post<{ preview: { fingerprint: string } }>("/api/skills/read", { folder: source });
-        const { id: skill } = await run.post<{ id: string }>("/api/skills/import", { folder: source, confirmed: preview.fingerprint });
-        // Alice's team gets a second preset, which selects the skill; her seeded preset selects none.
-        const view = await run.get<TeamsView>("/api/teams");
-        const alice = view.teams.find(({ id }) => id === "alice")!;
-        const saved = await run.post<{ view: TeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
-          leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
-            ...alice.profiles.map(({ id, name, noun, instructions, hostTools }) => ({ id, name, noun, instructions, hostTools, skills: [] })),
-            { name: "议价回复", noun: "议价执行者", instructions: "", hostTools: [], skills: [skill] }] } });
-        const skilled = saved.view.teams.find(({ id }) => id === "alice")!.profiles.find(({ name }) => name === "议价回复")!.id;
+        const skilled = await skilledPreset(run, sources, "bargain-reply", { "SKILL.md": BARGAIN_SKILL });
 
         await run.send("om_real_skill", "闲鱼上有个买家问那台 Kindle 400 能不能出，我挂的是 550。帮我拟一条回复买家的议价话术，直接在群里回我就行，不用存成文件。");
         const state = await run.until("the request's end", (current) => atRest(current, "om_real_skill"), REQUEST_WAIT_MS);
