@@ -184,6 +184,9 @@ if (process.env.WORKFLOW_FIXTURE_FEISHU_ONBOARDING && !fixtureMode) throw new Er
 // choice that could not be closed. Refused outside fixture mode.
 if (process.env.WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 let fixtureChoiceCloseFailures = Number(process.env.WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES ?? 0);
+// Fixture-only seam: Coordinator decisions by message ID, injected at startup for the messages a restart takes in again. Refused
+// outside fixture mode.
+if (process.env.WORKFLOW_FIXTURE_DISPATCH_DECISIONS && !fixtureMode) throw new Error("fixture_switch_outside_fixture_mode");
 const fixtureLiveMainModel = fixtureMode && process.env.WORKFLOW_SIMULATOR_MODEL === "live";
 const fixtureLiveWorkflowAgents = fixtureLiveMainModel ||
   (fixtureMode && process.env.WORKFLOW_SIMULATOR_PENDING_ROUTER === "live");
@@ -322,6 +325,7 @@ const directChannel = fixtureMode || !weixinConfiguration
       });
 const fixturePort = fixtureMode && (!channelConfiguration || weixinConfiguration !== undefined) ? new FixturePort(durableInboundStore, process.env.WORKFLOW_FIXTURE_WEIXIN_START_FAILURE === "1") : undefined;
 const fixtureFeishu = fixtureMode && feishuConfiguration !== undefined ? new FixtureFeishuTransport(process.env.WORKFLOW_FIXTURE_FEISHU_START_FAILURE === "1") : undefined;
+if (fixtureFeishu && process.env.WORKFLOW_FIXTURE_DISPATCH_DECISIONS) fixtureFeishu.injectDispatchDecisions(JSON.parse(process.env.WORKFLOW_FIXTURE_DISPATCH_DECISIONS));
 const channelPort: WeixinChannel | undefined = directChannel
   ? bindWeixinOwner(directChannel, weixinConfiguration!.owner) : fixturePort;
 const feishuTransport = feishuConfiguration ? (() => {
@@ -1119,8 +1123,10 @@ const agentDispatch = feishuConfiguration?.dispatch && feishuChannel ? (() => {
   // Under the coordination seam the fixture App Server answers Coordinator and Team Leader turns with the injected outputs.
   const answer = (threadId: string, text: string) => fixtureThreadQueues.set(threadId, { takeFixtureModelToolCall: () => undefined, takeFixtureModelCompletion: () => Promise.resolve(text) });
   const classifier = fixtureMode && !fixtureLiveMainModel && !fixtureDispatchRealModel && !fixtureCoordinationRuntime
-    ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(fixtureFeishu!.dispatchDecision(input.event.messageId), input),
-      assign: async (input: import("./agent-dispatch-types.js").CrossTeamInput) => parseCrossTeamDecision(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId), input) }
+    ? { classify: async (input: import("./agent-dispatch-types.js").DispatchClassificationInput) => parseDispatchDecision(await fixtureFeishu!.classify(input.event.messageId), input),
+      assign: async (input: import("./agent-dispatch-types.js").CrossTeamInput) => parseCrossTeamDecision(fixtureFeishu!.crossTeamDecision(input.fixtureMessageId), input),
+      // The dispatch's stop ends a held classification turn, as it closes the Coordinator's runtime in production.
+      close: () => fixtureFeishu!.releaseClassifications() }
     : (() => {
       if (!appServerCapabilities.namedPermissionsSupported) throw new Error("group_runtime_permissions_unavailable");
       // The runtime's tools come from the resolved profile, which never gives the Coordinator business tools (agent-dispatch::CON-003).
@@ -1441,7 +1447,7 @@ if (pennyConfigured) {
 }
 const dispatchState = () => agentDispatch ? { agentDispatch: agentDispatch.getState(), ...(fixtureMode ? {
   fixtureLeaderRequests: structuredClone(fixtureLeaderRequests ?? []), fixtureCoordinationRequests: structuredClone(fixtureCoordinationRequests),
-  fixturePrivateTurns: structuredClone(fixturePrivateTurns ?? []),
+  fixturePrivateTurns: structuredClone(fixturePrivateTurns ?? []), fixtureClassifications: fixtureFeishu?.getClassifications() ?? [],
   fixtureThreadStarts: structuredClone(fixtureThreadStarts), fixtureToolResults: structuredClone(fixtureToolResults), fixtureMemoryCurations: structuredClone(fixtureMemoryCurations),
   ...(fixtureDispatchTurns ? { fixtureDispatchTurns: fixtureDispatchTurns() } : {}),
   ...(fixtureOnboarding ? { fixtureOnboardingCalls: structuredClone(fixtureOnboarding.calls) } : {}),
@@ -1626,7 +1632,15 @@ function shutdown(): Promise<void> {
     () => teamManagement?.close(),
     // Before the dispatch closes the runtime pool its reply turns use: a reply still running then is left interrupted.
     () => privateConversations?.close(),
-    () => agentDispatch?.close(),
+    () => {
+      const closed = agentDispatch?.close();
+      // In fixture mode a send that an application holds completes once the dispatch has begun to stop, as a send in flight does
+      // during a stop; the dispatch's close waits for it.
+      if (fixtureMode) for (const transport of [fixtureFeishu, ...[...dispatchApplications.values()].map((application) => application.transport)]) {
+        if (transport instanceof FixtureFeishuTransport) transport.releaseHeldText();
+      }
+      return closed;
+    },
     ...[...dispatchApplications.values()].map((application) => () => { application.ready = false; return application.transport.close(); }),
     () => workflowRetirementNotifier?.close(),
     () => pendingResponseAgent?.close(),

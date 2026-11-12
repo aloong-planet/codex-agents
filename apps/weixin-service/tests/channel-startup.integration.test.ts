@@ -350,7 +350,7 @@ it.each(["missing", "invalid"])("fails before opening a channel for %s startup c
 }, 15000);
 
 it.each(["WORKFLOW_FIXTURE_COORDINATION_RUNTIME", "WORKFLOW_FIXTURE_COMPACTION_HOLD", "WORKFLOW_FIXTURE_FEISHU_ONBOARDING", "WORKFLOW_FIXTURE_DISPATCH_REAL_MODEL",
-  "WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES"])("refuses to start with the fixture switch %s outside fixture mode", async (fixtureSwitch) => {
+  "WORKFLOW_FIXTURE_CHOICE_CLOSE_FAILURES", "WORKFLOW_FIXTURE_DISPATCH_DECISIONS"])("refuses to start with the fixture switch %s outside fixture mode", async (fixtureSwitch) => {
   const directory = mkdtempSync(join(tmpdir(), "channel-fixture-switch-"));
   const production = { ...process.env };
   delete production.DEMO_MODE;

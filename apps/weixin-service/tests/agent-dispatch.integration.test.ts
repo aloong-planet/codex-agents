@@ -356,6 +356,73 @@ it("fails a request whose start message was uncertain at a crash, without sendin
   } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
 }, 30000);
 
+// A graceful stop, as a deploy or a restart makes, while a group message is in its classification turn (agent-dispatch::REQ-008/AC-02,
+// REQ-009/AC-02): the next start takes the message in again, as after a crash, and it is classified once there. The fixture holds the
+// Coordinator's turn until the dispatch stops; the turn then answers, or fails as a turn whose runtime the stop closed, which is how
+// a production stop ends it. Injected fixture outputs live in the stopped process, so the restart injects the decision again.
+// The posts are read from the stored notices, which outlive the stopped process, and from the second process's outboxes.
+const notices = (state: Awaited<ReturnType<Awaited<ReturnType<typeof start>>["state"]>>) => state.agentDispatch?.notices?.map(({ id, state: delivery }) => [id.split(":").slice(1).join(":"), delivery]);
+it.each([
+  ["answers as the service stops", "complete", { kind: "clarify", agentId: null, requestId: null, summary: "", message: "请说明想去哪座城市。" },
+    { jobs: [], sam: ["请说明想去哪座城市。"], bill: [], notices: [["coordination", "accepted"]] }],
+  ["fails because the stop closed its runtime", "abort", decision("bill", "规划周末一日行程"),
+    { jobs: ["bill:completed"], sam: [], bill: ["我安排执行者 1（能力档 1）处理：规划周末一日行程。完成后会在本群汇报。", "这是 fixture Codex 回复。"],
+      notices: [["receipt:0", "accepted"], ["closing:0", "accepted"]] }],
+] as const)("classifies a message once at the next start when a graceful stop cuts off its classification turn, which %s", async (_case, hold, chosen, expected) => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-stop-classifying-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    await running.post("/api/fixture/inbound", groupMessage("om_stop_classifying", "帮我规划周末一日行程", chosen, { classificationHold: hold }));
+    const held = await running.until((state) => state.fixtureClassifications?.[0]?.status === "held");
+    expect([held.agentDispatch?.notices, held.fixtureTextOutbox]).toEqual([[], []]);
+    await running.close(); running = undefined;
+    running = await start(directory, { WORKFLOW_FIXTURE_DISPATCH_DECISIONS: JSON.stringify({ om_stop_classifying: chosen }) });
+    const done = await running.until((state) => (state.fixtureTextOutbox?.length ?? 0) + (state.agentFixtureOutboxes?.bill?.text.length ?? 0) === expected.sam.length + expected.bill.length &&
+      (state.agentDispatch?.jobs ?? []).every(({ status }) => status === "completed"));
+    console.log(JSON.stringify({ kind: "dispatch_stop_classifying", hold, command: "帮我规划周末一日行程", jobs: done.agentDispatch, coordinator: done.fixtureTextOutbox, outboxes: done.agentFixtureOutboxes,
+      classifications: done.fixtureClassifications }));
+    expect(done.fixtureClassifications).toEqual([{ messageId: "om_stop_classifying", status: "answered" }]);
+    expect({ jobs: done.agentDispatch?.jobs.map(({ agentId, status }) => `${agentId}:${status}`), sam: done.fixtureTextOutbox?.map(({ message }) => message),
+      bill: done.agentFixtureOutboxes?.bill?.text.map(({ message }) => message), notices: notices(done) }).toEqual(expected);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
+// The same stop when the message genuinely mentions Bill for Jack's work (agent-dispatch::REQ-004): Bill's explanation is accepted as
+// the stop begins, before the Coordinator's reassignment. The next start classifies the message again and does not post the
+// explanation a second time (agent-dispatch::REQ-008/AC-03); the reassignment and Jack's request follow once.
+it("does not post a mentioned team's explanation again when the message it was accepted for is classified again after a graceful stop", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "dispatch-stop-explained-"));
+  let running: Awaited<ReturnType<typeof start>> | undefined;
+  const chosen = { kind: "dispatch", agentId: "jack", requestId: null, summary: "修复代码", message: "" };
+  try {
+    dispatchConfig(directory);
+    running = await start(directory);
+    // Bill's application holds the explanation: it reaches the outbox, and the send completes as accepted once the stop has begun.
+    await running.post("/api/fixture/inbound", { applicationControl: { agentId: "bill", textOutcomes: ["held"] } });
+    await running.post("/api/fixture/inbound", {
+      event: { app_id: "cli_0123456789abcdef", sender: { sender_type: "user", sender_id: { open_id: "ou_owner" } },
+        message: { message_id: "om_stop_explained", create_time: String(Date.now()), chat_id: "oc_alpha", chat_type: "group", message_type: "text",
+          mentions: [{ key: "@_user_0", id: { open_id: "ou_samview0" }, name: "Bill" }], content: JSON.stringify({ text: "@_user_0 帮我修复代码" }) } },
+      messageDetails: { message_id: "om_stop_explained", chat_id: "oc_alpha", msg_type: "text", body: { content: '{"text":"帮我修复代码"}' },
+        mentions: [{ key: "@_user_0", id: "cli_bbbbbbbbbbbbbbbb", id_type: "app_id", name: "Bill" }] },
+      dispatchDecision: chosen,
+    });
+    const held = await running.until((state) => state.agentFixtureOutboxes?.bill?.text.length === 1);
+    expect(held.agentFixtureOutboxes?.bill?.text.map(({ message }) => message)).toEqual(["这项需求属于 Jack 的职责。我请 Sam 重新分派，由他独立处理。"]);
+    await running.close(); running = undefined;
+    running = await start(directory, { WORKFLOW_FIXTURE_DISPATCH_DECISIONS: JSON.stringify({ om_stop_explained: chosen }) });
+    const done = await running.until((state) => state.agentDispatch?.jobs[0]?.status === "completed" && jackTexts(state).length === 2);
+    console.log(JSON.stringify({ kind: "dispatch_stop_explained", command: "@Bill 帮我修复代码", jobs: done.agentDispatch, coordinator: done.fixtureTextOutbox, outboxes: done.agentFixtureOutboxes,
+      classifications: done.fixtureClassifications }));
+    expect(done.fixtureClassifications).toEqual([{ messageId: "om_stop_explained", status: "answered" }]);
+    expect({ bill: done.agentFixtureOutboxes?.bill?.text, sam: done.fixtureTextOutbox?.map(({ message }) => message), jobs: done.agentDispatch?.jobs.map(({ agentId }) => agentId) })
+      .toEqual({ bill: [], sam: ["已将这项需求转派给 Jack。"], jobs: ["jack"] });
+    expect(notices(done)).toEqual([["scope", "accepted"], ["coordination", "accepted"], ["receipt:0", "accepted"], ["closing:0", "accepted"]]);
+  } finally { await running?.close(); rmSync(directory, { recursive: true, force: true }); }
+}, 30000);
+
 // agent-dispatch::REQ-008/AC-04, the one post another identity makes for a team. The engine's rule (which outcomes of the start
 // message get the sentence, once per attempt, never resent) is covered at the AgentDispatch boundary; this case shows main's
 // wiring: the channel records the platform's refusal as rejected, and the sentence leaves through Sam's application to the
