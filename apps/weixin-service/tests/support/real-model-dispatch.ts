@@ -2,6 +2,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { EXECUTOR_RUNTIME_HOME } from "../../src/agent-dispatch-executor.js";
+import type { DispatchExecutionResult, PrerequisiteResult } from "../../src/agent-dispatch-types.js";
 import type { DispatchTurnRecord } from "../../src/fixture-dispatch-recorder.js";
 import { ISOLATED_RUNTIME_KINDS } from "../../src/isolated-runtime-kinds.js";
 import { type PrivateChat, settledChat } from "./private-chat.js";
@@ -173,6 +174,35 @@ export function atRest(state: State, messageId: string): boolean {
   return (state.fixtureDispatchTurns ?? []).some((turn) => turn.turn === "classify" && turn.messageId === messageId && turn.endedAt !== undefined) &&
     (state.agentDispatch?.notices ?? []).every(({ state: delivery }) => delivery !== "queued" && delivery !== "sending") &&
     (state.agentDispatch?.jobs ?? []).every(({ status }) => RESTING.includes(status));
+}
+
+/** One recorded dispatch turn, with the input and output its kind carries. */
+export type Turn<Input, Output> = Omit<DispatchTurnRecord, "input" | "output"> & { input: Input; output?: Output };
+export type ExecutorRun = Turn<{ assignmentId: string; prerequisites: PrerequisiteResult[] }, DispatchExecutionResult>;
+/** The recorded dispatch turns of one kind, in the order they ran. */
+export const turns = (state: State, turn: DispatchTurnRecord["turn"]) => (state.fixtureDispatchTurns ?? []).filter((item) => item.turn === turn);
+
+type TeamsView = { version: number; teams: Array<{ id: string; teamName: string; responsibility: string; leader: unknown; bindings: Array<{ chatId: string }>;
+  profiles: Array<{ id: string; name: string; noun: string; instructions: string; hostTools: string[] }> }> };
+/**
+ * Writes a skill folder `name` with `files` under `sources`, imports it through the console, and gives Alice's team a second
+ * preset, 议价回复, that selects it; her seeded preset selects none. Returns the new preset's ID.
+ */
+export async function skilledPreset(run: ScenarioRun, sources: string, name: string, files: Record<string, string>): Promise<string> {
+  const source = join(sources, name);
+  for (const [file, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(source, file)), { recursive: true });
+    writeFileSync(join(source, file), content);
+  }
+  const { preview } = await run.post<{ preview: { fingerprint: string } }>("/api/skills/read", { folder: source });
+  const { id: skill } = await run.post<{ id: string }>("/api/skills/import", { folder: source, confirmed: preview.fingerprint });
+  const view = await run.get<TeamsView>("/api/teams");
+  const alice = view.teams.find(({ id }) => id === "alice")!;
+  const saved = await run.post<{ view: TeamsView }>("/api/teams/save", { basedOn: view.version, team: { id: "alice", teamName: alice.teamName, responsibility: alice.responsibility,
+    leader: alice.leader, groups: alice.bindings.map(({ chatId }) => chatId), executorProfiles: [
+      ...alice.profiles.map(({ id, name: profile, noun, instructions, hostTools }) => ({ id, name: profile, noun, instructions, hostTools, skills: [] })),
+      { name: "议价回复", noun: "议价执行者", instructions: "", hostTools: [], skills: [skill] }] } });
+  return saved.view.teams.find(({ id }) => id === "alice")!.profiles.find(({ name: profile }) => profile === "议价回复")!.id;
 }
 
 export type ScenarioRun = {

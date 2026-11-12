@@ -29,4 +29,4 @@ With the copy alone, an Executor's model would only ever have seen a skill's nam
 
 - The installed-App-Server case is opt-in, because CI has no Codex executable: rerun `pnpm test:isolated-runtime` after a Codex upgrade.
 - A SKILL.md the App Server refuses to list is not put into a turn even when the turn carries it. Two refused shapes are refused at import; any other is not detected (skill-library spec, failure modes).
-- Only SKILL.md reaches the model. A skill's other files are copied, and an Executor cannot read them.
+- Only SKILL.md reaches the model in a turn. Until agent-teams ticket 51, a skill's other files were copied, and an Executor could not read them. Since then an Executor reads them, read-only, through its own tool (skill-library::REQ-003).
