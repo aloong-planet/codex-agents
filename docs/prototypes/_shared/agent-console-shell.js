@@ -13,19 +13,14 @@
   };
   const icon = (name) => `<svg class="acv-i" viewBox="0 0 24 24" aria-hidden="true">${ICONS[name]}</svg>`;
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  // The owner's private entries, shown in the sidebar on every page. On the team overview they act in place (switch the tree's
-  // scope or open the drawer); on other pages they lead to the team overview, which owns those views.
+  // The owner's private entries: one 私人 section on every page. On the team overview each row opens its drawer in place; on
+  // other pages it leads to the team overview, which owns those drawers. The team overview rewrites the 私人任务 meta from its
+  // mock requests; the meta here matches that page's initial mock.
   const PRIVATE = [
-    { h: '私人任务', tip: '在负责人私聊中创建，结果默认仅本人可见。\n· 私人任务独立保存；群任务仍由负责人向原群汇报。', items: [
-      { label: '我的私人任务', meta: '1 项进行中 · 结果仅私聊可见', attr: 'data-scope="private"', metaId: 'acv-private-count' },
-      { label: '负责人私聊记录', attr: 'data-open="leader-chats"' },
-      { label: '私人任务与执行记录', attr: 'data-open="private-store"' }] },
-    { h: 'Penny · 本人私聊', tip: '仅显示状态与存储位置。\n· 账务正文和截图保留在本人私聊。', items: [
+    { h: '私人', tip: '只有你能看到。Penny 的账务与个人助手、私人任务分开保存。', items: [
+      { label: '私人任务', meta: '4 进行中 · 2 待处理', attr: 'data-open="private-tasks"', metaId: 'acv-private-meta' },
       { label: 'Penny', meta: '个人账 / 经营账 · 就绪', dot: true, attr: 'data-open="penny"' },
-      { label: '独立财务存储', meta: '账本 · 私聊记录 · 附件', attr: 'data-open="penny-store"' }] },
-    { h: '普通私聊', tip: '普通助手会话与负责人私聊分别保存。', items: [
-      { label: '个人助手', meta: '普通问答 · 文件 · 提醒', attr: 'data-open="personal"' },
-      { label: '私人记忆与会话', attr: 'data-open="personal-store"' }] },
+      { label: '个人助手', meta: '普通问答 · 文件 · 提醒', attr: 'data-open="personal"' }] },
   ];
   const NAV = [
     { id: 'team-structures', label: '团队总览', icon: 'network' },
@@ -82,6 +77,7 @@
       if (e.target.closest('.acv-menu-btn')) app.classList.add('acv-side-open');
       else if (e.target.closest('.acv-side-scrim')) app.classList.remove('acv-side-open');
       else if (e.target.closest('[data-acv-login]')) { app.classList.remove('acv-side-open'); openLogin(); }
+      else if (e.target.closest('.acv-side [data-open]')) app.classList.remove('acv-side-open');
     });
     mountLogin(app);
     for (const el of document.querySelectorAll('[data-acv-tip]')) el.outerHTML = tip(el.dataset.acvTip);

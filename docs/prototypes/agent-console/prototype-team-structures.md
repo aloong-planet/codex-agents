@@ -8,7 +8,7 @@ This page tests whether the owner can do the following:
 - follow what each leader and Sam report to the group, including cross-team assignments;
 - read the group posts of cross-team work: the lead leader's start line for a part it asked Sam to place, Sam's assignment, the cross-team leader's start and closing, and the lead leader's closing that summarizes the reports Sam relayed;
 - tell a request in which no team took a requested part (部分未落实) from one that failed, and follow its retry;
-- create a private request through a leader;
+- create a private request through a leader, and find, follow, cancel or retry the owner's private requests from one 私人任务 entry, apart from the group tree;
 - continue an owned group request without exposing the private conversation to the group.
 
 Members, messages, requests, assignments, confirmations and reports are synthetic. No production data is loaded and no real messages or tasks are sent.
@@ -18,8 +18,11 @@ Members, messages, requests, assignments, confirmations and reports are syntheti
 ### Organisation tree
 
 - **Console shell.** The console borrows the owner's agent-link web console UI, through the shared `agent-console-shell.js` and `agent-console` visual block:
-  - a 212px left sidebar with the identity, the page navigation (团队总览, 团队管理, MCP 管理, Skill 管理, with the current page selected), and the owner's private entries in three sections (私人任务, Penny · 本人私聊, 普通私聊), each section titled with an info tip;
-  - on the team overview the private entries switch the tree to private requests or open their drawer; on other pages they lead to the team overview;
+  - a 212px left sidebar with the identity, the page navigation (团队总览, 团队管理, MCP 管理, Skill 管理, with the current page selected), and one 私人 section whose info tip reads 「只有你能看到。Penny 的账务与个人助手、私人任务分开保存。」. It holds three fixed rows:
+    - 私人任务, with the meta 「<n> 进行中 · <m> 待处理」: n counts running or waiting private requests, m those 部分失败 or 失败 and not retried. A zero part is left out; with neither, the meta reads 「暂无进行中」.
+    - Penny, with a status dot and 「个人账 / 经营账 · 就绪」.
+    - 个人助手, with 「普通问答 · 文件 · 提醒」.
+  - on the team overview each private row opens its drawer in place; on other pages it leads to the team overview. Below 900px, choosing a row also closes the sidebar;
   - below 900px, a menu bar opens the sidebar;
   - a page title with an info tip that holds the page description;
   - agent-link's colors and chips;
@@ -33,8 +36,8 @@ Members, messages, requests, assignments, confirmations and reports are syntheti
 
 The heading's 团队管理 button opens `prototype-team-management.html`. The workspace uses the owner-selected top-down collapsible organization tree. The drawer overlays the page, and the canvas keeps its size and position underneath it. On phones the drawer fills the workspace, and the canvas becomes inert until the drawer closes.
 
-- **Scope entries.** The existing entry chips choose the tree's scope: the group, or the owner's private requests. They filter the same organization view. The owner's private entries — leader conversations, private task storage, Penny and the ordinary assistant — are in the sidebar.
-- **Leaders.** Sam coordinates the first-level leaders Alice, Bill and Jack. All four coordinate, delegate and report, and none of them executes. A leader card counts the requests that involve its team as running, waiting or history. Each request counts once per team.
+- **Entry bar.** The 消息入口 bar, as in the app's team overview, has one chip per dispatch group (「银河护卫队 · 群协作」). The tree shows group collaboration only: private requests and their Executors never appear on it. With no dispatch group the bar is empty and the workspace shows the app's empty-state text 「尚未配置派单群。在团队管理中选择派单群并重启服务后，这里显示团队与事务。」. 全部记录 lists the group's requests only.
+- **Leaders.** Sam coordinates the first-level leaders Alice, Bill and Jack. All four coordinate, delegate and report, and none of them executes. A leader card counts the group requests that involve its team as running, waiting or history. Each request counts once per team. Lily's 学习 team is bound to no dispatch group: it takes private requests only, has no card on the tree, and is reached from the 私人任务 drawer.
 - **Request frames.** Executors are grouped by request; the owner selected this direction for the tree. Each request with active assignments in a team appears under that team's leader as a dashed frame.
   - The frame title shows the request ID and a short title.
   - On the lead team, the caption counts the team's own assignments and any cross-team ones. On another team, it says the assignment is cross-team, requested by the lead leader.
@@ -89,6 +92,30 @@ An expanded record shows these parts, in order:
 6. A chat action for each involved leader.
 7. Storage links.
 
+### Private requests
+
+The private parts follow the direction the owner agreed: one page entry for private requests, the sidebar's 私人任务 row, and private requests shown as a list rather than on the tree. The row opens the 私人任务 drawer, which has no tabs. In order, it shows:
+
+1. **交给谁办.** A chat button for Sam and for every team leader not being deleted, bound to a group or not. While a dispatch group is configured, a team bound to none carries the muted tag 「未绑定群」 (Lily in the sample). This row is the console's chat entry for teams that are not on the tree.
+2. **Filter.** One row of chips: 全部, 进行中 (running or waiting), 待确认, 已完成, 部分失败 (部分失败 or 失败) and 已取消. Opening the drawer from the sidebar selects 全部.
+3. **List.** Newest first, two rows per request:
+   - the title and the request ID, with the disclosure action;
+   - the status badge, who handles it and the time. Who handles it reads 「Bill」 for a request raised in Bill's chat, 「经 Sam 分派给 Alice」 for one Sam routed, and adds 「· 跨队 Jack」 when another team took a part.
+4. **An expanded request**, in place:
+   1. the result;
+   2. the path line: 「本人 → Bill」 or 「本人 → Sam → Alice」, plus a line 「跨队：Sam → <leader> · 应 <lead> 请求」 for each cross-team part;
+   3. the Assignments, as in the request records;
+   4. the original message;
+   5. 「回到与 <leader> 的私聊」, the conversation where the request was raised;
+   6. 「取消这项事务」 while the request runs or waits, and 「重试失败的分工」 when it is 部分失败 or 失败. Each opens that conversation with its confirmation card (see Chat).
+
+   There is no group-report timeline.
+5. **存储.** Links to 私人任务与执行记录 and 负责人私聊记录, which open their drawer with 返回.
+
+With no private request, the list and filter give way to 「还没有私人任务。选上面任一负责人私聊提出需求即可。」. The drawer's foot reads 「私人任务只有你能看到；结果在发起它的私聊里交付。」.
+
+The sample holds eight private requests covering every state the filter offers: P-2412, waiting, which Sam routed to Bill; P-2411, running, from Lily's unbound team; P-2410, running, Alice's with a cross-team part for Jack; P-2408, cancelled; P-2407, failed; P-2406, completed, which Sam routed to Alice; P-2403, running; and P-2401, partially failed.
+
 ### Relationships and storage
 
 The relationships/storage tab separates:
@@ -103,7 +130,7 @@ The relationships/storage tab separates:
 
 Sam's and each first-level leader's tab links to 负责人私聊记录 beside the group stores, so the private conversations' store is reachable from the agents the owner chats with. A node opened from a link in the drawer keeps the current tab, and 返回 in the drawer header goes back to the node shown before, as on the app's team overview.
 
-Storage for leader memory, executor memory, leader chats and private requests is described as a conceptual scope, not an implemented filesystem path. Penny shows status and storage only, with no financial records and no general chat entry.
+Storage for leader memory, executor memory, leader chats and private requests is described as a conceptual scope, not an implemented filesystem path. Penny shows status and storage only, with no financial records and no general chat entry. The Penny drawer links to 独立财务存储 and the 个人助手 drawer to 私人记忆与会话; neither store has a sidebar row.
 
 ### Chat
 
@@ -119,12 +146,14 @@ The round speech-bubble path follows the official [Lucide MessageCircle SVG](htt
 - **Retained controls.** The records/storage tabs, compact two-row records, one-row filters, plain-X close button, dismissal by clicking blank space outside the drawer, and Escape all remain available.
 - **Private requests.**
   - Sending text without an associated request offers a private-request creation card. The owner can keep discussing, or create the request and delegate it.
-  - The leader divides the request into one or more assignments and creates one executor for each from the team's capability profiles. Sam's mock asks the owner to choose the responsible leader before delegating.
-  - Creating a private request shows the private-scope tree with the new executor, and the results stay private.
+  - The leader divides the request into one or more assignments and creates one executor for each from the team's capability profiles. Sam's mock asks the owner to choose the responsible leader before delegating, among every team not being deleted; Lily's option reads 「Lily · 学习 · 未绑定群」 while a dispatch group is configured.
+  - Creating a private request updates the sidebar's 私人任务 meta and puts the request first in the 私人任务 list. Its Executors do not appear on the tree, and the results stay private.
 - **Reply formatting.** Sam's and the leaders' replies render as Markdown: headings, lists, emphasis, inline code, code blocks and tables. Only `http` and `https` links are clickable; they open in a new tab without access to the page. Other link targets stay as text with their address in brackets. Images show `［图片：alt］` and are never loaded, and raw HTML shows as text. Tables scroll inside the bubble, both ways. The owner's messages, records, results and group reports stay plain text. Jack's conversation opens with a sample reply that exercises each case.
 - **Request controls in a private conversation.** When the selected request is the owner's private request, the request summary in the chat offers:
   - 取消这项事务, while it is running or waiting. Its confirmation card lists the unfinished Assignments that stop together, including cross-team ones, and states that completed parts stay and completed actions are not undone.
   - 重试失败的分工, when it is 部分失败 or 失败. Its confirmation card lists only the failed and interrupted Assignments, and says completed ones are not redone and completed actions are not replayed.
+
+  The 私人任务 drawer's 取消这项事务 and 重试失败的分工 open the conversation where the request was raised, with the same confirmation card.
 
   For a group request the summary instead says that cancelling and retrying happen in the group, with the lead leader; the private conversation discusses, supplements and confirms.
 - **A team being deleted.** Its leader card shows a 删除中 badge. Its conversation shows a notice and stays open for discussion, but text without a selected request gets an explanation instead of a private-request creation card. Sam's leader choice for a new private request leaves it out.
@@ -135,7 +164,7 @@ The round speech-bubble path follows the official [Lucide MessageCircle SVG](htt
   - Repeated confirmations update once. A proposal made against an older request revision must be checked again.
   - An ended request remains available for discussion, but new work needs a new request.
 
-The shared `agent-console` visual block supplies the console shell, colors, record styling, timeline styling and drawer styling. The diagram keeps a light appearance. Nodes are agent-link style rounded cards with a light shadow, and each border is tinted from the role color (40% role color, 60% line). Role colors follow the agent-link palette: Sam uses the accent green, Alice the peer purple, Bill the document blue, and Jack an added olive. Connectors are 2px and use the color of the dispatching role. Request frames have a faint dashed border and a muted title; the storage row has a muted dashed border.
+The shared `agent-console` visual block supplies the console shell, colors, record styling, timeline styling and drawer styling. The diagram keeps a light appearance. Nodes are agent-link style rounded cards with a light shadow, and each border is tinted from the role color (40% role color, 60% line). Role colors follow the agent-link palette: Sam uses the accent green, Alice the peer purple, Bill the document blue, Jack an added olive, and Lily an added teal. Connectors are 2px and use the color of the dispatching role. Request frames have a faint dashed border and a muted title; the storage row has a muted dashed border.
 
 ## Demo scaffolding
 
@@ -147,10 +176,12 @@ The shared `agent-console` visual block supplies the console shell, colors, reco
   - the last assignment completes the request and adds the lead leader's closing report, which names each cross-team part's relayed result.
 
   In the product, actual execution results drive these transitions.
+- **派单群.** 已配置 / 未配置 switches whether a dispatch group is configured. 未配置 empties the 消息入口 bar and replaces the tree with the app's empty-state text. In the product the dispatch-group setting on the team-management page decides it.
+- **私人任务.** 有 / 无 switches between the eight sample private requests and none, to show the 私人任务 drawer's empty state. In the product the owner's private requests decide it.
 - **Jack 团队.** 正常 / 删除中 switches whether Jack's team is being deleted. In the product the delete action on the team page decides this.
 - **本机登录.** 已授权 / 未登录 / 链接已失效 switches the browser's authorization; in the product the browser's authorization decides it.
 - **群业务记忆.** 有内容 / 尚无内容 / 读取失败 switches what the group memory node's relationships and storage tab shows under 当前内容. In the product the group memory's current entries, and whether they can be read, decide it.
-- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the eighteen sample requests. These include five partially failed group requests (R-2391; R-2392, with an Assignment that did not start; the cross-team R-2393 and R-2389; and R-2387, which also has a part no team took), two partially unfulfilled ones (R-2386 and R-2383), one cancelled group request (R-2394), the cross-team samples listed under the request records, and two private requests: one running and one partially failed.
+- **Reset conversations and requests.** This clears mock conversations, ends the Jack deletion and restores the twenty-four sample requests. These include five partially failed group requests (R-2391; R-2392, with an Assignment that did not start; the cross-team R-2393 and R-2389; and R-2387, which also has a part no team took), two partially unfulfilled ones (R-2386 and R-2383), one cancelled group request (R-2394), the cross-team samples listed under the request records, and the eight private requests listed under Private requests.
 - **Fixed responses.**
   - Chat replies, divisions into assignments, profile choices, completion, retry and cancellation results are fixed demonstrations.
   - Sam's leader selection demonstrates the coordination handoff.

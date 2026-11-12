@@ -16,8 +16,11 @@ Servers, commands, URLs, credentials, states, tools and program output are synth
 ## Structure basis
 
 - **Console shell.** The console borrows the owner's agent-link web console UI, through the shared `agent-console-shell.js` and `agent-console` visual block:
-  - a 212px left sidebar with the identity, the page navigation (团队总览, 团队管理, MCP 管理, Skill 管理, with the current page selected), and the owner's private entries in three sections (私人任务, Penny · 本人私聊, 普通私聊), each section titled with an info tip;
-  - on the team overview the private entries switch the tree to private requests or open their drawer; on other pages they lead to the team overview;
+  - a 212px left sidebar with the identity, the page navigation (团队总览, 团队管理, MCP 管理, Skill 管理, with the current page selected), and one 私人 section whose info tip reads 「只有你能看到。Penny 的账务与个人助手、私人任务分开保存。」. It holds three fixed rows:
+    - 私人任务, with the meta 「<n> 进行中 · <m> 待处理」: n counts running or waiting private requests, m those 部分失败 or 失败 and not retried. A zero part is left out; with neither, the meta reads 「暂无进行中」.
+    - Penny, with a status dot and 「个人账 / 经营账 · 就绪」.
+    - 个人助手, with 「普通问答 · 文件 · 提醒」.
+  - on the team overview each private row opens its drawer in place; on other pages it leads to the team overview. Below 900px, choosing a row also closes the sidebar;
   - below 900px, a menu bar opens the sidebar;
   - a page title with an info tip that holds the page description;
   - agent-link's colors and chips;
