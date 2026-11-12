@@ -219,6 +219,61 @@ it("keeps a request cancelled while its Team Leader planned it cancelled after a
   hung.reject(new Error("abandoned")); await first.close();
 });
 
+// A graceful stop while a cancel closes the request's choices: the cancel is recorded and its report, which the stopping service
+// does not send, goes out once at the next start; the cancel message is not classified again (agent-dispatch::REQ-008/AC-03).
+it.each([
+  ["waits on a choice", "alice", "waiting"],
+  ["is proposed", "propose:alice", "proposed"],
+] as const)("posts the report of a cancel at the next start when the service stops while the cancel closes the choices of a request that %s", async (_case, text, status) => {
+  const state = directory();
+  let stopped: Promise<void> | undefined;
+  const before: Array<{ sender: string; message: string; id: string }> = [];
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), { run: async () => ({ status: "waiting", message: "请选择要发送的文件。", runRef: "run-1" }), close: () => {} }, before,
+    { closeChoices: async () => { stopped ??= first.close(); } });
+  await first.start();
+  first.admit(event("one", text));
+  await vi.waitFor(() => expect(first.getState().jobs[0]?.status).toBe(status), { timeout: 2000, interval: 10 });
+  const posted = posts(before);
+  first.admit(event("two", "cancel:one"));
+  await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
+  await stopped;
+  expect(posts(before)).toEqual(posted);
+
+  const after: Array<{ sender: string; message: string; id: string }> = [];
+  const second = dispatchWith(state, closingLeader(), { run: async () => { throw new Error("no Executor runs after the cancel"); }, close: () => {} }, after);
+  await second.start();
+  await vi.waitFor(() => expect(posts(after)).toEqual(["cli_alice: 已停止继续处理。已经完成的操作不会自动撤销。"]), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(posts(after)).toEqual(["cli_alice: 已停止继续处理。已经完成的操作不会自动撤销。"]);
+  expect(second.getState().jobs.map(({ status: current }) => current)).toEqual(["cancelled"]);
+  expect(classified).toEqual([text === "alice" ? "dispatch" : "propose", "cancel"]);
+});
+
+// A message that the pending-choice handling took is not taken in again at the next start, also when its handling then fails while
+// the service stops: the host already acted on it, and a second pass would take the answer to the Coordinator as a new message.
+it("does not take in again an answer that the pending-choice handling took when the service stops as its handling fails", async () => {
+  const state = directory();
+  let stopped: Promise<void> | undefined;
+  const asked: string[] = [];
+  const executor: DispatchExecutor = { run: async () => { throw new Error("no Executor runs for an answer"); }, close: () => {} };
+  // The answer's sender is an application no agent has any more, so its handling fails once the host has taken it.
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), executor, [], { pending: async (inbound) => {
+    asked.push(inbound.key); stopped ??= first.close();
+    return { handled: true, senderAccountId: "cli_removed", runRef: "run-1", result: { status: "completed", message: "已发送所选文件。" } };
+  } });
+  await first.start();
+  first.admit(event("one", "choose:1"));
+  await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
+  await stopped;
+
+  const after: Array<{ sender: string; message: string; id: string }> = [];
+  const second = dispatchWith(state, closingLeader(), executor, after, { pending: async (inbound) => { asked.push(inbound.key); return { handled: false }; } });
+  await second.start();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect({ asked, classified, posts: posts(after) }).toEqual({ asked: ["one"], classified: [], posts: [] });
+  expect(second.getState().jobs).toEqual([]);
+});
+
 it("gives a request no new Assignment after a restart once its team no longer accepts work in the group", async () => {
   const state = directory();
   const hung = deferred<never>();
@@ -2869,6 +2924,30 @@ it.each([
   expect(posts(deliveries)).toEqual(expected);
   expect(dispatch.getState().jobs).toEqual([]);
   expect(runs).toEqual([]);
+});
+
+// The same, with the service asked to stop while the reassignment notice is posted: the Coordinator's question, which the stopping
+// service does not send, goes out once at the next start, and the message is not classified again.
+it("asks at the next start what is wanted when the team stops accepting work while the reassignment notice is posted and the service stops meanwhile", async () => {
+  const state = directory(), roster = [...accepting];
+  let stopped: Promise<void> | undefined;
+  const before: Array<{ sender: string; message: string; id: string }> = [];
+  const first: AgentDispatch = dispatchWith(state, closingLeader(), { run: async () => { throw new Error("no Executor runs for a team that left"); }, close: () => {} }, before,
+    { roster, delivered: (message) => { if (message === REASSIGNED) { leaves(roster, "bill"); stopped = first.close(); } } });
+  await first.start();
+  first.admit(event("one", "bill", { mentionedAgentIds: ["alice"] }));
+  await vi.waitFor(() => expect(stopped).toBeDefined(), { timeout: 2000, interval: 10 });
+  await stopped;
+  expect(posts(before)).toEqual([`cli_alice: ${EXPLAINED}`, `cli_sam: ${REASSIGNED}`]);
+
+  const after: Array<{ sender: string; message: string; id: string }> = [];
+  const second = dispatchWith(state, closingLeader(), { run: async () => { throw new Error("no Executor runs for a team that left"); }, close: () => {} }, after, { roster });
+  await second.start();
+  await vi.waitFor(() => expect(posts(after)).toEqual([UNDETERMINED]), { timeout: 2000, interval: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(posts(after)).toEqual([UNDETERMINED]);
+  expect(second.getState().jobs).toEqual([]);
+  expect(classified).toEqual(["dispatch"]);
 });
 
 it("posts a cross-team Assignment's pending choice under its own Team Leader, who closes its part once the choice is resolved", async () => {

@@ -492,8 +492,12 @@ export class AgentDispatch {
         requests: this.jobs().filter((job) => job.event.target === event.target && job.event.senderId === event.senderId)
           .slice(-20).map(({ id, agentId, summary, status }) => ({ id, agentId, summary, status })),
         memory: this.options.memory.recall(this.options.memoryScope, event, event.text) };
+      // Whether the pending-choice handling took the message. Unless it did, a stop that ends the message's handling with an error
+      // leaves the message as a crash does: the next start finds it still in classification and takes it in again.
+      let taken = false;
       try {
         const pending = await this.options.pending?.(event, (runRef) => this.heldRequest(runRef, event) !== undefined);
+        taken = pending?.handled === true;
         if (pending && !pending.handled && pending.cancelledRunRef && !this.heldRequest(pending.cancelledRunRef, event)) {
           // The requester's new goal replaced an open choice, and the message itself goes on to the Coordinator. A request stored
           // before Assignments existed waits on its own run, and is cancelled with it. For any other, only the Assignment that
@@ -561,7 +565,9 @@ export class AgentDispatch {
           input = { ...input, ...offer() };
           decision = parseDispatchDecision(await this.options.classifier.classify(input), input);
         }
-        if (!this.eligible(event, bindingHash) || this.closing) { this.finishInput(event.key); continue; }
+        // A stop during the classification leaves the message, with nothing recorded for it, to be classified again.
+        if (this.closing) return;
+        if (!this.eligible(event, bindingHash)) { this.finishInput(event.key); continue; }
         if (decision.kind === "dispatch" || decision.kind === "propose") {
           const agent = agents.find((candidate) => candidate.id === decision.agentId)!;
           const named = agents.find(({ id }) => id === mentioned?.[0]);
@@ -570,6 +576,9 @@ export class AgentDispatch {
             const explanation = decision.message || `这项需求属于 ${agent.name} 的职责。我请 ${coordinator.name} 重新分派，由他独立处理。`;
             // The request's ID is its message key, so these posts belong to the request saved below.
             const informed = await this.deliverNotice(`${event.key}:scope`, { event, bindingHash, agentId: named.id, senderAccountId: named.senderAccountId, text: explanation, requestId: event.key });
+            // A stop during the explanation leaves the message to be classified again; the explanation keeps its outcome and is
+            // not posted again (agent-dispatch::REQ-008/AC-03).
+            if (this.closing) return;
             if (!informed.ok) { this.finishInput(event.key); continue; }
             // The explanation took time. A team that stopped accepting work in the group meanwhile takes no request: the
             // Coordinator announces no reassignment and asks what is wanted instead.
@@ -580,7 +589,7 @@ export class AgentDispatch {
             // So did that notice, the Coordinator's one reply to this message: for a team that left during it, the
             // Coordinator asks in a post of its own.
             if (left()) {
-              await this.deliverNotice(`${event.key}:scope:unavailable`, { event, bindingHash, agentId: coordinator.id, senderAccountId: coordinator.senderAccountId, text: UNDETERMINED });
+              await this.postUnlessStopping(`${event.key}:scope:unavailable`, { event, bindingHash, agentId: coordinator.id, senderAccountId: coordinator.senderAccountId, text: UNDETERMINED });
               this.finishInput(event.key); continue;
             }
           }
@@ -615,14 +624,15 @@ export class AgentDispatch {
               await this.closeChoices(job);
             } else {
               // A waiting request has no worker and nothing starts one, so nothing else changes it while its choice is closed. The choice
-              // is closed before the cancel is recorded: a stop between the two leaves a request that takes the cancel again, not a
+              // is closed before the cancel is recorded: a crash between the two leaves a request that takes the cancel again, not a
               // cancelled one whose choice is open. Any other request here can be started at any moment, so its cancel is recorded first.
               const waiting = job.status === "waiting";
               if (waiting) await this.closeChoices(job);
               this.cancel(job);
               const report = this.recordResult(job, `${event.key}:cancelled`);
               if (!waiting) await this.closeChoices(job);
-              await this.deliverNotice(report.id, report.notice);
+              // A stop while the choices were closed leaves the recorded cancel's report queued for the next start.
+              if (!this.closing) await this.deliverNotice(report.id, report.notice);
             }
           } else {
             if ((job.supplements?.length ?? 0) >= 20) await this.coordinate(event, bindingHash, "这项请求已有多条补充待处理，请等当前处理结束后再补充。");
@@ -634,7 +644,7 @@ export class AgentDispatch {
             } else {
               // A request waiting for a choice: the supplement supersedes the waiting Assignments and its Team Leader decides what it affects.
               // Their choices are closed first, so that no answer to one resumes work the supplement replaced; like a waiting request's
-              // cancel, nothing else changes the request meanwhile, and a stop in between leaves the supplement to be taken in again.
+              // cancel, nothing else changes the request meanwhile, and a crash in between leaves the supplement to be taken in again.
               await this.closeChoices(job);
               this.transaction(() => {
                 // The superseded runs stay with the request: a choice that could not be closed is still open, and its Assignment
@@ -685,6 +695,8 @@ export class AgentDispatch {
           await this.coordinate(event, bindingHash, decision.message || "你指的是哪件事，希望得到什么结果？确认后我会交给合适的 Agent。");
         }
       } catch {
+        // A turn that the stop ended, by closing its runtime, leaves the message to be classified again.
+        if (this.closing && !taken) return;
         if (!this.closing && this.eligible(event, bindingHash)) await this.coordinate(event, bindingHash, UNDETERMINED);
       }
       this.finishInput(event.key);
@@ -1444,6 +1456,11 @@ export class AgentDispatch {
       await this.options.memory.capture(this.options.memoryScope, { event, senderAccountId: job.senderAccountId,
         userId: `${job.id}:user:${attempt}`, userText: text, assistantId: `${job.id}:assistant:${attempt}`, assistantText: posts.join("\n") });
     } catch { this.failure("dispatch_group_memory_failed"); }
+  }
+  /** Delivers a post of the intake, or, once the service is stopping, stores it for the next start to deliver. */
+  private async postUnlessStopping(id: string, notice: Notice): Promise<void> {
+    if (this.closing) this.queueNotice(id, notice);
+    else await this.deliverNotice(id, notice);
   }
   private async deliverNotice(id: string, notice: Notice): Promise<SendTextResult> {
     this.queueNotice(id, notice);

@@ -20,6 +20,7 @@ export type State = { agentDispatch?: { jobs: Array<{ id: string; agentId: strin
     assignments?: Array<{ title: string; executor: string; status: string; result: string }> } }>;
   fixtureCoordinationRequests?: Array<{ threadId: string; input: unknown }>;
   fixturePrivateTurns?: Array<{ agentId: string; input: unknown }>;
+  fixtureClassifications?: Array<{ messageId: string; status: "held" | "answered" | "failed" }>;
   fixtureDispatchTurns?: DispatchTurnRecord[];
   fixtureMemoryCurations?: Array<{ curator: "group" | "dispatch"; accountId: string; turns: Array<{ user: string; assistant?: string }> }>;
   fixtureThreadStarts?: Array<{ threadId: string; serviceName: unknown; dynamicTools: string[] | null }>; fixtureToolResults?: Array<{ threadId: string; namespace: unknown; tool: unknown; success: boolean; result: unknown }>; agentFixtureOutboxes?: Record<string, { text: Array<{ chatId: string; message: string }>; media: unknown[] }>;  fixtureModelRequests?: Array<{ threadId: string; input: unknown; skills?: Array<{ folder: string; files: string[]; skillMd: string }> }>; fixtureOutbox?: { kind: string; fileName: string }[]; feishuFixtureMediaOutbox?: { chatId: string; kind: string; bytesBase64: string }[]; weixinFixtureReplies?: { accountId: string; target: string; message: string }[]; channels?: Record<string, { enabled: boolean; ready: boolean }>; feishuFixtureTextOutbox?: { message: string }[]; channel?: string; ready?: boolean; accounts: { accountId: string }[]; codex: PublicCodexServiceState;
